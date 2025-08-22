@@ -460,7 +460,7 @@ To contribute to this package:
 If you use this pipeline in your research, please cite:
 
 ```
-[Your citation information here]
+Nathan Scott Kieswetter
 ```
 
 ## License
@@ -471,7 +471,7 @@ If you use this pipeline in your research, please cite:
 
 For questions, issues, or feature requests:
 - Open an issue on GitHub
-- Contact: [your contact information]
+- Contact: natescottkieswetter@gmail.com
 
 ---
 
