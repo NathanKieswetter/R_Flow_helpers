@@ -29,6 +29,494 @@ setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("$WELLID", "
 }
 
 # ============================================================================
+# INTERACTIVE KEYWORD SELECTION FOR FLOWJO WORKSPACE SETUP
+# ============================================================================
+
+# Function to extract and preview keywords from FCS files
+preview_fcs_keywords <- function(fcs_path, sample_limit = 5) {
+  cat("Scanning FCS files for available keywords...\n")
+  
+  # Get list of FCS files
+  fcs_files <- list.files(fcs_path, pattern = "\\.fcs$", full.names = TRUE, ignore.case = TRUE)
+  
+  if(length(fcs_files) == 0) {
+    stop("No FCS files found in the specified path: ", fcs_path)
+  }
+  
+  cat("Found", length(fcs_files), "FCS files\n")
+  
+  # Limit number of files to sample for keyword extraction (for performance)
+  files_to_check <- if(length(fcs_files) > sample_limit) {
+    sample(fcs_files, sample_limit)
+  } else {
+    fcs_files
+  }
+  
+  cat("Sampling", length(files_to_check), "files for keyword analysis...\n")
+  
+  # Extract keywords from sampled files
+  all_keywords <- list()
+  
+  for(i in seq_along(files_to_check)) {
+    file_path <- files_to_check[i]
+    file_name <- basename(file_path)
+    
+    cat("Reading keywords from:", file_name, "\n")
+    
+    tryCatch({
+      # Read FCS file
+      fcs_data <- flowCore::read.FCS(file_path, transformation = FALSE)
+      
+      # Extract keywords
+      keywords <- flowCore::keyword(fcs_data)
+      
+      # Store keywords with file info
+      all_keywords[[file_name]] <- keywords
+      
+    }, error = function(e) {
+      cat("  Warning: Could not read", file_name, ":", e$message, "\n")
+    })
+  }
+  
+  if(length(all_keywords) == 0) {
+    stop("Could not extract keywords from any FCS files")
+  }
+  
+  # Find common keywords across files
+  keyword_names <- unique(unlist(lapply(all_keywords, names)))
+  
+  # Create summary of keywords with examples
+  keyword_summary <- map_dfr(keyword_names, function(kw) {
+    # Get values for this keyword across files
+    values <- map_chr(all_keywords, function(file_keywords) {
+      if(kw %in% names(file_keywords)) {
+        val <- file_keywords[[kw]]
+        if(is.null(val) || is.na(val) || val == "") {
+          return("(empty)")
+        } else {
+          return(as.character(val))
+        }
+      } else {
+        return("(missing)")
+      }
+    })
+    
+    # Calculate presence statistics
+    non_empty_values <- values[values != "(empty)" & values != "(missing)"]
+    unique_values <- unique(non_empty_values)
+    
+    tibble(
+      keyword = kw,
+      present_in_files = sum(values != "(missing)"),
+      total_files = length(values),
+      non_empty_values = length(non_empty_values),
+      unique_values = length(unique_values),
+      example_values = paste(head(unique_values, 3), collapse = ", "),
+      all_values = list(values)
+    )
+  }) %>%
+    arrange(desc(present_in_files), desc(non_empty_values), keyword)
+  
+  return(list(
+    keyword_summary = keyword_summary,
+    file_keywords = all_keywords,
+    files_sampled = files_to_check
+  ))
+}
+
+# Function to display keyword information in a user-friendly way
+display_keyword_info <- function(keyword_data, show_all = FALSE) {
+  
+  summary_df <- keyword_data$keyword_summary
+  
+  if(nrow(summary_df) == 0) {
+    cat("No keywords found in FCS files\n")
+    return()
+  }
+  
+  cat("\n", paste(rep("=", 80), collapse = ""), "\n")
+  cat("KEYWORD ANALYSIS SUMMARY\n")
+  cat(paste(rep("=", 80), collapse = ""), "\n")
+  cat("Files analyzed:", length(keyword_data$files_sampled), "\n")
+  cat("Total unique keywords found:", nrow(summary_df), "\n\n")
+  
+  # Categorize keywords for better display
+  complete_keywords <- summary_df %>% 
+    filter(present_in_files == total_files, non_empty_values == total_files)
+  
+  mostly_complete <- summary_df %>% 
+    filter(present_in_files == total_files, non_empty_values < total_files)
+  
+  partial_keywords <- summary_df %>% 
+    filter(present_in_files < total_files, present_in_files > 0)
+  
+  # Display categories
+  if(nrow(complete_keywords) > 0) {
+    cat("COMPLETE KEYWORDS (present and non-empty in all files):\n")
+    cat("These are the most reliable keywords for analysis\n\n")
+    
+    display_df <- complete_keywords %>%
+      select(keyword, unique_values, example_values) %>%
+      slice_head(n = if(show_all) nrow(complete_keywords) else 15)
+    
+    for(i in 1:nrow(display_df)) {
+      row <- display_df[i, ]
+      cat(sprintf("%-25s | %2d unique values | Examples: %s\n", 
+                  row$keyword, row$unique_values, row$example_values))
+    }
+    
+    if(!show_all && nrow(complete_keywords) > 15) {
+      cat(sprintf("... and %d more complete keywords\n", nrow(complete_keywords) - 15))
+    }
+    cat("\n")
+  }
+  
+  if(nrow(mostly_complete) > 0) {
+    cat("MOSTLY COMPLETE KEYWORDS (present in all files, some empty values):\n")
+    
+    display_df <- mostly_complete %>%
+      select(keyword, non_empty_values, total_files, example_values) %>%
+      slice_head(n = if(show_all) nrow(mostly_complete) else 10)
+    
+    for(i in 1:nrow(display_df)) {
+      row <- display_df[i, ]
+      cat(sprintf("%-25s | %2d/%2d non-empty | Examples: %s\n", 
+                  row$keyword, row$non_empty_values, row$total_files, row$example_values))
+    }
+    
+    if(!show_all && nrow(mostly_complete) > 10) {
+      cat(sprintf("... and %d more mostly complete keywords\n", nrow(mostly_complete) - 10))
+    }
+    cat("\n")
+  }
+  
+  if(nrow(partial_keywords) > 0) {
+    cat("PARTIAL KEYWORDS (missing from some files):\n")
+    cat("Use with caution - may cause issues in analysis\n\n")
+    
+    display_df <- partial_keywords %>%
+      select(keyword, present_in_files, total_files, example_values) %>%
+      slice_head(n = if(show_all) nrow(partial_keywords) else 5)
+    
+    for(i in 1:nrow(display_df)) {
+      row <- display_df[i, ]
+      cat(sprintf("%-25s | %2d/%2d files | Examples: %s\n", 
+                  row$keyword, row$present_in_files, row$total_files, row$example_values))
+    }
+    
+    if(!show_all && nrow(partial_keywords) > 5) {
+      cat(sprintf("... and %d more partial keywords\n", nrow(partial_keywords) - 5))
+    }
+    cat("\n")
+  }
+}
+
+# Function to show detailed examples for a specific keyword
+show_keyword_examples <- function(keyword_data, keyword_name) {
+  
+  if(!keyword_name %in% keyword_data$keyword_summary$keyword) {
+    cat("Keyword", keyword_name, "not found\n")
+    return()
+  }
+  
+  keyword_info <- keyword_data$keyword_summary %>% 
+    filter(keyword == keyword_name)
+  
+  values <- keyword_info$all_values[[1]]
+  file_names <- names(keyword_data$file_keywords)
+  
+  cat("\n", paste(rep("-", 60), collapse = ""), "\n")
+  cat("DETAILED EXAMPLES FOR:", keyword_name, "\n")
+  cat(paste(rep("-", 60), collapse = ""), "\n")
+  
+  cat("Present in", keyword_info$present_in_files, "out of", keyword_info$total_files, "files\n")
+  cat("Non-empty values:", keyword_info$non_empty_values, "\n")
+  cat("Unique values:", keyword_info$unique_values, "\n\n")
+  
+  cat("Examples from each file:\n")
+  for(i in seq_along(values)) {
+    cat(sprintf("%-30s: %s\n", str_trunc(file_names[i], 28), values[i]))
+  }
+  cat("\n")
+}
+
+# Main interactive keyword selection function
+select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
+  
+  cat("=== Interactive Keyword Selection for FlowJo Workspace ===\n")
+  cat("This will help you choose the best keywords for your analysis\n\n")
+  
+  # Extract keyword information
+  cat("Step 1: Analyzing FCS files for available keywords...\n")
+  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
+  
+  selected_keywords <- character(0)
+  
+  while(TRUE) {
+    cat("\n", paste(rep("=", 60), collapse = ""), "\n")
+    cat("KEYWORD SELECTION MENU\n")
+    cat(paste(rep("=", 60), collapse = ""), "\n")
+    
+    if(length(selected_keywords) > 0) {
+      cat("Currently selected keywords:", paste(selected_keywords, collapse = ", "), "\n\n")
+    } else {
+      cat("No keywords selected yet\n\n")
+    }
+    
+    cat("Options:\n")
+    cat("1. Show keyword overview\n")
+    cat("2. Show all keywords (detailed)\n")
+    cat("3. Select keywords from complete list\n")
+    cat("4. Select from recommended keywords\n")
+    cat("5. Search keywords by pattern\n")
+    cat("6. View detailed examples for a keyword\n")
+    cat("7. Remove selected keywords\n")
+    cat("8. Finish selection\n")
+    
+    choice <- readline("Choose option (1-8): ")
+    
+    if(choice == "1") {
+      # Show overview
+      display_keyword_info(keyword_data, show_all = FALSE)
+      readline("Press Enter to continue...")
+      
+    } else if(choice == "2") {
+      # Show all keywords
+      display_keyword_info(keyword_data, show_all = TRUE)
+      readline("Press Enter to continue...")
+      
+    } else if(choice == "3") {
+      # Select from all keywords
+      all_keywords <- keyword_data$keyword_summary$keyword
+      cat("\nAll available keywords:\n")
+      iwalk(all_keywords, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      cat("\nEnter keyword numbers (space or comma-separated): ")
+      selection <- readline()
+      
+      if(selection != "") {
+        # Parse selection
+        tryCatch({
+          if(grepl("\\s", selection)) {
+            selected_indices <- as.numeric(str_trim(str_split(selection, "\\s+")[[1]]))
+          } else {
+            selected_indices <- as.numeric(str_trim(str_split(selection, ",")[[1]]))
+          }
+          
+          selected_indices <- selected_indices[!is.na(selected_indices)]
+          valid_indices <- selected_indices[selected_indices >= 1 & selected_indices <= length(all_keywords)]
+          
+          if(length(valid_indices) > 0) {
+            new_keywords <- all_keywords[valid_indices]
+            selected_keywords <- unique(c(selected_keywords, new_keywords))
+            cat("Added keywords:", paste(new_keywords, collapse = ", "), "\n")
+          } else {
+            cat("No valid selections made\n")
+          }
+        }, error = function(e) {
+          cat("Invalid input format\n")
+        })
+      }
+      
+    } else if(choice == "4") {
+      # Recommended keywords
+      recommended <- keyword_data$keyword_summary %>%
+        filter(present_in_files == total_files, non_empty_values == total_files) %>%
+        head(20) %>%
+        pull(keyword)
+      
+      if(length(recommended) == 0) {
+        cat("No fully complete keywords found. Showing best available:\n")
+        recommended <- keyword_data$keyword_summary %>%
+          arrange(desc(present_in_files), desc(non_empty_values)) %>%
+          head(15) %>%
+          pull(keyword)
+      }
+      
+      cat("\nRecommended keywords (complete across all files):\n")
+      iwalk(recommended, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      cat("\nEnter keyword numbers (space or comma-separated): ")
+      selection <- readline()
+      
+      if(selection != "") {
+        # Parse selection (same logic as above)
+        tryCatch({
+          if(grepl("\\s", selection)) {
+            selected_indices <- as.numeric(str_trim(str_split(selection, "\\s+")[[1]]))
+          } else {
+            selected_indices <- as.numeric(str_trim(str_split(selection, ",")[[1]]))
+          }
+          
+          selected_indices <- selected_indices[!is.na(selected_indices)]
+          valid_indices <- selected_indices[selected_indices >= 1 & selected_indices <= length(recommended)]
+          
+          if(length(valid_indices) > 0) {
+            new_keywords <- recommended[valid_indices]
+            selected_keywords <- unique(c(selected_keywords, new_keywords))
+            cat("Added keywords:", paste(new_keywords, collapse = ", "), "\n")
+          } else {
+            cat("No valid selections made\n")
+          }
+        }, error = function(e) {
+          cat("Invalid input format\n")
+        })
+      }
+      
+    } else if(choice == "5") {
+      # Search by pattern
+      pattern <- readline("Enter search pattern (case-insensitive): ")
+      if(pattern != "") {
+        matches <- grep(pattern, keyword_data$keyword_summary$keyword, 
+                        ignore.case = TRUE, value = TRUE)
+        
+        if(length(matches) > 0) {
+          cat("Matching keywords:\n")
+          iwalk(matches, ~cat(sprintf("%d. %s\n", .y, .x)))
+          
+          cat("\nEnter keyword numbers to add (space or comma-separated): ")
+          selection <- readline()
+          
+          if(selection != "") {
+            # Parse selection (same logic as above)
+            tryCatch({
+              if(grepl("\\s", selection)) {
+                selected_indices <- as.numeric(str_trim(str_split(selection, "\\s+")[[1]]))
+              } else {
+                selected_indices <- as.numeric(str_trim(str_split(selection, ",")[[1]]))
+              }
+              
+              selected_indices <- selected_indices[!is.na(selected_indices)]
+              valid_indices <- selected_indices[selected_indices >= 1 & selected_indices <= length(matches)]
+              
+              if(length(valid_indices) > 0) {
+                new_keywords <- matches[valid_indices]
+                selected_keywords <- unique(c(selected_keywords, new_keywords))
+                cat("Added keywords:", paste(new_keywords, collapse = ", "), "\n")
+              } else {
+                cat("No valid selections made\n")
+              }
+            }, error = function(e) {
+              cat("Invalid input format\n")
+            })
+          }
+        } else {
+          cat("No keywords match pattern:", pattern, "\n")
+        }
+      }
+      
+    } else if(choice == "6") {
+      # View detailed examples
+      keyword_name <- readline("Enter keyword name: ")
+      if(keyword_name != "") {
+        show_keyword_examples(keyword_data, keyword_name)
+        readline("Press Enter to continue...")
+      }
+      
+    } else if(choice == "7") {
+      # Remove keywords
+      if(length(selected_keywords) == 0) {
+        cat("No keywords selected to remove\n")
+      } else {
+        cat("Currently selected keywords:\n")
+        iwalk(selected_keywords, ~cat(sprintf("%d. %s\n", .y, .x)))
+        
+        cat("\nEnter numbers to remove (space or comma-separated): ")
+        selection <- readline()
+        
+        if(selection != "") {
+          tryCatch({
+            if(grepl("\\s", selection)) {
+              remove_indices <- as.numeric(str_trim(str_split(selection, "\\s+")[[1]]))
+            } else {
+              remove_indices <- as.numeric(str_trim(str_split(selection, ",")[[1]]))
+            }
+            
+            remove_indices <- remove_indices[!is.na(remove_indices)]
+            valid_indices <- remove_indices[remove_indices >= 1 & remove_indices <= length(selected_keywords)]
+            
+            if(length(valid_indices) > 0) {
+              removed_keywords <- selected_keywords[valid_indices]
+              selected_keywords <- selected_keywords[-valid_indices]
+              cat("Removed keywords:", paste(removed_keywords, collapse = ", "), "\n")
+            } else {
+              cat("No valid selections made\n")
+            }
+          }, error = function(e) {
+            cat("Invalid input format\n")
+          })
+        }
+      }
+      
+    } else if(choice == "8") {
+      # Finish selection
+      break
+      
+    } else {
+      cat("Invalid choice. Please select 1-8.\n")
+    }
+  }
+  
+  # Final summary
+  cat("\n", paste(rep("=", 60), collapse = ""), "\n")
+  cat("FINAL KEYWORD SELECTION\n")
+  cat(paste(rep("=", 60), collapse = ""), "\n")
+  
+  if(length(selected_keywords) == 0) {
+    cat("No keywords selected. Using default keywords: $WELLID, GROUPNAME\n")
+    selected_keywords <- c("$WELLID", "GROUPNAME")
+  } else {
+    cat("Selected", length(selected_keywords), "keywords:\n")
+    iwalk(selected_keywords, ~cat(sprintf("  %d. %s\n", .y, .x)))
+  }
+  
+  return(selected_keywords)
+}
+
+# Enhanced setup function with interactive keyword selection
+setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
+  
+  cat("=== Enhanced FlowJo Workspace Setup ===\n")
+  
+  # Interactive keyword selection if not provided
+  if(is.null(keywords)) {
+    cat("No keywords specified. Starting interactive keyword selection...\n")
+    keywords <- select_keywords_interactive(fcs_path, sample_limit)
+  } else {
+    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  }
+  
+  cat("\nSetting up FlowJo workspace...\n")
+  
+  # Setup workspace with selected keywords
+  ws <- open_flowjo_xml(xml_path)
+  gs <- flowjo_to_gatingset(
+    ws, 
+    keywords = keywords,
+    keywords.source = "FCS", 
+    path = fcs_path, 
+    extend_val = -10000
+  )
+  
+  cat("Workspace setup complete!\n")
+  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
+  cat("Samples loaded:", length(sampleNames(gs)), "\n")
+  
+  return(gs)
+}
+
+# Convenience function for just previewing keywords without selection
+preview_keywords_only <- function(fcs_path, sample_limit = 5) {
+  cat("=== FCS Keyword Preview ===\n")
+  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
+  display_keyword_info(keyword_data, show_all = FALSE)
+  
+  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
+  
+  return(keyword_data)
+}
+
+# ============================================================================
 # NODE SELECTION AND RESOLUTION
 # ============================================================================
 
