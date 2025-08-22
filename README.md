@@ -1,4 +1,4 @@
-# FlowCyt Analysis Pipeline
+# Flow Cytometry Analysis Pipeline (Semi-specific to Aurora for now)
 
 A comprehensive R package for interactive flow cytometry data analysis with FlowJo workspace integration, featuring automated population analysis, statistical testing, visualization, and UMAP dimensionality reduction.
 
