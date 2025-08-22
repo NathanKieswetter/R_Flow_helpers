@@ -59,6 +59,439 @@ save_gatingset <- function(gs, filename = "gatingset.rds") {
   return(invisible(full_path))
 }
 
+# ==============================================================================
+# GATINGSET LOADING AND MANAGEMENT FUNCTIONS
+# ==============================================================================
+
+# Function to load a previously saved GatingSet
+load_gatingset <- function(filename = NULL) {
+  gatingset_dir <- here("out", "GatingSet")
+  
+  # Check if GatingSet directory exists
+  if (!dir.exists(gatingset_dir)) {
+    cat("GatingSet directory does not exist:", gatingset_dir, "\n")
+    cat("No saved GatingSets found.\n")
+    return(NULL)
+  }
+  
+  # Get list of available GatingSet files
+  available_files <- list.files(gatingset_dir, pattern = "\\.rds$", full.names = FALSE)
+  
+  if (length(available_files) == 0) {
+    cat("No GatingSet files found in:", gatingset_dir, "\n")
+    return(NULL)
+  }
+  
+  # If no filename specified, show interactive menu
+  if (is.null(filename)) {
+    cat("\n=== Load GatingSet ===\n")
+    cat("Available GatingSet files:\n")
+    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    choice <- readline("Enter file number or filename: ")
+    
+    # Handle numeric choice
+    if (grepl("^\\d+$", choice)) {
+      choice_num <- as.numeric(choice)
+      if (!is.na(choice_num) && choice_num >= 1 && choice_num <= length(available_files)) {
+        filename <- available_files[choice_num]
+      } else {
+        cat("Invalid selection\n")
+        return(NULL)
+      }
+    } else if (choice %in% available_files) {
+      # Handle direct filename
+      filename <- choice
+    } else if (paste0(choice, ".rds") %in% available_files) {
+      # Handle filename without extension
+      filename <- paste0(choice, ".rds")
+    } else {
+      cat("File not found:", choice, "\n")
+      return(NULL)
+    }
+  } else {
+    # Add .rds extension if not present
+    if (!str_detect(filename, "\\.rds$")) {
+      filename <- paste0(filename, ".rds")
+    }
+    
+    # Check if file exists
+    if (!filename %in% available_files) {
+      cat("File not found:", filename, "\n")
+      cat("Available files:", paste(available_files, collapse = ", "), "\n")
+      return(NULL)
+    }
+  }
+  
+  # Load the GatingSet
+  full_path <- file.path(gatingset_dir, filename)
+  
+  tryCatch({
+    cat("Loading GatingSet from:", full_path, "\n")
+    gs <- readRDS(full_path)
+    
+    # Validate that it's a GatingSet
+    if (!inherits(gs, "GatingSet")) {
+      stop("Loaded object is not a GatingSet")
+    }
+    
+    # Display basic info
+    cat("GatingSet loaded successfully!\n")
+    cat("Samples:", length(sampleNames(gs)), "\n")
+    cat("Sample names:", paste(head(sampleNames(gs), 3), collapse = ", "))
+    if (length(sampleNames(gs)) > 3) cat("...")
+    cat("\n")
+    
+    return(gs)
+    
+  }, error = function(e) {
+    cat("Error loading GatingSet:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Function to list all available GatingSets
+list_available_gatingsets <- function() {
+  gatingset_dir <- here("out", "GatingSet")
+  
+  if (!dir.exists(gatingset_dir)) {
+    cat("GatingSet directory does not exist:", gatingset_dir, "\n")
+    return(character(0))
+  }
+  
+  available_files <- list.files(gatingset_dir, pattern = "\\.rds$", full.names = FALSE)
+  
+  if (length(available_files) == 0) {
+    cat("No GatingSet files found in:", gatingset_dir, "\n")
+    return(character(0))
+  }
+  
+  cat("Available GatingSet files:\n")
+  file_info <- map_dfr(available_files, function(file) {
+    full_path <- file.path(gatingset_dir, file)
+    file_stats <- file.info(full_path)
+    
+    tibble(
+      filename = file,
+      size = paste(round(file_stats$size / 1024^2, 2), "MB"),
+      modified = format(file_stats$mtime, "%Y-%m-%d %H:%M")
+    )
+  })
+  
+  print(file_info)
+  return(available_files)
+}
+
+# Function to load analysis results
+load_analysis_results <- function(filename = NULL) {
+  data_dir <- here("out", "data")
+  
+  # Check if data directory exists
+  if (!dir.exists(data_dir)) {
+    cat("Data directory does not exist:", data_dir, "\n")
+    return(NULL)
+  }
+  
+  # Get list of available result files
+  available_files <- list.files(data_dir, pattern = "\\.rds$", full.names = FALSE)
+  
+  if (length(available_files) == 0) {
+    cat("No analysis result files found in:", data_dir, "\n")
+    return(NULL)
+  }
+  
+  # If no filename specified, show interactive menu
+  if (is.null(filename)) {
+    cat("\n=== Load Analysis Results ===\n")
+    cat("Available analysis result files:\n")
+    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    choice <- readline("Enter file number or filename: ")
+    
+    # Handle numeric choice
+    if (grepl("^\\d+$", choice)) {
+      choice_num <- as.numeric(choice)
+      if (!is.na(choice_num) && choice_num >= 1 && choice_num <= length(available_files)) {
+        filename <- available_files[choice_num]
+      } else {
+        cat("Invalid selection\n")
+        return(NULL)
+      }
+    } else if (choice %in% available_files) {
+      filename <- choice
+    } else if (paste0(choice, ".rds") %in% available_files) {
+      filename <- paste0(choice, ".rds")
+    } else {
+      cat("File not found:", choice, "\n")
+      return(NULL)
+    }
+  } else {
+    # Add .rds extension if not present
+    if (!str_detect(filename, "\\.rds$")) {
+      filename <- paste0(filename, ".rds")
+    }
+    
+    if (!filename %in% available_files) {
+      cat("File not found:", filename, "\n")
+      return(NULL)
+    }
+  }
+  
+  # Load the results
+  full_path <- file.path(data_dir, filename)
+  
+  tryCatch({
+    cat("Loading analysis results from:", full_path, "\n")
+    results <- readRDS(full_path)
+    cat("Analysis results loaded successfully!\n")
+    return(results)
+    
+  }, error = function(e) {
+    cat("Error loading analysis results:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Function to manage saved files (interactive menu)
+manage_saved_files <- function() {
+  while (TRUE) {
+    cat("\n=== Saved File Management ===\n")
+    cat("1. List available GatingSets\n")
+    cat("2. Load a GatingSet\n")
+    cat("3. List available analysis results\n")
+    cat("4. Load analysis results\n")
+    cat("5. Delete files (interactive)\n")
+    cat("6. Return to main menu\n")
+    
+    choice <- readline("Choose option (1-6): ")
+    
+    if (choice == "1") {
+      list_available_gatingsets()
+      readline("Press Enter to continue...")
+      
+    } else if (choice == "2") {
+      gs <- load_gatingset()
+      if (!is.null(gs)) {
+        assign("gs", gs, envir = .GlobalEnv)
+        cat("GatingSet assigned to variable 'gs' in global environment\n")
+      }
+      readline("Press Enter to continue...")
+      
+    } else if (choice == "3") {
+      data_dir <- here("out", "data")
+      if (dir.exists(data_dir)) {
+        available_files <- list.files(data_dir, pattern = "\\.rds$", full.names = FALSE)
+        if (length(available_files) > 0) {
+          cat("Available analysis result files:\n")
+          iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
+        } else {
+          cat("No analysis result files found\n")
+        }
+      } else {
+        cat("Data directory does not exist\n")
+      }
+      readline("Press Enter to continue...")
+      
+    } else if (choice == "4") {
+      results <- load_analysis_results()
+      if (!is.null(results)) {
+        assign("loaded_results", results, envir = .GlobalEnv)
+        cat("Results assigned to variable 'loaded_results' in global environment\n")
+      }
+      readline("Press Enter to continue...")
+      
+    } else if (choice == "5") {
+      delete_saved_files_interactive()
+      
+    } else if (choice == "6") {
+      break
+      
+    } else {
+      cat("Invalid choice. Please select 1-6.\n")
+    }
+  }
+}
+
+# Function to delete saved files interactively
+delete_saved_files_interactive <- function() {
+  cat("\n=== Delete Saved Files ===\n")
+  cat("1. Delete GatingSet files\n")
+  cat("2. Delete analysis result files\n")
+  cat("3. Cancel\n")
+  
+  choice <- readline("Choose file type to delete (1-3): ")
+  
+  if (choice == "1") {
+    # Delete GatingSet files
+    gatingset_dir <- here("out", "GatingSet")
+    if (!dir.exists(gatingset_dir)) {
+      cat("GatingSet directory does not exist\n")
+      return()
+    }
+    
+    available_files <- list.files(gatingset_dir, pattern = "\\.rds$", full.names = FALSE)
+    if (length(available_files) == 0) {
+      cat("No GatingSet files to delete\n")
+      return()
+    }
+    
+    cat("Available GatingSet files:\n")
+    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    file_choice <- readline("Enter file number to delete (or 'cancel'): ")
+    
+    if (tolower(file_choice) == "cancel") {
+      cat("Deletion cancelled\n")
+      return()
+    }
+    
+    if (grepl("^\\d+$", file_choice)) {
+      file_num <- as.numeric(file_choice)
+      if (!is.na(file_num) && file_num >= 1 && file_num <= length(available_files)) {
+        filename <- available_files[file_num]
+        confirm <- readline(paste("Delete", filename, "? (yes/no): "))
+        
+        if (tolower(confirm) == "yes") {
+          file.remove(file.path(gatingset_dir, filename))
+          cat("Deleted:", filename, "\n")
+        } else {
+          cat("Deletion cancelled\n")
+        }
+      }
+    }
+    
+  } else if (choice == "2") {
+    # Delete analysis result files
+    data_dir <- here("out", "data")
+    if (!dir.exists(data_dir)) {
+      cat("Data directory does not exist\n")
+      return()
+    }
+    
+    available_files <- list.files(data_dir, pattern = "\\.rds$", full.names = FALSE)
+    if (length(available_files) == 0) {
+      cat("No analysis result files to delete\n")
+      return()
+    }
+    
+    cat("Available analysis result files:\n")
+    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    file_choice <- readline("Enter file number to delete (or 'cancel'): ")
+    
+    if (tolower(file_choice) == "cancel") {
+      cat("Deletion cancelled\n")
+      return()
+    }
+    
+    if (grepl("^\\d+$", file_choice)) {
+      file_num <- as.numeric(file_choice)
+      if (!is.na(file_num) && file_num >= 1 && file_num <= length(available_files)) {
+        filename <- available_files[file_num]
+        confirm <- readline(paste("Delete", filename, "? (yes/no): "))
+        
+        if (tolower(confirm) == "yes") {
+          file.remove(file.path(data_dir, filename))
+          cat("Deleted:", filename, "\n")
+        } else {
+          cat("Deletion cancelled\n")
+        }
+      }
+    }
+  }
+}
+
+# ENHANCED WORKFLOW FUNCTIONS
+
+# Function to save current session (GatingSet + results)
+save_session <- function(gs, results = NULL, session_name = NULL) {
+  if (is.null(session_name)) {
+    session_name <- readline("Enter session name: ")
+    if (session_name == "") {
+      session_name <- paste0("session_", format(Sys.time(), "%Y%m%d_%H%M"))
+    }
+  }
+  
+  # Ensure directories exist
+  ensure_output_dirs()
+  
+  # Save GatingSet
+  gs_filename <- paste0(session_name, "_gatingset.rds")
+  save_gatingset(gs, gs_filename)
+  
+  # Save results if provided
+  if (!is.null(results)) {
+    results_filename <- paste0(session_name, "_results.rds")
+    save_analysis_results(results, results_filename)
+  }
+  
+  cat("Session saved as:", session_name, "\n")
+  return(session_name)
+}
+
+# Function to load complete session
+load_session <- function(session_name = NULL) {
+  if (is.null(session_name)) {
+    # List available sessions
+    gatingset_dir <- here("out", "GatingSet")
+    data_dir <- here("out", "data")
+    
+    # Find session names from GatingSet files
+    if (dir.exists(gatingset_dir)) {
+      gs_files <- list.files(gatingset_dir, pattern = "_gatingset\\.rds$", full.names = FALSE)
+      session_names <- str_remove(gs_files, "_gatingset\\.rds$")
+      
+      if (length(session_names) > 0) {
+        cat("Available sessions:\n")
+        iwalk(session_names, ~cat(sprintf("%d. %s\n", .y, .x)))
+        
+        choice <- readline("Enter session number or name: ")
+        
+        if (grepl("^\\d+$", choice)) {
+          choice_num <- as.numeric(choice)
+          if (!is.na(choice_num) && choice_num >= 1 && choice_num <= length(session_names)) {
+            session_name <- session_names[choice_num]
+          }
+        } else if (choice %in% session_names) {
+          session_name <- choice
+        }
+      } else {
+        cat("No sessions found\n")
+        return(NULL)
+      }
+    } else {
+      cat("No saved sessions found\n")
+      return(NULL)
+    }
+  }
+  
+  if (is.null(session_name)) {
+    cat("Invalid session selection\n")
+    return(NULL)
+  }
+  
+  # Load GatingSet
+  gs_filename <- paste0(session_name, "_gatingset.rds")
+  gs <- load_gatingset(gs_filename)
+  
+  # Load results if available
+  results_filename <- paste0(session_name, "_results.rds")
+  results <- load_analysis_results(results_filename)
+  
+  # Assign to global environment
+  if (!is.null(gs)) {
+    assign("gs", gs, envir = .GlobalEnv)
+    cat("GatingSet loaded and assigned to 'gs'\n")
+  }
+  
+  if (!is.null(results)) {
+    assign("loaded_results", results, envir = .GlobalEnv)
+    cat("Results loaded and assigned to 'loaded_results'\n")
+  }
+  
+  return(list(gs = gs, results = results))
+}
+
 # ============================================================================
 # NODE SELECTION AND RESOLUTION
 # ============================================================================
