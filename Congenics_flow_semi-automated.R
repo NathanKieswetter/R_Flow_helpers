@@ -11,702 +11,11 @@ library(ComplexHeatmap)
 library(circlize)
 library(RColorBrewer)
 library(umap)
-library(viridis)
-library(purrr)
-library(patchwork)
-
-# ============================================================================
-# ENHANCED METADATA CONFIGURATION SYSTEM (NEW)
-# ============================================================================
-
-# Global configuration for metadata handling
-.flow_config <- new.env()
-.flow_config$metadata_mappings <- list(
-  tissue = c("GROUPNAME", "Tissue", "Location", "Organ", "Site"),
-  sample_id = c("$WELLID", "WELLID", "SampleID", "Sample_ID", "ID"),
-  time_point = c("Timepoint", "Time", "Day", "Hour", "Visit"),
-  treatment = c("Treatment", "Condition", "Group", "Arm"),
-  batch = c("Batch", "Run", "Experiment", "Plate"),
-  subject = c("Subject", "Mouse", "Patient", "Animal", "ID")
-)
-
-# Function to detect and configure metadata columns
-detect_metadata_structure <- function(gs, custom_keywords = NULL, interactive = TRUE) {
-  cat("=== Metadata Structure Detection ===\n")
-  
-  # Get available metadata from pData
-  tryCatch({
-    pd <- pData(gs)
-    available_cols <- names(pd)
-    cat("Available metadata columns:\n")
-    iwalk(available_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
-  }, error = function(e) {
-    cat("Warning: Could not access pData. Using default keywords.\n")
-    available_cols <- c("$WELLID", "GROUPNAME")
-  })
-  
-  # Combine default mappings with custom keywords
-  if (!is.null(custom_keywords)) {
-    .flow_config$metadata_mappings <- modifyList(.flow_config$metadata_mappings, custom_keywords)
-  }
-  
-  # Auto-detect columns based on common patterns
-  detected_mappings <- list()
-  
-  for (concept in names(.flow_config$metadata_mappings)) {
-    possible_names <- .flow_config$metadata_mappings[[concept]]
-    matches <- intersect(possible_names, available_cols)
-    
-    if (length(matches) > 0) {
-      detected_mappings[[concept]] <- matches[1]  # Use first match
-      cat(sprintf("✓ Detected %s: %s\n", concept, matches[1]))
-    } else {
-      detected_mappings[[concept]] <- NA
-      cat(sprintf("✗ No %s column detected\n", concept))
-    }
-  }
-  
-  # Interactive refinement if requested
-  if (interactive) {
-    detected_mappings <- refine_metadata_mappings(detected_mappings, available_cols)
-  }
-  
-  # Store in global config
-  .flow_config$current_mappings <- detected_mappings
-  
-  return(detected_mappings)
-}
-
-refine_metadata_mappings <- function(detected_mappings, available_cols) {
-  cat("\n=== Metadata Mapping Refinement ===\n")
-  
-  while (TRUE) {
-    cat("\nCurrent mappings:\n")
-    iwalk(detected_mappings, function(value, concept) {
-      status <- if (is.na(value)) "NOT SET" else value
-      cat(sprintf("  %s: %s\n", concept, status))
-    })
-    
-    cat("\nOptions:\n")
-    cat("1. Modify a mapping\n")
-    cat("2. Add custom mapping\n")
-    cat("3. Remove a mapping\n")
-    cat("4. Show sample data preview\n")
-    cat("5. Accept current mappings\n")
-    
-    choice <- readline("Choose option (1-5): ")
-    
-    if (choice == "1") {
-      # Modify existing mapping
-      concept_names <- names(detected_mappings)
-      cat("\nSelect mapping to modify:\n")
-      iwalk(concept_names, ~cat(sprintf("%d. %s\n", .y, .x)))
-      
-      concept_choice <- readline("Enter number: ")
-      if (grepl("^\\d+$", concept_choice)) {
-        concept_num <- as.numeric(concept_choice)
-        if (concept_num >= 1 && concept_num <= length(concept_names)) {
-          concept <- concept_names[concept_num]
-          
-          cat("\nAvailable columns:\n")
-          iwalk(available_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
-          cat(sprintf("%d. Set to NA (not available)\n", length(available_cols) + 1))
-          
-          col_choice <- readline("Enter column number: ")
-          if (grepl("^\\d+$", col_choice)) {
-            col_num <- as.numeric(col_choice)
-            if (col_num >= 1 && col_num <= length(available_cols)) {
-              detected_mappings[[concept]] <- available_cols[col_num]
-              cat(sprintf("Updated %s to: %s\n", concept, available_cols[col_num]))
-            } else if (col_num == length(available_cols) + 1) {
-              detected_mappings[[concept]] <- NA
-              cat(sprintf("Set %s to NA\n", concept))
-            }
-          }
-        }
-      }
-      
-    } else if (choice == "2") {
-      # Add custom mapping
-      concept_name <- readline("Enter concept name (e.g., 'donor_age'): ")
-      if (concept_name != "") {
-        cat("\nAvailable columns:\n")
-        iwalk(available_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
-        
-        col_choice <- readline("Enter column number: ")
-        if (grepl("^\\d+$", col_choice)) {
-          col_num <- as.numeric(col_choice)
-          if (col_num >= 1 && col_num <= length(available_cols)) {
-            detected_mappings[[concept_name]] <- available_cols[col_num]
-            cat(sprintf("Added %s: %s\n", concept_name, available_cols[col_num]))
-          }
-        }
-      }
-      
-    } else if (choice == "3") {
-      # Remove mapping
-      concept_names <- names(detected_mappings)
-      cat("\nSelect mapping to remove:\n")
-      iwalk(concept_names, ~cat(sprintf("%d. %s\n", .y, .x)))
-      
-      concept_choice <- readline("Enter number: ")
-      if (grepl("^\\d+$", concept_choice)) {
-        concept_num <- as.numeric(concept_choice)
-        if (concept_num >= 1 && concept_num <= length(concept_names)) {
-          concept <- concept_names[concept_num]
-          detected_mappings[[concept]] <- NULL
-          cat(sprintf("Removed %s mapping\n", concept))
-        }
-      }
-      
-    } else if (choice == "4") {
-      # Show data preview
-      tryCatch({
-        pd <- pData(gs) %>% slice_head(n = 5)
-        cat("\nSample data preview:\n")
-        print(pd)
-      }, error = function(e) {
-        cat("Could not show data preview\n")
-      })
-      readline("Press Enter to continue...")
-      
-    } else if (choice == "5") {
-      break
-    }
-  }
-  
-  return(detected_mappings)
-}
-
-# ============================================================================
-# INTERACTIVE MARKER ANNOTATION SYSTEM (NEW)
-# ============================================================================
-
-# Function to interactively annotate channels with marker names
-annotate_channels_interactive <- function(gs, save_annotation = TRUE) {
-  cat("=== Interactive Channel Annotation ===\n")
-  cat("This function helps you assign marker names to cytometer channels\n")
-  cat("when they weren't properly defined during acquisition.\n\n")
-  
-  # Get current marker lookup
-  lookup <- get_marker_lookup(gs)
-  
-  cat("Current channel-marker mapping:\n")
-  print(lookup)
-  
-  # Identify channels that need annotation
-  needs_annotation <- lookup %>%
-    filter(is.na(marker) | marker == "" | marker == colname)
-  
-  if (nrow(needs_annotation) == 0) {
-    cat("\n✓ All channels already have marker annotations!\n")
-    return(lookup)
-  }
-  
-  cat(sprintf("\nFound %d channels that need marker annotation:\n", nrow(needs_annotation)))
-  print(needs_annotation)
-  
-  # Interactive annotation loop
-  annotated_lookup <- annotate_channels_menu(lookup, gs)
-  
-  # Save annotations if requested
-  if (save_annotation) {
-    save_choice <- readline("\nSave channel annotations for future use? (y/n): ")
-    if (tolower(save_choice) == "y") {
-      save_channel_annotations(annotated_lookup, gs)
-    }
-  }
-  
-  return(annotated_lookup)
-}
-
-# Main annotation menu
-annotate_channels_menu <- function(lookup, gs) {
-  cat("\n=== Channel Annotation Menu ===\n")
-  
-  # Create working copy
-  working_lookup <- lookup
-  
-  while (TRUE) {
-    cat("\nCurrent annotations:\n")
-    print_annotation_status(working_lookup)
-    
-    cat("\nOptions:\n")
-    cat("1. Annotate specific channels\n")
-    cat("2. Bulk annotate by pattern\n")
-    cat("3. Load common marker panel\n")
-    cat("4. Preview data for channel identification\n")
-    cat("5. Reset all annotations\n")
-    cat("6. Finish annotation\n")
-    
-    choice <- readline("Choose option (1-6): ")
-    
-    if (choice == "1") {
-      working_lookup <- annotate_specific_channels(working_lookup)
-    } else if (choice == "2") {
-      working_lookup <- bulk_annotate_by_pattern(working_lookup)
-    } else if (choice == "3") {
-      working_lookup <- load_marker_panel(working_lookup)
-    } else if (choice == "4") {
-      preview_channel_data(gs, working_lookup)
-    } else if (choice == "5") {
-      working_lookup <- reset_annotations(lookup)
-    } else if (choice == "6") {
-      break
-    } else {
-      cat("Invalid choice. Please select 1-6.\n")
-    }
-  }
-  
-  return(working_lookup)
-}
-
-# Print current annotation status
-print_annotation_status <- function(lookup) {
-  annotated <- lookup %>%
-    mutate(
-      status = case_when(
-        is.na(marker) | marker == "" ~ "❌ Not annotated",
-        marker == colname ~ "⚠️  Using channel name",
-        TRUE ~ "✅ Annotated"
-      )
-    )
-  
-  cat("\nChannel Status:\n")
-  for (i in 1:nrow(annotated)) {
-    cat(sprintf("  %s: %s -> %s\n", 
-                annotated$status[i], 
-                annotated$colname[i], 
-                ifelse(is.na(annotated$marker[i]), "NONE", annotated$marker[i])))
-  }
-  
-  n_annotated <- sum(!is.na(annotated$marker) & annotated$marker != "" & annotated$marker != annotated$colname)
-  cat(sprintf("\nProgress: %d/%d channels properly annotated\n", n_annotated, nrow(annotated)))
-}
-
-# Annotate specific channels
-annotate_specific_channels <- function(lookup) {
-  cat("\n=== Specific Channel Annotation ===\n")
-  
-  # Show channels that need annotation
-  needs_work <- lookup %>%
-    mutate(row_num = row_number()) %>%
-    filter(is.na(marker) | marker == "" | marker == colname)
-  
-  if (nrow(needs_work) == 0) {
-    cat("All channels are already annotated!\n")
-    return(lookup)
-  }
-  
-  cat("Channels needing annotation:\n")
-  for (i in 1:nrow(needs_work)) {
-    cat(sprintf("%d. %s (currently: %s)\n", 
-                needs_work$row_num[i], 
-                needs_work$colname[i],
-                ifelse(is.na(needs_work$marker[i]), "NONE", needs_work$marker[i])))
-  }
-  
-  # Select channel to annotate
-  channel_choice <- readline("Enter channel number to annotate (or 'done'): ")
-  
-  if (tolower(channel_choice) == "done") {
-    return(lookup)
-  }
-  
-  if (grepl("^\\d+$", channel_choice)) {
-    channel_num <- as.numeric(channel_choice)
-    if (channel_num %in% needs_work$row_num) {
-      row_idx <- which(lookup$colname == needs_work$colname[needs_work$row_num == channel_num])
-      
-      cat(sprintf("\nAnnotating channel: %s\n", lookup$colname[row_idx]))
-      cat("Current marker name:", ifelse(is.na(lookup$marker[row_idx]), "NONE", lookup$marker[row_idx]), "\n")
-      
-      new_marker <- readline("Enter marker name (e.g., 'CD3', 'CD4', 'Live/Dead'): ")
-      
-      if (new_marker != "") {
-        lookup$marker[row_idx] <- new_marker
-        cat(sprintf("✓ Updated %s -> %s\n", lookup$colname[row_idx], new_marker))
-      }
-    }
-  }
-  
-  return(lookup)
-}
-
-# Bulk annotate by pattern matching
-bulk_annotate_by_pattern <- function(lookup) {
-  cat("\n=== Bulk Pattern Annotation ===\n")
-  cat("This helps annotate multiple channels based on naming patterns.\n")
-  
-  cat("\nAvailable channels:\n")
-  iwalk(lookup$colname, ~cat(sprintf("%d. %s\n", .y, .x)))
-  
-  pattern <- readline("\nEnter pattern to match (regex, e.g., 'CD.*', 'BV.*'): ")
-  if (pattern == "") return(lookup)
-  
-  matches <- grep(pattern, lookup$colname, ignore.case = TRUE)
-  
-  if (length(matches) == 0) {
-    cat("No channels match that pattern.\n")
-    return(lookup)
-  }
-  
-  cat(sprintf("Pattern '%s' matches %d channels:\n", pattern, length(matches)))
-  for (i in matches) {
-    cat(sprintf("  %s\n", lookup$colname[i]))
-  }
-  
-  marker_name <- readline("Enter marker name for all matched channels: ")
-  if (marker_name != "") {
-    confirm <- readline(sprintf("Annotate all %d channels with '%s'? (y/n): ", length(matches), marker_name))
-    if (tolower(confirm) == "y") {
-      lookup$marker[matches] <- marker_name
-      cat(sprintf("✓ Annotated %d channels\n", length(matches)))
-    }
-  }
-  
-  return(lookup)
-}
-
-# Load common marker panels
-load_marker_panel <- function(lookup) {
-  cat("\n=== Load Common Marker Panel ===\n")
-  
-  # Define common panels
-  common_panels <- list(
-    "Mouse T-cell Basic" = list(
-      "CD3" = c("CD3", "TCR"),
-      "CD4" = c("CD4"),
-      "CD8" = c("CD8", "CD8a", "CD8alpha"),
-      "CD45" = c("CD45", "CD45.1", "CD45.2"),
-      "Live/Dead" = c("Live", "Dead", "Viability", "PI", "7AAD")
-    ),
-    
-    "Human PBMC Basic" = list(
-      "CD3" = c("CD3"),
-      "CD4" = c("CD4"),
-      "CD8" = c("CD8"),
-      "CD19" = c("CD19"),
-      "CD14" = c("CD14"),
-      "CD45" = c("CD45"),
-      "Live/Dead" = c("Live", "Dead", "Viability")
-    ),
-    
-    "Mouse Tissue Analysis" = list(
-      "CD45" = c("CD45", "CD45.1", "CD45.2"),
-      "CD3" = c("CD3"),
-      "CD11b" = c("CD11b"),
-      "F4/80" = c("F4", "F480"),
-      "Ly6G" = c("Ly6G", "Gr1"),
-      "Live/Dead" = c("Live", "Dead", "Viability")
-    )
-  )
-  
-  cat("Available marker panels:\n")
-  iwalk(names(common_panels), ~cat(sprintf("%d. %s\n", .y, .x)))
-  
-  panel_choice <- readline("Select panel number: ")
-  if (grepl("^\\d+$", panel_choice)) {
-    panel_num <- as.numeric(panel_choice)
-    if (panel_num >= 1 && panel_num <= length(common_panels)) {
-      selected_panel <- common_panels[[panel_num]]
-      panel_name <- names(common_panels)[panel_num]
-      
-      cat(sprintf("\nApplying %s panel...\n", panel_name))
-      lookup <- apply_marker_panel(lookup, selected_panel)
-    }
-  }
-  
-  return(lookup)
-}
-
-# Apply marker panel to lookup
-apply_marker_panel <- function(lookup, panel) {
-  annotations_made <- 0
-  
-  for (marker_name in names(panel)) {
-    possible_channels <- panel[[marker_name]]
-    
-    # Find matching channels
-    for (channel_pattern in possible_channels) {
-      matches <- grep(channel_pattern, lookup$colname, ignore.case = TRUE)
-      
-      if (length(matches) > 0) {
-        # Annotate first match
-        match_idx <- matches[1]
-        old_marker <- lookup$marker[match_idx]
-        lookup$marker[match_idx] <- marker_name
-        
-        cat(sprintf("  ✓ %s -> %s\n", lookup$colname[match_idx], marker_name))
-        annotations_made <- annotations_made + 1
-        break  # Only annotate first match per marker
-      }
-    }
-  }
-  
-  cat(sprintf("Applied %d annotations from panel\n", annotations_made))
-  return(lookup)
-}
-
-# Preview channel data to help with identification
-preview_channel_data <- function(gs, lookup) {
-  cat("\n=== Channel Data Preview ===\n")
-  cat("This shows expression data to help identify markers.\n")
-  
-  # Get a sample for preview
-  sample_names <- sampleNames(gs)
-  if (length(sample_names) == 0) {
-    cat("No samples available for preview\n")
-    return()
-  }
-  
-  # Use first sample
-  sample_name <- sample_names[1]
-  cat(sprintf("Using sample: %s\n", sample_name))
-  
-  tryCatch({
-    # Get root population data
-    gh <- gs[[sample_name]]
-    ff <- gh_pop_get_data(gh, "/")
-    
-    if (is.null(ff)) {
-      cat("Could not retrieve data from sample\n")
-      return()
-    }
-    
-    expr_data <- if (inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
-    
-    # Show channels needing annotation
-    needs_work <- lookup %>%
-      filter(is.na(marker) | marker == "" | marker == colname)
-    
-    if (nrow(needs_work) == 0) {
-      cat("All channels are annotated!\n")
-      return()
-    }
-    
-    cat("\nChannels needing annotation:\n")
-    for (i in 1:nrow(needs_work)) {
-      channel <- needs_work$colname[i]
-      if (channel %in% colnames(expr_data)) {
-        channel_data <- expr_data[, channel]
-        stats <- summary(channel_data)
-        
-        cat(sprintf("\n%d. Channel: %s\n", i, channel))
-        cat(sprintf("   Range: %.1f to %.1f\n", min(channel_data, na.rm = TRUE), max(channel_data, na.rm = TRUE)))
-        cat(sprintf("   Median: %.1f, Mean: %.1f\n", median(channel_data, na.rm = TRUE), mean(channel_data, na.rm = TRUE)))
-        cat(sprintf("   Has negative values: %s\n", ifelse(any(channel_data < 0, na.rm = TRUE), "Yes", "No")))
-        
-        # Suggest marker type based on data characteristics
-        suggest_marker_type(channel, channel_data)
-      }
-    }
-    
-  }, error = function(e) {
-    cat("Error accessing sample data:", e$message, "\n")
-  })
-  
-  readline("\nPress Enter to continue...")
-}
-
-# Suggest marker type based on data characteristics
-suggest_marker_type <- function(channel, data) {
-  has_negatives <- any(data < 0, na.rm = TRUE)
-  data_range <- max(data, na.rm = TRUE) - min(data, na.rm = TRUE)
-  median_val <- median(data, na.rm = TRUE)
-  
-  suggestions <- character(0)
-  
-  # Check for common patterns
-  if (grepl("FSC|SSC", channel, ignore.case = TRUE)) {
-    suggestions <- c(suggestions, "Scatter parameter (size/granularity)")
-  } else if (grepl("Time", channel, ignore.case = TRUE)) {
-    suggestions <- c(suggestions, "Time parameter")
-  } else if (!has_negatives && median_val < 1000) {
-    suggestions <- c(suggestions, "Possible fluorescence marker")
-  } else if (has_negatives) {
-    suggestions <- c(suggestions, "Possible compensated fluorescence")
-  } else if (data_range > 100000) {
-    suggestions <- c(suggestions, "Possible scatter or autofluorescence")
-  }
-  
-  if (length(suggestions) > 0) {
-    cat(sprintf("   Suggestions: %s\n", paste(suggestions, collapse = ", ")))
-  }
-}
-
-# Reset annotations
-reset_annotations <- function(original_lookup) {
-  confirm <- readline("Reset all annotations to original state? (y/n): ")
-  if (tolower(confirm) == "y") {
-    cat("Annotations reset\n")
-    return(original_lookup)
-  }
-  return(original_lookup)
-}
-
-# Save channel annotations
-save_channel_annotations <- function(lookup, gs) {
-  ensure_output_dirs()
-  
-  # Create annotation file
-  annotation_data <- list(
-    lookup = lookup,
-    samples = sampleNames(gs),
-    timestamp = Sys.time(),
-    sample_count = length(sampleNames(gs))
-  )
-  
-  filename <- readline("Enter filename for annotations (default: channel_annotations.rds): ")
-  if (filename == "") {
-    filename <- "channel_annotations.rds"
-  }
-  
-  if (!str_detect(filename, "\\.rds$")) {
-    filename <- paste0(filename, ".rds")
-  }
-  
-  full_path <- here("out", "data", filename)
-  saveRDS(annotation_data, full_path)
-  
-  cat("Channel annotations saved to:", full_path, "\n")
-  
-  # Also save as CSV for easy viewing
-  csv_filename <- str_replace(filename, "\\.rds$", ".csv")
-  csv_path <- here("out", "data", csv_filename)
-  write_csv(lookup, csv_path)
-  cat("Lookup table saved as CSV:", csv_path, "\n")
-}
-
-# Load channel annotations
-load_channel_annotations <- function(gs, filename = NULL) {
-  data_dir <- here("out", "data")
-  
-  if (is.null(filename)) {
-    # List available annotation files
-    annotation_files <- list.files(data_dir, pattern = ".*annotation.*\\.rds$", full.names = FALSE)
-    
-    if (length(annotation_files) == 0) {
-      cat("No annotation files found in:", data_dir, "\n")
-      return(NULL)
-    }
-    
-    cat("Available annotation files:\n")
-    iwalk(annotation_files, ~cat(sprintf("%d. %s\n", .y, .x)))
-    
-    file_choice <- readline("Enter file number or filename: ")
-    
-    if (grepl("^\\d+$", file_choice)) {
-      file_num <- as.numeric(file_choice)
-      if (file_num >= 1 && file_num <= length(annotation_files)) {
-        filename <- annotation_files[file_num]
-      }
-    } else {
-      filename <- file_choice
-    }
-  }
-  
-  if (is.null(filename)) {
-    cat("No file selected\n")
-    return(NULL)
-  }
-  
-  if (!str_detect(filename, "\\.rds$")) {
-    filename <- paste0(filename, ".rds")
-  }
-  
-  full_path <- file.path(data_dir, filename)
-  
-  if (!file.exists(full_path)) {
-    cat("File not found:", full_path, "\n")
-    return(NULL)
-  }
-  
-  tryCatch({
-    annotation_data <- readRDS(full_path)
-    cat("Loaded annotations from:", filename, "\n")
-    cat("Original sample count:", annotation_data$sample_count, "\n")
-    cat("Current sample count:", length(sampleNames(gs)), "\n")
-    
-    return(annotation_data$lookup)
-    
-  }, error = function(e) {
-    cat("Error loading annotations:", e$message, "\n")
-    return(NULL)
-  })
-}
-
-# Enhanced get_marker_lookup that can use saved annotations
-get_marker_lookup_enhanced <- function(gs, use_saved_annotations = TRUE) {
-  # Get basic lookup
-  lookup <- get_marker_lookup(gs)
-  
-  # Try to load saved annotations if requested
-  if (use_saved_annotations) {
-    cat("Checking for saved channel annotations...\n")
-    saved_lookup <- load_channel_annotations(gs)
-    
-    if (!is.null(saved_lookup)) {
-      use_saved <- readline("Use saved annotations? (y/n): ")
-      if (tolower(use_saved) == "y") {
-        # Merge saved annotations with current lookup
-        lookup <- merge_annotations(lookup, saved_lookup)
-        cat("Applied saved annotations\n")
-      }
-    }
-  }
-  
-  # Check if annotation is needed
-  needs_annotation <- lookup %>%
-    filter(is.na(marker) | marker == "" | marker == colname)
-  
-  if (nrow(needs_annotation) > 0) {
-    cat(sprintf("Found %d channels that may need annotation\n", nrow(needs_annotation)))
-    annotate_now <- readline("Run interactive annotation now? (y/n): ")
-    
-    if (tolower(annotate_now) == "y") {
-      lookup <- annotate_channels_interactive(gs)
-    }
-  }
-  
-  return(lookup)
-}
-
-# Merge saved annotations with current lookup
-merge_annotations <- function(current_lookup, saved_lookup) {
-  # Match by channel name and update markers
-  for (i in 1:nrow(current_lookup)) {
-    channel <- current_lookup$colname[i]
-    saved_match <- saved_lookup[saved_lookup$colname == channel, ]
-    
-    if (nrow(saved_match) > 0 && !is.na(saved_match$marker) && saved_match$marker != "") {
-      current_lookup$marker[i] <- saved_match$marker
-    }
-  }
-  
-  return(current_lookup)
-}
 
 # ============================================================================
 # CORE SETUP AND DATA LOADING
 # ============================================================================
-# Helper function to ensure output directories exist
-ensure_output_dirs <- function() {
-  if (!dir.exists(here("out", "plots"))) {
-    dir.create(here("out", "plots"), recursive = TRUE)
-    cat("Created directory:", here("out", "plots"), "\n")
-  }
-  if (!dir.exists(here("out", "data"))) {
-    dir.create(here("out", "data"), recursive = TRUE)
-    cat("Created directory:", here("out", "data"), "\n")
-  }
-  if (!dir.exists(here("out", "GatingSet"))) {
-    dir.create(here("out", "GatingSet"), recursive = TRUE)
-    cat("Created directory:", here("out", "GatingSet"), "\n")
-  }
-}
 
-#Set up flowJo_workspace
 setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("$WELLID", "GROUPNAME")) {
   ws <- open_flowjo_xml(xml_path)
   gs <- flowjo_to_gatingset(
@@ -717,451 +26,6 @@ setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("$WELLID", "
     extend_val = -10000
   )
   return(gs)
-}
-
-# Saving Gating Set
-save_gatingset <- function(gs, filename = "gatingset.rds") {
-  # Ensure output directory exists
-  ensure_output_dirs()
-  
-  full_path <- here("out", "GatingSet", filename)
-  saveRDS(gs, full_path)
-  cat("GatingSet saved to:", full_path, "\n")
-  
-  return(invisible(full_path))
-}
-
-# ==============================================================================
-# GATINGSET LOADING AND MANAGEMENT FUNCTIONS
-# ==============================================================================
-
-# Function to load a previously saved GatingSet
-load_gatingset <- function(filename = NULL) {
-  gatingset_dir <- here("out", "GatingSet")
-  
-  # Check if GatingSet directory exists
-  if (!dir.exists(gatingset_dir)) {
-    cat("GatingSet directory does not exist:", gatingset_dir, "\n")
-    cat("No saved GatingSets found.\n")
-    return(NULL)
-  }
-  
-  # Get list of available GatingSet files
-  available_files <- list.files(gatingset_dir, pattern = "\\.rds$", full.names = FALSE)
-  
-  if (length(available_files) == 0) {
-    cat("No GatingSet files found in:", gatingset_dir, "\n")
-    return(NULL)
-  }
-  
-  # If no filename specified, show interactive menu
-  if (is.null(filename)) {
-    cat("\n=== Load GatingSet ===\n")
-    cat("Available GatingSet files:\n")
-    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
-    
-    choice <- readline("Enter file number or filename: ")
-    
-    # Handle numeric choice
-    if (grepl("^\\d+$", choice)) {
-      choice_num <- as.numeric(choice)
-      if (!is.na(choice_num) && choice_num >= 1 && choice_num <= length(available_files)) {
-        filename <- available_files[choice_num]
-      } else {
-        cat("Invalid selection\n")
-        return(NULL)
-      }
-    } else if (choice %in% available_files) {
-      # Handle direct filename
-      filename <- choice
-    } else if (paste0(choice, ".rds") %in% available_files) {
-      # Handle filename without extension
-      filename <- paste0(choice, ".rds")
-    } else {
-      cat("File not found:", choice, "\n")
-      return(NULL)
-    }
-  } else {
-    # Add .rds extension if not present
-    if (!str_detect(filename, "\\.rds$")) {
-      filename <- paste0(filename, ".rds")
-    }
-    
-    # Check if file exists
-    if (!filename %in% available_files) {
-      cat("File not found:", filename, "\n")
-      cat("Available files:", paste(available_files, collapse = ", "), "\n")
-      return(NULL)
-    }
-  }
-  
-  # Load the GatingSet
-  full_path <- file.path(gatingset_dir, filename)
-  
-  tryCatch({
-    cat("Loading GatingSet from:", full_path, "\n")
-    gs <- readRDS(full_path)
-    
-    # Validate that it's a GatingSet
-    if (!inherits(gs, "GatingSet")) {
-      stop("Loaded object is not a GatingSet")
-    }
-    
-    # Display basic info
-    cat("GatingSet loaded successfully!\n")
-    cat("Samples:", length(sampleNames(gs)), "\n")
-    cat("Sample names:", paste(head(sampleNames(gs), 3), collapse = ", "))
-    if (length(sampleNames(gs)) > 3) cat("...")
-    cat("\n")
-    
-    return(gs)
-    
-  }, error = function(e) {
-    cat("Error loading GatingSet:", e$message, "\n")
-    return(NULL)
-  })
-}
-
-# Function to list all available GatingSets
-list_available_gatingsets <- function() {
-  gatingset_dir <- here("out", "GatingSet")
-  
-  if (!dir.exists(gatingset_dir)) {
-    cat("GatingSet directory does not exist:", gatingset_dir, "\n")
-    return(character(0))
-  }
-  
-  available_files <- list.files(gatingset_dir, pattern = "\\.rds$", full.names = FALSE)
-  
-  if (length(available_files) == 0) {
-    cat("No GatingSet files found in:", gatingset_dir, "\n")
-    return(character(0))
-  }
-  
-  cat("Available GatingSet files:\n")
-  file_info <- map_dfr(available_files, function(file) {
-    full_path <- file.path(gatingset_dir, file)
-    file_stats <- file.info(full_path)
-    
-    tibble(
-      filename = file,
-      size = paste(round(file_stats$size / 1024^2, 2), "MB"),
-      modified = format(file_stats$mtime, "%Y-%m-%d %H:%M")
-    )
-  })
-  
-  print(file_info)
-  return(available_files)
-}
-
-# Function to load analysis results
-load_analysis_results <- function(filename = NULL) {
-  data_dir <- here("out", "data")
-  
-  # Check if data directory exists
-  if (!dir.exists(data_dir)) {
-    cat("Data directory does not exist:", data_dir, "\n")
-    return(NULL)
-  }
-  
-  # Get list of available result files
-  available_files <- list.files(data_dir, pattern = "\\.rds$", full.names = FALSE)
-  
-  if (length(available_files) == 0) {
-    cat("No analysis result files found in:", data_dir, "\n")
-    return(NULL)
-  }
-  
-  # If no filename specified, show interactive menu
-  if (is.null(filename)) {
-    cat("\n=== Load Analysis Results ===\n")
-    cat("Available analysis result files:\n")
-    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
-    
-    choice <- readline("Enter file number or filename: ")
-    
-    # Handle numeric choice
-    if (grepl("^\\d+$", choice)) {
-      choice_num <- as.numeric(choice)
-      if (!is.na(choice_num) && choice_num >= 1 && choice_num <= length(available_files)) {
-        filename <- available_files[choice_num]
-      } else {
-        cat("Invalid selection\n")
-        return(NULL)
-      }
-    } else if (choice %in% available_files) {
-      filename <- choice
-    } else if (paste0(choice, ".rds") %in% available_files) {
-      filename <- paste0(choice, ".rds")
-    } else {
-      cat("File not found:", choice, "\n")
-      return(NULL)
-    }
-  } else {
-    # Add .rds extension if not present
-    if (!str_detect(filename, "\\.rds$")) {
-      filename <- paste0(filename, ".rds")
-    }
-    
-    if (!filename %in% available_files) {
-      cat("File not found:", filename, "\n")
-      return(NULL)
-    }
-  }
-  
-  # Load the results
-  full_path <- file.path(data_dir, filename)
-  
-  tryCatch({
-    cat("Loading analysis results from:", full_path, "\n")
-    results <- readRDS(full_path)
-    cat("Analysis results loaded successfully!\n")
-    return(results)
-    
-  }, error = function(e) {
-    cat("Error loading analysis results:", e$message, "\n")
-    return(NULL)
-  })
-}
-
-# Function to manage saved files (interactive menu)
-manage_saved_files <- function() {
-  while (TRUE) {
-    cat("\n=== Saved File Management ===\n")
-    cat("1. List available GatingSets\n")
-    cat("2. Load a GatingSet\n")
-    cat("3. List available analysis results\n")
-    cat("4. Load analysis results\n")
-    cat("5. Delete files (interactive)\n")
-    cat("6. Return to main menu\n")
-    
-    choice <- readline("Choose option (1-6): ")
-    
-    if (choice == "1") {
-      list_available_gatingsets()
-      readline("Press Enter to continue...")
-      
-    } else if (choice == "2") {
-      gs <- load_gatingset()
-      if (!is.null(gs)) {
-        assign("gs", gs, envir = .GlobalEnv)
-        cat("GatingSet assigned to variable 'gs' in global environment\n")
-      }
-      readline("Press Enter to continue...")
-      
-    } else if (choice == "3") {
-      data_dir <- here("out", "data")
-      if (dir.exists(data_dir)) {
-        available_files <- list.files(data_dir, pattern = "\\.rds$", full.names = FALSE)
-        if (length(available_files) > 0) {
-          cat("Available analysis result files:\n")
-          iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
-        } else {
-          cat("No analysis result files found\n")
-        }
-      } else {
-        cat("Data directory does not exist\n")
-      }
-      readline("Press Enter to continue...")
-      
-    } else if (choice == "4") {
-      results <- load_analysis_results()
-      if (!is.null(results)) {
-        assign("loaded_results", results, envir = .GlobalEnv)
-        cat("Results assigned to variable 'loaded_results' in global environment\n")
-      }
-      readline("Press Enter to continue...")
-      
-    } else if (choice == "5") {
-      delete_saved_files_interactive()
-      
-    } else if (choice == "6") {
-      break
-      
-    } else {
-      cat("Invalid choice. Please select 1-6.\n")
-    }
-  }
-}
-
-# Function to delete saved files interactively
-delete_saved_files_interactive <- function() {
-  cat("\n=== Delete Saved Files ===\n")
-  cat("1. Delete GatingSet files\n")
-  cat("2. Delete analysis result files\n")
-  cat("3. Cancel\n")
-  
-  choice <- readline("Choose file type to delete (1-3): ")
-  
-  if (choice == "1") {
-    # Delete GatingSet files
-    gatingset_dir <- here("out", "GatingSet")
-    if (!dir.exists(gatingset_dir)) {
-      cat("GatingSet directory does not exist\n")
-      return()
-    }
-    
-    available_files <- list.files(gatingset_dir, pattern = "\\.rds$", full.names = FALSE)
-    if (length(available_files) == 0) {
-      cat("No GatingSet files to delete\n")
-      return()
-    }
-    
-    cat("Available GatingSet files:\n")
-    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
-    
-    file_choice <- readline("Enter file number to delete (or 'cancel'): ")
-    
-    if (tolower(file_choice) == "cancel") {
-      cat("Deletion cancelled\n")
-      return()
-    }
-    
-    if (grepl("^\\d+$", file_choice)) {
-      file_num <- as.numeric(file_choice)
-      if (!is.na(file_num) && file_num >= 1 && file_num <= length(available_files)) {
-        filename <- available_files[file_num]
-        confirm <- readline(paste("Delete", filename, "? (yes/no): "))
-        
-        if (tolower(confirm) == "yes") {
-          file.remove(file.path(gatingset_dir, filename))
-          cat("Deleted:", filename, "\n")
-        } else {
-          cat("Deletion cancelled\n")
-        }
-      }
-    }
-    
-  } else if (choice == "2") {
-    # Delete analysis result files
-    data_dir <- here("out", "data")
-    if (!dir.exists(data_dir)) {
-      cat("Data directory does not exist\n")
-      return()
-    }
-    
-    available_files <- list.files(data_dir, pattern = "\\.rds$", full.names = FALSE)
-    if (length(available_files) == 0) {
-      cat("No analysis result files to delete\n")
-      return()
-    }
-    
-    cat("Available analysis result files:\n")
-    iwalk(available_files, ~cat(sprintf("%d. %s\n", .y, .x)))
-    
-    file_choice <- readline("Enter file number to delete (or 'cancel'): ")
-    
-    if (tolower(file_choice) == "cancel") {
-      cat("Deletion cancelled\n")
-      return()
-    }
-    
-    if (grepl("^\\d+$", file_choice)) {
-      file_num <- as.numeric(file_choice)
-      if (!is.na(file_num) && file_num >= 1 && file_num <= length(available_files)) {
-        filename <- available_files[file_num]
-        confirm <- readline(paste("Delete", filename, "? (yes/no): "))
-        
-        if (tolower(confirm) == "yes") {
-          file.remove(file.path(data_dir, filename))
-          cat("Deleted:", filename, "\n")
-        } else {
-          cat("Deletion cancelled\n")
-        }
-      }
-    }
-  }
-}
-
-# ENHANCED WORKFLOW FUNCTIONS
-
-# Function to save current session (GatingSet + results)
-save_session <- function(gs, results = NULL, session_name = NULL) {
-  if (is.null(session_name)) {
-    session_name <- readline("Enter session name: ")
-    if (session_name == "") {
-      session_name <- paste0("session_", format(Sys.time(), "%Y%m%d_%H%M"))
-    }
-  }
-  
-  # Ensure directories exist
-  ensure_output_dirs()
-  
-  # Save GatingSet
-  gs_filename <- paste0(session_name, "_gatingset.rds")
-  save_gatingset(gs, gs_filename)
-  
-  # Save results if provided
-  if (!is.null(results)) {
-    results_filename <- paste0(session_name, "_results.rds")
-    save_analysis_results(results, results_filename)
-  }
-  
-  cat("Session saved as:", session_name, "\n")
-  return(session_name)
-}
-
-# Function to load complete session
-load_session <- function(session_name = NULL) {
-  if (is.null(session_name)) {
-    # List available sessions
-    gatingset_dir <- here("out", "GatingSet")
-    data_dir <- here("out", "data")
-    
-    # Find session names from GatingSet files
-    if (dir.exists(gatingset_dir)) {
-      gs_files <- list.files(gatingset_dir, pattern = "_gatingset\\.rds$", full.names = FALSE)
-      session_names <- str_remove(gs_files, "_gatingset\\.rds$")
-      
-      if (length(session_names) > 0) {
-        cat("Available sessions:\n")
-        iwalk(session_names, ~cat(sprintf("%d. %s\n", .y, .x)))
-        
-        choice <- readline("Enter session number or name: ")
-        
-        if (grepl("^\\d+$", choice)) {
-          choice_num <- as.numeric(choice)
-          if (!is.na(choice_num) && choice_num >= 1 && choice_num <= length(session_names)) {
-            session_name <- session_names[choice_num]
-          }
-        } else if (choice %in% session_names) {
-          session_name <- choice
-        }
-      } else {
-        cat("No sessions found\n")
-        return(NULL)
-      }
-    } else {
-      cat("No saved sessions found\n")
-      return(NULL)
-    }
-  }
-  
-  if (is.null(session_name)) {
-    cat("Invalid session selection\n")
-    return(NULL)
-  }
-  
-  # Load GatingSet
-  gs_filename <- paste0(session_name, "_gatingset.rds")
-  gs <- load_gatingset(gs_filename)
-  
-  # Load results if available
-  results_filename <- paste0(session_name, "_results.rds")
-  results <- load_analysis_results(results_filename)
-  
-  # Assign to global environment
-  if (!is.null(gs)) {
-    assign("gs", gs, envir = .GlobalEnv)
-    cat("GatingSet loaded and assigned to 'gs'\n")
-  }
-  
-  if (!is.null(results)) {
-    assign("loaded_results", results, envir = .GlobalEnv)
-    cat("Results loaded and assigned to 'loaded_results'\n")
-  }
-  
-  return(list(gs = gs, results = results))
 }
 
 # ============================================================================
@@ -1599,22 +463,15 @@ preview_parent_mapping <- function(nodes, parent_mapping, gs) {
 # DATA EXTRACTION
 # ============================================================================
 
-# Enhanced marker lookup with annotation support
-get_marker_lookup <- function(gs, interactive_annotation = FALSE) {
+# Get marker lookup table
+get_marker_lookup <- function(gs) {
   fh <- gh_pop_get_data(gs[[1]], "/")
   params <- pData(parameters(fh))
   
-  lookup <- tibble(
+  tibble(
     colname = params$name,
     marker = if_else(is.na(params$desc) | params$desc == "", params$name, params$desc)
   )
-  
-  # Check if interactive annotation is needed/requested
-  if (interactive_annotation) {
-    lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
-  }
-  
-  return(lookup)
 }
 
 # Select channels for MFI analysis with back navigation
@@ -1830,6 +687,7 @@ extract_counts_freqs <- function(gs, nodes, parent_mapping = NULL, keywords = c(
   results %>% mutate(NodeShort = basename(Node))
 }
 
+# Extract MFI data
 # Extract MFI data
 extract_mfi <- function(gs, nodes, channels = NULL, summary_fun = median, keywords = c("$WELLID", "GROUPNAME")) {
   if(is.null(channels)) {
@@ -2098,18 +956,7 @@ analyze_flow_data <- function(gs,
        channel_result == "BACK") next  # Continue to parent selection
   }
 }
-# Save Analysis function
 
-save_analysis_results <- function(results, filename = "analysis_results.rds") {
-  # Ensure output directory exists
-  ensure_output_dirs()
-  
-  full_path <- here("out", "data", filename)
-  saveRDS(results, full_path)
-  cat("Analysis results saved to:", full_path, "\n")
-  
-  return(invisible(full_path))
-}
 # ---------------------------------------------------------------------------
 # CONGENIC EXTRACTION HELPERS
 # ---------------------------------------------------------------------------
@@ -2150,125 +997,26 @@ add_congenics_column <- function(results, candidates = c("CD45.1", "CD45.2", "CD
 # results <- analyze_flow_data(gs)
 # results <- add_congenics_column(results)
 
-# ============================================================================
-# ENHANCED ANALYSIS FUNCTIONS WITH FLEXIBLE METADATA (UPDATED)
-# ============================================================================
+# ---------------------------------------------------------------------------
+# WRAPPER: Run analysis and automatically add congenics column
+# ---------------------------------------------------------------------------
+# This wrapper calls your existing `analyze_flow_data()` function with any
+# provided arguments, then appends the `congenics` column to both counts and
+# mfi using `add_congenics_column()` before returning the results.
+# Use this in place of calling `analyze_flow_data()` directly when you want the
+# congenics column added automatically.
 
-# Enhanced analyze_flow_data_flexible() function that includes congenics by default
-analyze_flow_data_flexible <- function(gs, 
-                                       metadata_config = NULL,
-                                       node_selection = "interactive", 
-                                       parent_selection = "interactive",
-                                       channels = NULL,
-                                       summary_fun = median,
-                                       auto_detect_metadata = TRUE,
-                                       interactive_annotation = FALSE,
-                                       add_congenics = TRUE,  # NEW: Default to TRUE
-                                       congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
+analyze_flow_data_auto <- function(..., add_congenics = TRUE, congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
+  # Call the original analysis function
+  results <- analyze_flow_data(...)
   
-  cat("=== Enhanced Flexible Flow Cytometry Analysis Pipeline ===\n")
+  if(is.null(results)) return(NULL)
   
-  # Step 0: Handle channel annotation if requested
-  if (interactive_annotation) {
-    cat("Checking channel annotations...\n")
-    annotated_lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
-  }
-  
-  # Step 1: Configure metadata
-  if (auto_detect_metadata || is.null(metadata_config)) {
-    metadata_config <- detect_metadata_structure(gs, metadata_config, interactive = TRUE)
-  }
-  
-  # Extract available keywords (remove NAs)
-  keywords <- unlist(metadata_config[!is.na(metadata_config)])
-  
-  cat("\nUsing metadata columns:", paste(keywords, collapse = ", "), "\n")
-  
-  # Step 2: Continue with existing analysis but use flexible keywords
-  result <- analyze_flow_data(
-    gs = gs,
-    node_selection = node_selection,
-    parent_selection = parent_selection, 
-    channels = channels,
-    summary_fun = summary_fun,
-    keywords = keywords
-  )
-  
-  if (is.null(result)) return(NULL)
-  
-  # Step 3: Add metadata configuration to results
-  result$metadata_config <- metadata_config
-  result$keywords_used <- keywords
-  
-  # Step 4: Add congenics if requested (NEW FUNCTIONALITY)
-  if (add_congenics) {
-    cat("\nAdding congenic markers...\n")
-    
-    tryCatch({
-      result <- add_congenics_column(result, candidates = congenic_candidates)
-      cat("✓ Successfully added congenics column\n")
-      
-      # Display congenic summary if successful
-      if (!is.null(result$counts) && "congenics" %in% names(result$counts)) {
-        congenic_summary <- result$counts %>%
-          filter(!is.na(congenics)) %>%
-          count(congenics, name = "n_observations") %>%
-          arrange(desc(n_observations))
-        
-        if (nrow(congenic_summary) > 0) {
-          cat("Detected congenics:\n")
-          for (i in 1:nrow(congenic_summary)) {
-            cat(sprintf("  - %s: %d observations\n", 
-                        congenic_summary$congenics[i], 
-                        congenic_summary$n_observations[i]))
-          }
-        } else {
-          cat("⚠️  No congenics detected in the data\n")
-        }
-      }
-      
-    }, error = function(e) {
-      cat("⚠️  Warning: Could not add congenics column:", e$message, "\n")
-      cat("Continuing without congenics...\n")
-    })
-  }
-  
-  return(result)
-}
-
-# For backward compatibility, create an alias that maintains the old interface
-analyze_flow_data_auto_enhanced <- function(gs, ..., 
-                                            add_congenics = TRUE, 
-                                            congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
-                                            metadata_config = NULL) {
-  
-  # Call the enhanced flexible function
-  return(analyze_flow_data_flexible(
-    gs = gs,
-    metadata_config = metadata_config,
-    add_congenics = add_congenics,
-    congenic_candidates = congenic_candidates,
-    ...
-  ))
-}
-
-# Enhanced wrapper that maintains backward compatibility
-analyze_flow_data_auto_enhanced <- function(gs, ..., 
-                                            add_congenics = TRUE, 
-                                            congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
-                                            metadata_config = NULL) {
-  
-  # Run flexible analysis
-  results <- analyze_flow_data_flexible(gs, metadata_config = metadata_config, ...)
-  
-  if (is.null(results)) return(NULL)
-  
-  # Add congenics if requested
-  if (add_congenics) {
+  if(add_congenics) {
     results <- add_congenics_column(results, candidates = congenic_candidates)
   }
   
-  return(results)
+  results
 }
 
 #==============================================================================
@@ -2788,57 +1536,6 @@ create_paired_comparison_plots <- function(data) {
 # plots[["CD103+CD69+"]]  # View specific cell population plot (when faceting by GROUPNAME)
 # plots[["Spleen"]]       # View specific tissue plot (when faceting by NodeShort)
 
-# Flexible paired comparison plots (NEW)
-create_flexible_paired_plots <- function(data, metadata_config = NULL, test_type = "t_test") {
-  
-  # Auto-detect grouping variables if not provided
-  if (is.null(metadata_config)) {
-    metadata_config <- .flow_config$current_mappings
-  }
-  
-  # Determine available grouping variables
-  available_groups <- names(metadata_config)[!is.na(metadata_config)]
-  actual_columns <- unlist(metadata_config[!is.na(metadata_config)])
-  
-  # Filter to columns that exist in data and are categorical
-  valid_groups <- available_groups[map_lgl(available_groups, function(concept) {
-    col_name <- metadata_config[[concept]]
-    col_name %in% names(data) && !is.numeric(data[[col_name]])
-  })]
-  
-  if (length(valid_groups) == 0) {
-    stop("No suitable grouping variables found in data")
-  }
-  
-  cat("=== Flexible Paired Comparison Setup ===\n")
-  cat("Available grouping concepts:\n")
-  iwalk(valid_groups, function(concept, idx) {
-    col_name <- metadata_config[[concept]]
-    n_levels <- n_distinct(data[[col_name]], na.rm = TRUE)
-    cat(sprintf("%d. %s (%s) - %d levels\n", idx, concept, col_name, n_levels))
-  })
-  
-  # Interactive selection
-  group_choice <- readline("Select grouping concept number: ")
-  if (grepl("^\\d+$", group_choice)) {
-    group_num <- as.numeric(group_choice)
-    if (group_num >= 1 && group_num <= length(valid_groups)) {
-      selected_concept <- valid_groups[group_num]
-      group_column <- metadata_config[[selected_concept]]
-      
-      cat(sprintf("Using %s (%s) for grouping\n", selected_concept, group_column))
-      
-      # Rename column to standardized name for compatibility
-      data_renamed <- data %>%
-        rename(GROUPNAME = all_of(group_column))
-      
-      # Use existing plotting function
-      return(create_paired_comparison_plots(data_renamed))
-    }
-  }
-  
-  stop("Invalid grouping selection")
-}
 
 #===============================================================================
 # Enhanced MFI heatmaps with additional interactive options
@@ -4528,14 +3225,11 @@ create_mfi_heatmaps_interactive_enhanced <- function(mfi_data, ...) {
 # ===== UTILITY FUNCTIONS =====
 
 # Export statistics results to data frame
-export_stats_results <- function(stats_results, filename = "stats_results.csv") {
+export_stats_results <- function(stats_results, file_path = NULL) {
   if (is.null(stats_results) || is.null(stats_results$summary)) {
     warning("No statistical results to export")
     return(NULL)
   }
-  
-  # Ensure output directory exists
-  ensure_output_dirs()
   
   export_df <- stats_results$summary %>%
     mutate(
@@ -4547,10 +3241,11 @@ export_stats_results <- function(stats_results, filename = "stats_results.csv") 
            alpha_level, significance_display, test_name) %>%
     arrange(tissue, marker)
   
-  full_path <- here("out", "data", filename)
-  write_csv(export_df, full_path)
-  cat("Statistical results exported to:", full_path, "\n")
-  cat("Results include", nrow(export_df), "tissue-marker combinations\n")
+  if (!is.null(file_path)) {
+    write_csv(export_df, file_path)
+    cat("Statistical results exported to:", file_path, "\n")
+    cat("Results include", nrow(export_df), "tissue-marker combinations\n")
+  }
   
   return(export_df)
 }
@@ -5143,300 +3838,6 @@ create_engraftment_plot <- function(data,
   }
 }
 
-# Enhanced flexible engraftment plot function that automatically detects data structure
-create_flexible_engraftment_plot <- function(data, metadata_config = NULL, ...) {
-  
-  cat("=== Auto-detecting data structure for engraftment plot ===\n")
-  
-  # Step 1: Auto-detect if data has been processed (standardized column names)
-  processed_columns <- c("sample_id", "tissue")
-  has_processed_cols <- all(processed_columns %in% names(data))
-  
-  if (has_processed_cols) {
-    cat("✓ Detected processed data with standardized column names\n")
-    cat("  Using: sample_id, tissue\n")
-    
-    return(create_engraftment_plot(
-      data = data,
-      wellid_col = "sample_id",
-      group_col = "tissue",
-      ...
-    ))
-  }
-  
-  # Step 2: Try common raw column name patterns
-  common_sample_patterns <- c("$WELLID", "WELLID", "Sample", "SampleID", "sample_id")
-  common_tissue_patterns <- c("GROUPNAME", "tissue", "Tissue", "Group", "Location", "Organ")
-  
-  # Find sample ID column
-  sample_col <- NULL
-  for (pattern in common_sample_patterns) {
-    if (pattern %in% names(data)) {
-      sample_col <- pattern
-      break
-    }
-  }
-  
-  # Find tissue/group column  
-  tissue_col <- NULL
-  for (pattern in common_tissue_patterns) {
-    if (pattern %in% names(data)) {
-      tissue_col <- pattern
-      break
-    }
-  }
-  
-  # Step 3: Use metadata configuration if direct detection failed
-  if (is.null(sample_col) || is.null(tissue_col)) {
-    cat("Direct detection failed, trying metadata configuration...\n")
-    
-    if (is.null(metadata_config)) {
-      # Try global config
-      if (exists(".flow_config") && !is.null(.flow_config$current_mappings)) {
-        metadata_config <- .flow_config$current_mappings
-        cat("Using global metadata configuration\n")
-      } else {
-        # Last resort: try to infer from available columns
-        available_cols <- names(data)
-        cat("Available columns:", paste(available_cols, collapse = ", "), "\n")
-        
-        # Look for columns that might be sample IDs (contain ID, Well, Sample)
-        if (is.null(sample_col)) {
-          sample_candidates <- available_cols[grepl("(?i)(wellid|sample|id|well)", available_cols)]
-          if (length(sample_candidates) > 0) {
-            sample_col <- sample_candidates[1]
-            cat("Inferred sample column:", sample_col, "\n")
-          }
-        }
-        
-        # Look for columns that might be tissues/groups
-        if (is.null(tissue_col)) {
-          tissue_candidates <- available_cols[grepl("(?i)(group|tissue|location|organ|site)", available_cols)]
-          if (length(tissue_candidates) > 0) {
-            tissue_col <- tissue_candidates[1]
-            cat("Inferred tissue column:", tissue_col, "\n")
-          }
-        }
-      }
-    }
-    
-    # Extract from metadata config if available
-    if (!is.null(metadata_config)) {
-      if (is.null(sample_col) && !is.na(metadata_config$sample_id)) {
-        sample_col <- metadata_config$sample_id
-      }
-      if (is.null(tissue_col) && !is.na(metadata_config$tissue)) {
-        tissue_col <- metadata_config$tissue
-      }
-    }
-  }
-  
-  # Step 4: Final validation
-  if (is.null(sample_col) || !sample_col %in% names(data)) {
-    stop(paste(
-      "Could not auto-detect sample ID column.",
-      "\nAvailable columns:", paste(names(data), collapse = ", "),
-      "\nPlease specify manually using: create_engraftment_plot(data, wellid_col = 'your_column')"
-    ))
-  }
-  
-  if (is.null(tissue_col) || !tissue_col %in% names(data)) {
-    stop(paste(
-      "Could not auto-detect tissue/group column.",
-      "\nAvailable columns:", paste(names(data), collapse = ", "),
-      "\nPlease specify manually using: create_engraftment_plot(data, group_col = 'your_column')"
-    ))
-  }
-  
-  # Step 5: Success! Use detected columns
-  cat("✓ Auto-detected columns:\n")
-  cat("  Sample ID:", sample_col, "\n")
-  cat("  Tissue/Group:", tissue_col, "\n")
-  
-  return(create_engraftment_plot(
-    data = data,
-    wellid_col = sample_col,
-    group_col = tissue_col,
-    ...
-  ))
-}
-
-# Also update the main analysis function to be more automatic
-analyze_flow_data_flexible <- function(gs, 
-                                       metadata_config = NULL,
-                                       node_selection = "interactive", 
-                                       parent_selection = "interactive",
-                                       channels = NULL,
-                                       summary_fun = median,
-                                       auto_detect_metadata = TRUE,
-                                       interactive_annotation = FALSE,
-                                       add_congenics = TRUE,
-                                       congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
-  
-  cat("=== Enhanced Flexible Flow Cytometry Analysis Pipeline ===\n")
-  
-  # Step 0: Handle channel annotation if requested
-  if (interactive_annotation) {
-    cat("Checking channel annotations...\n")
-    annotated_lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
-  }
-  
-  # Step 1: Configure metadata (more automatic)
-  if (auto_detect_metadata || is.null(metadata_config)) {
-    cat("Auto-detecting metadata structure...\n")
-    metadata_config <- detect_metadata_structure(gs, metadata_config, interactive = FALSE)  # Less interactive
-    
-    # Store in global config for other functions to use
-    if (exists(".flow_config")) {
-      .flow_config$current_mappings <- metadata_config
-    }
-  }
-  
-  # Extract available keywords (remove NAs)
-  keywords <- unlist(metadata_config[!is.na(metadata_config)])
-  
-  cat("Using metadata columns:", paste(keywords, collapse = ", "), "\n")
-  
-  # Step 2: Continue with existing analysis but use flexible keywords
-  result <- analyze_flow_data(
-    gs = gs,
-    node_selection = node_selection,
-    parent_selection = parent_selection, 
-    channels = channels,
-    summary_fun = summary_fun,
-    keywords = keywords
-  )
-  
-  if (is.null(result)) return(NULL)
-  
-  # Step 3: Add metadata configuration to results
-  result$metadata_config <- metadata_config
-  result$keywords_used <- keywords
-  
-  # Step 4: Add congenics automatically
-  if (add_congenics) {
-    cat("Adding congenic markers automatically...\n")
-    
-    tryCatch({
-      result <- add_congenics_column(result, candidates = congenic_candidates)
-      cat("✓ Successfully added congenics column\n")
-      
-      # Display congenic summary if successful
-      if (!is.null(result$counts) && "congenics" %in% names(result$counts)) {
-        congenic_summary <- result$counts %>%
-          filter(!is.na(congenics)) %>%
-          count(congenics, name = "n_observations") %>%
-          arrange(desc(n_observations))
-        
-        if (nrow(congenic_summary) > 0) {
-          cat("Detected congenics:\n")
-          for (i in 1:nrow(congenic_summary)) {
-            cat(sprintf("  - %s: %d observations\n", 
-                        congenic_summary$congenics[i], 
-                        congenic_summary$n_observations[i]))
-          }
-        } else {
-          cat("⚠️  No congenics detected in the data\n")
-        }
-      }
-      
-    }, error = function(e) {
-      cat("⚠️  Warning: Could not add congenics column:", e$message, "\n")
-      cat("Continuing without congenics...\n")
-    })
-  }
-  
-  return(result)
-}
-
-# Also update the main analysis function to be more automatic
-analyze_flow_data_flexible <- function(gs, 
-                                       metadata_config = NULL,
-                                       node_selection = "interactive", 
-                                       parent_selection = "interactive",
-                                       channels = NULL,
-                                       summary_fun = median,
-                                       auto_detect_metadata = TRUE,
-                                       interactive_annotation = FALSE,
-                                       add_congenics = TRUE,
-                                       congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
-  
-  cat("=== Enhanced Flexible Flow Cytometry Analysis Pipeline ===\n")
-  
-  # Step 0: Handle channel annotation if requested
-  if (interactive_annotation) {
-    cat("Checking channel annotations...\n")
-    annotated_lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
-  }
-  
-  # Step 1: Configure metadata (more automatic)
-  if (auto_detect_metadata || is.null(metadata_config)) {
-    cat("Auto-detecting metadata structure...\n")
-    metadata_config <- detect_metadata_structure(gs, metadata_config, interactive = FALSE)  # Less interactive
-    
-    # Store in global config for other functions to use
-    if (exists(".flow_config")) {
-      .flow_config$current_mappings <- metadata_config
-    }
-  }
-  
-  # Extract available keywords (remove NAs)
-  keywords <- unlist(metadata_config[!is.na(metadata_config)])
-  
-  cat("Using metadata columns:", paste(keywords, collapse = ", "), "\n")
-  
-  # Step 2: Continue with existing analysis but use flexible keywords
-  result <- analyze_flow_data(
-    gs = gs,
-    node_selection = node_selection,
-    parent_selection = parent_selection, 
-    channels = channels,
-    summary_fun = summary_fun,
-    keywords = keywords
-  )
-  
-  if (is.null(result)) return(NULL)
-  
-  # Step 3: Add metadata configuration to results
-  result$metadata_config <- metadata_config
-  result$keywords_used <- keywords
-  
-  # Step 4: Add congenics automatically
-  if (add_congenics) {
-    cat("Adding congenic markers automatically...\n")
-    
-    tryCatch({
-      result <- add_congenics_column(result, candidates = congenic_candidates)
-      cat("✓ Successfully added congenics column\n")
-      
-      # Display congenic summary if successful
-      if (!is.null(result$counts) && "congenics" %in% names(result$counts)) {
-        congenic_summary <- result$counts %>%
-          filter(!is.na(congenics)) %>%
-          count(congenics, name = "n_observations") %>%
-          arrange(desc(n_observations))
-        
-        if (nrow(congenic_summary) > 0) {
-          cat("Detected congenics:\n")
-          for (i in 1:nrow(congenic_summary)) {
-            cat(sprintf("  - %s: %d observations\n", 
-                        congenic_summary$congenics[i], 
-                        congenic_summary$n_observations[i]))
-          }
-        } else {
-          cat("⚠️  No congenics detected in the data\n")
-        }
-      }
-      
-    }, error = function(e) {
-      cat("⚠️  Warning: Could not add congenics column:", e$message, "\n")
-      cat("Continuing without congenics...\n")
-    })
-  }
-  
-  return(result)
-}
-  
 #=============================================================================
 # UMAP Interactive tool
 # ============================================================================
@@ -6775,7 +5176,7 @@ create_multi_marker_heatmap <- function() {
       theme_void() +
       theme(
         plot.title = element_text(size = 10, hjust = 0.5),
-        legend.key.size = unit(0.6, "cm"),
+        legend.key.size = unit(0.6, "cm"), # Legend key dot size
         legend.text = element_text(size = 6)
       )
   })
@@ -6822,17 +5223,13 @@ create_multi_marker_heatmap <- function() {
         filename <- paste0(filename, ".png")
       }
       
-      # Ensure output directory exists
-      ensure_output_dirs()
-      
       # Adjust size based on number of markers
       width <- max(8, ceiling(ncol_grid * 2.5))
       height <- max(6, ceiling((length(marker_plots) / ncol_grid) * 2))
       
       tryCatch({
-        ggsave(here("out", "plots", filename), plot = combined_plot, 
-               width = width, height = height, dpi = 300)
-        cat("Heatmap saved as:", here("out", "plots", filename), "\n")
+        ggsave(filename, plot = combined_plot, width = width, height = height, dpi = 300)
+        cat("Heatmap saved as:", filename, "\n")
       }, error = function(e) {
         cat("Error saving plot:", e$message, "\n")
       })
@@ -6887,9 +5284,6 @@ create_density_plot <- function() {
   if (!is.null(save_choice) && save_choice == "Yes, save plot") {
     filename <- readline("Enter filename: ")
     if (filename == "") filename <- NULL
-    if (!is.null(filename) && !str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
-      filename <- paste0(filename, ".png")
-    }
   }
   
   create_and_save_umap_plot(
@@ -6956,14 +5350,9 @@ manage_stored_plots <- function() {
           if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
             filename <- paste0(filename, ".png")
           }
-          
-          # Ensure output directory exists
-          ensure_output_dirs()
-          
           tryCatch({
-            ggsave(here("out", "plots", filename), 
-                   plot = .umap_session_plots$plots[[selected_plot_id]]$plot)
-            cat("Plot saved as:", here("out", "plots", filename), "\n")
+            ggsave(filename, plot = .umap_session_plots$plots[[selected_plot_id]]$plot)
+            cat("Plot saved as:", filename, "\n")
           }, error = function(e) {
             cat("Error saving plot:", e$message, "\n")
           })
@@ -6979,7 +5368,9 @@ manage_stored_plots <- function() {
       }
       
     } else if (action == "Export all plots") {
-      export_all_session_plots()
+      directory <- readline("Export directory (default: umap_plots): ")
+      if (directory == "") directory <- "umap_plots"
+      export_all_session_plots(directory)
       
     } else if (action == "Clear all plots") {
       confirm_options <- c("Yes, clear all", "No, cancel")
@@ -7588,128 +5979,27 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME"))
   return(results)
 }
 
-# Enhanced UMAP analysis with flexible metadata (NEW)
-analyze_flow_umap_flexible <- function(gs, metadata_config = NULL, keywords = NULL) {
-  
-  # Configure metadata
-  if (is.null(metadata_config)) {
-    metadata_config <- detect_metadata_structure(gs, interactive = TRUE)
-  }
-  
-  # Use configured keywords
-  if (is.null(keywords)) {
-    keywords <- unlist(metadata_config[!is.na(metadata_config)])
-  }
-  
-  cat("Using keywords for UMAP analysis:", paste(keywords, collapse = ", "), "\n")
-  
-  # Call enhanced UMAP analysis with flexible keywords
-  return(analyze_flow_umap_enhanced(gs, keywords = keywords))
-}
-
-# ============================================================================
-# UTILITY FUNCTIONS FOR METADATA MANAGEMENT (NEW)
-# ============================================================================
-
-# Function to preview metadata structure
-preview_metadata_structure <- function(gs) {
-  cat("=== Metadata Structure Preview ===\n")
-  
-  tryCatch({
-    pd <- pData(gs)
-    
-    cat("Available columns and sample data:\n")
-    for (col in names(pd)) {
-      unique_vals <- unique(pd[[col]])
-      n_unique <- length(unique_vals)
-      
-      if (n_unique <= 5) {
-        val_preview <- paste(unique_vals, collapse = ", ")
-      } else {
-        val_preview <- paste(c(head(unique_vals, 3), "..."), collapse = ", ")
-      }
-      
-      cat(sprintf("  %s (%d unique): %s\n", col, n_unique, val_preview))
-    }
-  }, error = function(e) {
-    cat("Error accessing metadata:", e$message, "\n")
-  })
-}
-
-# Function to validate metadata configuration
-validate_metadata_config <- function(gs, metadata_config) {
-  cat("=== Metadata Configuration Validation ===\n")
-  
-  tryCatch({
-    pd <- pData(gs)
-    available_cols <- names(pd)
-    
-    validation_results <- map_lgl(names(metadata_config), function(concept) {
-      col_name <- metadata_config[[concept]]
-      
-      if (is.na(col_name)) {
-        cat(sprintf("  %s: NOT SET\n", concept))
-        return(TRUE)  # NA is valid (optional)
-      }
-      
-      if (col_name %in% available_cols) {
-        cat(sprintf("  ✓ %s: %s (valid)\n", concept, col_name))
-        return(TRUE)
-      } else {
-        cat(sprintf("  ✗ %s: %s (MISSING)\n", concept, col_name))
-        return(FALSE)
-      }
-    })
-    
-    all_valid <- all(validation_results)
-    cat(sprintf("\nValidation result: %s\n", 
-                if (all_valid) "✓ PASSED" else "✗ FAILED"))
-    
-    return(all_valid)
-    
-  }, error = function(e) {
-    cat("Error validating configuration:", e$message, "\n")
-    return(FALSE)
-  })
-}
-
-save_metadata_config <- function(config, filename = "metadata_config.rds") {
-  ensure_output_dirs()
-  full_path <- here("out", "data", filename)
-  saveRDS(config, full_path)
-  cat("Metadata configuration saved to:", full_path, "\n")
-}
-
-load_metadata_config <- function(filename = "metadata_config.rds") {
-  full_path <- here("out", "data", filename)
-  if (file.exists(full_path)) {
-    config <- readRDS(full_path)
-    .flow_config$current_mappings <- config
-    cat("Metadata configuration loaded from:", full_path, "\n")
-    return(config)
-  } else {
-    cat("Configuration file not found:", full_path, "\n")
-    return(NULL)
-  }
-}
-
 # ============================================================================
 # UTILITY FUNCTIONS FOR ENHANCED FEATURES
 # ============================================================================
+
 # Function to export all session plots at once
-export_all_session_plots <- function(width = 8, 
+export_all_session_plots <- function(directory = "umap_plots", 
+                                     width = 8, 
                                      height = 6, 
                                      dpi = 300,
                                      format = "png") {
   
-  if (length(.umap_session_plots$plots) == 0) {
+  if(length(.umap_session_plots$plots) == 0) {
     cat("No plots to export\n")
     return(invisible(NULL))
   }
   
-  # Ensure output directory exists
-  ensure_output_dirs()
-  directory <- here("out", "plots")
+  # Create directory if it doesn't exist
+  if(!dir.exists(directory)) {
+    dir.create(directory, recursive = TRUE)
+    cat("Created directory:", directory, "\n")
+  }
   
   # Export each plot
   exported_files <- map_chr(names(.umap_session_plots$plots), function(plot_id) {
@@ -7801,19 +6091,16 @@ create_quick_umap_plot <- function(umap_results, color_by, plot_title = NULL) {
 # Function to export UMAP data
 export_umap_data <- function(umap_results, filename = "umap_data.csv") {
   
-  # Ensure output directory exists
-  ensure_output_dirs()
-  
   export_data <- umap_results$final_data %>%
     select(-CellID)  # Remove cell ID for cleaner export
   
-  full_path <- here("out", "data", filename)
-  write_csv(export_data, full_path)
-  cat("UMAP data exported to:", full_path, "\n")
+  write_csv(export_data, filename)
+  cat("UMAP data exported to:", filename, "\n")
   cat("Columns exported:", paste(names(export_data), collapse = ", "), "\n")
   
   return(invisible(export_data))
 }
+
 # Function to get summary statistics by group
 summarize_umap_by_group <- function(umap_results, group_column) {
   
@@ -7857,109 +6144,6 @@ summarize_umap_by_group <- function(umap_results, group_column) {
   ))
 }
 
-# Create and Save UMAP plot function
-
-create_and_save_umap_plot <- function(color_by = NULL,
-                                      facet_by = NULL,
-                                      plot_type = "scatter",
-                                      title = NULL,
-                                      filename = NULL) {
-  
-  umap_data <- .umap_session_plots$umap_data
-  
-  # Create plot based on type
-  if (plot_type == "density") {
-    p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2)) +
-      geom_density_2d_filled(alpha = 0.6) +
-      geom_point(size = 0.1, alpha = 0.3) +
-      theme_minimal() +
-      theme(
-        axis.text = element_blank(),
-        axis.ticks = element_blank(),
-        panel.grid = element_blank()
-      )
-  } else {
-    # Scatter plot
-    if (!is.null(color_by)) {
-      p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = .data[[color_by]]))
-    } else {
-      p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2))
-    }
-    
-    p <- p +
-      geom_point(size = 0.3, alpha = 0.6) +
-      theme_minimal() +
-      theme(
-        axis.text = element_blank(),
-        axis.ticks = element_blank(),
-        panel.grid = element_blank()
-      )
-    
-    # Add appropriate color scale
-    if (!is.null(color_by)) {
-      if (is.numeric(umap_data[[color_by]])) {
-        p <- p + scale_color_viridis_c(option = "plasma")
-      } else {
-        n_levels <- n_distinct(umap_data[[color_by]], na.rm = TRUE)
-        if (n_levels <= 12) {
-          p <- p + scale_color_brewer(type = "qual", palette = "Set3")
-        } else {
-          p <- p + scale_color_viridis_d()
-        }
-      }
-    }
-  }
-  
-  # Add faceting if specified
-  if (!is.null(facet_by)) {
-    p <- p + facet_wrap(vars(.data[[facet_by]]))
-  }
-  
-  # Add title
-  if (!is.null(title)) {
-    p <- p + labs(title = title)
-  } else if (!is.null(color_by) && !is.null(facet_by)) {
-    p <- p + labs(title = paste("UMAP colored by", color_by, "faceted by", facet_by))
-  } else if (!is.null(color_by)) {
-    p <- p + labs(title = paste("UMAP colored by", color_by))
-  } else if (!is.null(facet_by)) {
-    p <- p + labs(title = paste("UMAP faceted by", facet_by))
-  }
-  
-  # Store plot in session
-  .umap_session_plots$plot_counter <<- .umap_session_plots$plot_counter + 1
-  plot_id <- paste0("plot_", .umap_session_plots$plot_counter)
-  
-  plot_info <- list(
-    plot = p,
-    color_by = color_by,
-    facet_by = facet_by,
-    plot_type = plot_type,
-    title = if (!is.null(title)) title else "UMAP plot",
-    timestamp = Sys.time()
-  )
-  
-  .umap_session_plots$plots[[plot_id]] <<- plot_info
-  
-  # Display plot
-  print(p)
-  
-  # Save if filename provided
-  if (!is.null(filename)) {
-    ensure_output_dirs()
-    
-    tryCatch({
-      ggsave(here("out", "plots", filename), plot = p, width = 8, height = 6, dpi = 300)
-      cat("Plot saved as:", here("out", "plots", filename), "\n")
-    }, error = function(e) {
-      cat("Error saving plot:", e$message, "\n")
-    })
-  }
-  
-  cat("Plot created and stored as:", plot_id, "\n")
-  return(plot_id)
-}
-
 # ============================================================================
 # EXAMPLE USAGE AND DOCUMENTATION
 # ============================================================================
@@ -7998,51 +6182,22 @@ cat("- Fixed all numeric input handling to prevent NA errors\n")
 # export_all_session_plots("plots", format = "png")
 
 #=============================================================================
-# ENHANCED EXAMPLE USAGE (UPDATED)
+# EXAMPLE USAGE
 # ============================================================================
-
-# # Setup (same as before)
+# 
+# # # Setup
 # gs <- setup_flowjo_workspace(
 #   xml_path = here("data/20-Jun-2025.wsp"),
 #   fcs_path = here("data/fcs_files/")
-# )
-
-# # NEW: Annotate channels if markers weren't defined during acquisition
-# preview_metadata_structure(gs)  # Check what's available
-# annotated_lookup <- annotate_channels_interactive(gs)  # Interactive annotation
-
-# # OR: Run analysis with built-in annotation check
-# congenics_results <- analyze_flow_data_flexible(gs, interactive_annotation = TRUE)
-
-# # Load previously saved annotations
-# saved_lookup <- load_channel_annotations(gs)
-
-# # View current channel mapping
-# current_lookup <- get_marker_lookup_enhanced(gs)
-# print(current_lookup)
-
-# # NEW: Preview available metadata first
-# preview_metadata_structure(gs)
-
-# # NEW: Configure metadata (interactive)
-# metadata_config <- detect_metadata_structure(gs)
-
-# # NEW: Save configuration for reuse
-# save_metadata_config(metadata_config, "my_experiment_config.rds")
-
-# # Run enhanced analysis (works with any metadata structure)
-# congenics_results <- analyze_flow_data_auto_enhanced(gs, metadata_config = metadata_config)
-
-# # OR use the completely flexible version
-# congenics_results <- analyze_flow_data_flexible(gs, metadata_config = metadata_config)
-
-# # Rest of your workflow stays the same
+#  )
+# # 
+# # # Run interactive analysis to get subpop-specifc DFs
+# congenics_results <-analyze_flow_data_auto(gs)
+# 
+# #Clean-Up Data Node naming data 
 # congenics_results <- data_clean_custom(congenics_results)
-# congenics_results_with_genotype <- assign_metadata_menu(congenics_results$counts)
+# 
+# # Add genotype information (Only works if the code can detect congenic markers)
+# congenics_results_with_genotype <- assign_genotypes_menu(congenics_results1$counts)
 
-# # NEW: Use flexible plotting functions
-# plots <- create_flexible_paired_plots(congenics_results_with_genotype)
-# engraftment_plot <- create_flexible_engraftment_plot(congenics_results_with_genotype)
-
-# # Enhanced UMAP with flexible metadata
-# umap_results <- analyze_flow_umap_flexible(gs, metadata_config = metadata_config)
+#===============================================================================
