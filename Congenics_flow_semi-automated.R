@@ -18,7 +18,23 @@ library(patchwork)
 # ============================================================================
 # CORE SETUP AND DATA LOADING
 # ============================================================================
+# Helper function to ensure output directories exist
+ensure_output_dirs <- function() {
+  if (!dir.exists(here("out", "plots"))) {
+    dir.create(here("out", "plots"), recursive = TRUE)
+    cat("Created directory:", here("out", "plots"), "\n")
+  }
+  if (!dir.exists(here("out", "data"))) {
+    dir.create(here("out", "data"), recursive = TRUE)
+    cat("Created directory:", here("out", "data"), "\n")
+  }
+  if (!dir.exists(here("out", "GatingSet"))) {
+    dir.create(here("out", "GatingSet"), recursive = TRUE)
+    cat("Created directory:", here("out", "GatingSet"), "\n")
+  }
+}
 
+#Set up flowJo_workspace
 setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("$WELLID", "GROUPNAME")) {
   ws <- open_flowjo_xml(xml_path)
   gs <- flowjo_to_gatingset(
@@ -29,6 +45,18 @@ setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("$WELLID", "
     extend_val = -10000
   )
   return(gs)
+}
+
+# Saving Gating Set
+save_gatingset <- function(gs, filename = "gatingset.rds") {
+  # Ensure output directory exists
+  ensure_output_dirs()
+  
+  full_path <- here("out", "GatingSet", filename)
+  saveRDS(gs, full_path)
+  cat("GatingSet saved to:", full_path, "\n")
+  
+  return(invisible(full_path))
 }
 
 # ============================================================================
@@ -691,7 +719,6 @@ extract_counts_freqs <- function(gs, nodes, parent_mapping = NULL, keywords = c(
 }
 
 # Extract MFI data
-# Extract MFI data
 extract_mfi <- function(gs, nodes, channels = NULL, summary_fun = median, keywords = c("$WELLID", "GROUPNAME")) {
   if(is.null(channels)) {
     channels <- select_channels_interactive(gs)
@@ -959,7 +986,18 @@ analyze_flow_data <- function(gs,
        channel_result == "BACK") next  # Continue to parent selection
   }
 }
+# Save Analysis function
 
+save_analysis_results <- function(results, filename = "analysis_results.rds") {
+  # Ensure output directory exists
+  ensure_output_dirs()
+  
+  full_path <- here("out", "data", filename)
+  saveRDS(results, full_path)
+  cat("Analysis results saved to:", full_path, "\n")
+  
+  return(invisible(full_path))
+}
 # ---------------------------------------------------------------------------
 # CONGENIC EXTRACTION HELPERS
 # ---------------------------------------------------------------------------
@@ -3228,11 +3266,14 @@ create_mfi_heatmaps_interactive_enhanced <- function(mfi_data, ...) {
 # ===== UTILITY FUNCTIONS =====
 
 # Export statistics results to data frame
-export_stats_results <- function(stats_results, file_path = NULL) {
+export_stats_results <- function(stats_results, filename = "stats_results.csv") {
   if (is.null(stats_results) || is.null(stats_results$summary)) {
     warning("No statistical results to export")
     return(NULL)
   }
+  
+  # Ensure output directory exists
+  ensure_output_dirs()
   
   export_df <- stats_results$summary %>%
     mutate(
@@ -3244,11 +3285,10 @@ export_stats_results <- function(stats_results, file_path = NULL) {
            alpha_level, significance_display, test_name) %>%
     arrange(tissue, marker)
   
-  if (!is.null(file_path)) {
-    write_csv(export_df, file_path)
-    cat("Statistical results exported to:", file_path, "\n")
-    cat("Results include", nrow(export_df), "tissue-marker combinations\n")
-  }
+  full_path <- here("out", "data", filename)
+  write_csv(export_df, full_path)
+  cat("Statistical results exported to:", full_path, "\n")
+  cat("Results include", nrow(export_df), "tissue-marker combinations\n")
   
   return(export_df)
 }
@@ -5179,7 +5219,7 @@ create_multi_marker_heatmap <- function() {
       theme_void() +
       theme(
         plot.title = element_text(size = 10, hjust = 0.5),
-        legend.key.size = unit(0.6, "cm"), # Legend key dot size
+        legend.key.size = unit(0.6, "cm"),
         legend.text = element_text(size = 6)
       )
   })
@@ -5226,13 +5266,17 @@ create_multi_marker_heatmap <- function() {
         filename <- paste0(filename, ".png")
       }
       
+      # Ensure output directory exists
+      ensure_output_dirs()
+      
       # Adjust size based on number of markers
       width <- max(8, ceiling(ncol_grid * 2.5))
       height <- max(6, ceiling((length(marker_plots) / ncol_grid) * 2))
       
       tryCatch({
-        ggsave(filename, plot = combined_plot, width = width, height = height, dpi = 300)
-        cat("Heatmap saved as:", filename, "\n")
+        ggsave(here("out", "plots", filename), plot = combined_plot, 
+               width = width, height = height, dpi = 300)
+        cat("Heatmap saved as:", here("out", "plots", filename), "\n")
       }, error = function(e) {
         cat("Error saving plot:", e$message, "\n")
       })
@@ -5287,6 +5331,9 @@ create_density_plot <- function() {
   if (!is.null(save_choice) && save_choice == "Yes, save plot") {
     filename <- readline("Enter filename: ")
     if (filename == "") filename <- NULL
+    if (!is.null(filename) && !str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
+      filename <- paste0(filename, ".png")
+    }
   }
   
   create_and_save_umap_plot(
@@ -5353,9 +5400,14 @@ manage_stored_plots <- function() {
           if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
             filename <- paste0(filename, ".png")
           }
+          
+          # Ensure output directory exists
+          ensure_output_dirs()
+          
           tryCatch({
-            ggsave(filename, plot = .umap_session_plots$plots[[selected_plot_id]]$plot)
-            cat("Plot saved as:", filename, "\n")
+            ggsave(here("out", "plots", filename), 
+                   plot = .umap_session_plots$plots[[selected_plot_id]]$plot)
+            cat("Plot saved as:", here("out", "plots", filename), "\n")
           }, error = function(e) {
             cat("Error saving plot:", e$message, "\n")
           })
@@ -5371,9 +5423,7 @@ manage_stored_plots <- function() {
       }
       
     } else if (action == "Export all plots") {
-      directory <- readline("Export directory (default: umap_plots): ")
-      if (directory == "") directory <- "umap_plots"
-      export_all_session_plots(directory)
+      export_all_session_plots()
       
     } else if (action == "Clear all plots") {
       confirm_options <- c("Yes, clear all", "No, cancel")
@@ -5987,22 +6037,19 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME"))
 # ============================================================================
 
 # Function to export all session plots at once
-export_all_session_plots <- function(directory = "umap_plots", 
-                                     width = 8, 
+export_all_session_plots <- function(width = 8, 
                                      height = 6, 
                                      dpi = 300,
                                      format = "png") {
   
-  if(length(.umap_session_plots$plots) == 0) {
+  if (length(.umap_session_plots$plots) == 0) {
     cat("No plots to export\n")
     return(invisible(NULL))
   }
   
-  # Create directory if it doesn't exist
-  if(!dir.exists(directory)) {
-    dir.create(directory, recursive = TRUE)
-    cat("Created directory:", directory, "\n")
-  }
+  # Ensure output directory exists
+  ensure_output_dirs()
+  directory <- here("out", "plots")
   
   # Export each plot
   exported_files <- map_chr(names(.umap_session_plots$plots), function(plot_id) {
@@ -6094,16 +6141,19 @@ create_quick_umap_plot <- function(umap_results, color_by, plot_title = NULL) {
 # Function to export UMAP data
 export_umap_data <- function(umap_results, filename = "umap_data.csv") {
   
+  # Ensure output directory exists
+  ensure_output_dirs()
+  
   export_data <- umap_results$final_data %>%
     select(-CellID)  # Remove cell ID for cleaner export
   
-  write_csv(export_data, filename)
-  cat("UMAP data exported to:", filename, "\n")
+  full_path <- here("out", "data", filename)
+  write_csv(export_data, full_path)
+  cat("UMAP data exported to:", full_path, "\n")
   cat("Columns exported:", paste(names(export_data), collapse = ", "), "\n")
   
   return(invisible(export_data))
 }
-
 # Function to get summary statistics by group
 summarize_umap_by_group <- function(umap_results, group_column) {
   
@@ -6145,6 +6195,109 @@ summarize_umap_by_group <- function(umap_results, group_column) {
     marker_summary = marker_summary,
     coordinate_summary = coord_summary
   ))
+}
+
+# Create and Save UMAP plot function
+
+create_and_save_umap_plot <- function(color_by = NULL,
+                                      facet_by = NULL,
+                                      plot_type = "scatter",
+                                      title = NULL,
+                                      filename = NULL) {
+  
+  umap_data <- .umap_session_plots$umap_data
+  
+  # Create plot based on type
+  if (plot_type == "density") {
+    p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2)) +
+      geom_density_2d_filled(alpha = 0.6) +
+      geom_point(size = 0.1, alpha = 0.3) +
+      theme_minimal() +
+      theme(
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank()
+      )
+  } else {
+    # Scatter plot
+    if (!is.null(color_by)) {
+      p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = .data[[color_by]]))
+    } else {
+      p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2))
+    }
+    
+    p <- p +
+      geom_point(size = 0.3, alpha = 0.6) +
+      theme_minimal() +
+      theme(
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank()
+      )
+    
+    # Add appropriate color scale
+    if (!is.null(color_by)) {
+      if (is.numeric(umap_data[[color_by]])) {
+        p <- p + scale_color_viridis_c(option = "plasma")
+      } else {
+        n_levels <- n_distinct(umap_data[[color_by]], na.rm = TRUE)
+        if (n_levels <= 12) {
+          p <- p + scale_color_brewer(type = "qual", palette = "Set3")
+        } else {
+          p <- p + scale_color_viridis_d()
+        }
+      }
+    }
+  }
+  
+  # Add faceting if specified
+  if (!is.null(facet_by)) {
+    p <- p + facet_wrap(vars(.data[[facet_by]]))
+  }
+  
+  # Add title
+  if (!is.null(title)) {
+    p <- p + labs(title = title)
+  } else if (!is.null(color_by) && !is.null(facet_by)) {
+    p <- p + labs(title = paste("UMAP colored by", color_by, "faceted by", facet_by))
+  } else if (!is.null(color_by)) {
+    p <- p + labs(title = paste("UMAP colored by", color_by))
+  } else if (!is.null(facet_by)) {
+    p <- p + labs(title = paste("UMAP faceted by", facet_by))
+  }
+  
+  # Store plot in session
+  .umap_session_plots$plot_counter <<- .umap_session_plots$plot_counter + 1
+  plot_id <- paste0("plot_", .umap_session_plots$plot_counter)
+  
+  plot_info <- list(
+    plot = p,
+    color_by = color_by,
+    facet_by = facet_by,
+    plot_type = plot_type,
+    title = if (!is.null(title)) title else "UMAP plot",
+    timestamp = Sys.time()
+  )
+  
+  .umap_session_plots$plots[[plot_id]] <<- plot_info
+  
+  # Display plot
+  print(p)
+  
+  # Save if filename provided
+  if (!is.null(filename)) {
+    ensure_output_dirs()
+    
+    tryCatch({
+      ggsave(here("out", "plots", filename), plot = p, width = 8, height = 6, dpi = 300)
+      cat("Plot saved as:", here("out", "plots", filename), "\n")
+    }, error = function(e) {
+      cat("Error saving plot:", e$message, "\n")
+    })
+  }
+  
+  cat("Plot created and stored as:", plot_id, "\n")
+  return(plot_id)
 }
 
 # ============================================================================
