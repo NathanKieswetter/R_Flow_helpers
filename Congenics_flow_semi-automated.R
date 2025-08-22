@@ -16,6 +16,170 @@ library(purrr)
 library(patchwork)
 
 # ============================================================================
+# ENHANCED METADATA CONFIGURATION SYSTEM (NEW)
+# ============================================================================
+
+# Global configuration for metadata handling
+.flow_config <- new.env()
+.flow_config$metadata_mappings <- list(
+  tissue = c("GROUPNAME", "Tissue", "Location", "Organ", "Site"),
+  sample_id = c("$WELLID", "WELLID", "SampleID", "Sample_ID", "ID"),
+  time_point = c("Timepoint", "Time", "Day", "Hour", "Visit"),
+  treatment = c("Treatment", "Condition", "Group", "Arm"),
+  batch = c("Batch", "Run", "Experiment", "Plate"),
+  subject = c("Subject", "Mouse", "Patient", "Animal", "ID")
+)
+
+# Function to detect and configure metadata columns
+detect_metadata_structure <- function(gs, custom_keywords = NULL, interactive = TRUE) {
+  cat("=== Metadata Structure Detection ===\n")
+  
+  # Get available metadata from pData
+  tryCatch({
+    pd <- pData(gs)
+    available_cols <- names(pd)
+    cat("Available metadata columns:\n")
+    iwalk(available_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
+  }, error = function(e) {
+    cat("Warning: Could not access pData. Using default keywords.\n")
+    available_cols <- c("$WELLID", "GROUPNAME")
+  })
+  
+  # Combine default mappings with custom keywords
+  if (!is.null(custom_keywords)) {
+    .flow_config$metadata_mappings <- modifyList(.flow_config$metadata_mappings, custom_keywords)
+  }
+  
+  # Auto-detect columns based on common patterns
+  detected_mappings <- list()
+  
+  for (concept in names(.flow_config$metadata_mappings)) {
+    possible_names <- .flow_config$metadata_mappings[[concept]]
+    matches <- intersect(possible_names, available_cols)
+    
+    if (length(matches) > 0) {
+      detected_mappings[[concept]] <- matches[1]  # Use first match
+      cat(sprintf("✓ Detected %s: %s\n", concept, matches[1]))
+    } else {
+      detected_mappings[[concept]] <- NA
+      cat(sprintf("✗ No %s column detected\n", concept))
+    }
+  }
+  
+  # Interactive refinement if requested
+  if (interactive) {
+    detected_mappings <- refine_metadata_mappings(detected_mappings, available_cols)
+  }
+  
+  # Store in global config
+  .flow_config$current_mappings <- detected_mappings
+  
+  return(detected_mappings)
+}
+
+refine_metadata_mappings <- function(detected_mappings, available_cols) {
+  cat("\n=== Metadata Mapping Refinement ===\n")
+  
+  while (TRUE) {
+    cat("\nCurrent mappings:\n")
+    iwalk(detected_mappings, function(value, concept) {
+      status <- if (is.na(value)) "NOT SET" else value
+      cat(sprintf("  %s: %s\n", concept, status))
+    })
+    
+    cat("\nOptions:\n")
+    cat("1. Modify a mapping\n")
+    cat("2. Add custom mapping\n")
+    cat("3. Remove a mapping\n")
+    cat("4. Show sample data preview\n")
+    cat("5. Accept current mappings\n")
+    
+    choice <- readline("Choose option (1-5): ")
+    
+    if (choice == "1") {
+      # Modify existing mapping
+      concept_names <- names(detected_mappings)
+      cat("\nSelect mapping to modify:\n")
+      iwalk(concept_names, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      concept_choice <- readline("Enter number: ")
+      if (grepl("^\\d+$", concept_choice)) {
+        concept_num <- as.numeric(concept_choice)
+        if (concept_num >= 1 && concept_num <= length(concept_names)) {
+          concept <- concept_names[concept_num]
+          
+          cat("\nAvailable columns:\n")
+          iwalk(available_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+          cat(sprintf("%d. Set to NA (not available)\n", length(available_cols) + 1))
+          
+          col_choice <- readline("Enter column number: ")
+          if (grepl("^\\d+$", col_choice)) {
+            col_num <- as.numeric(col_choice)
+            if (col_num >= 1 && col_num <= length(available_cols)) {
+              detected_mappings[[concept]] <- available_cols[col_num]
+              cat(sprintf("Updated %s to: %s\n", concept, available_cols[col_num]))
+            } else if (col_num == length(available_cols) + 1) {
+              detected_mappings[[concept]] <- NA
+              cat(sprintf("Set %s to NA\n", concept))
+            }
+          }
+        }
+      }
+      
+    } else if (choice == "2") {
+      # Add custom mapping
+      concept_name <- readline("Enter concept name (e.g., 'donor_age'): ")
+      if (concept_name != "") {
+        cat("\nAvailable columns:\n")
+        iwalk(available_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+        
+        col_choice <- readline("Enter column number: ")
+        if (grepl("^\\d+$", col_choice)) {
+          col_num <- as.numeric(col_choice)
+          if (col_num >= 1 && col_num <= length(available_cols)) {
+            detected_mappings[[concept_name]] <- available_cols[col_num]
+            cat(sprintf("Added %s: %s\n", concept_name, available_cols[col_num]))
+          }
+        }
+      }
+      
+    } else if (choice == "3") {
+      # Remove mapping
+      concept_names <- names(detected_mappings)
+      cat("\nSelect mapping to remove:\n")
+      iwalk(concept_names, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      concept_choice <- readline("Enter number: ")
+      if (grepl("^\\d+$", concept_choice)) {
+        concept_num <- as.numeric(concept_choice)
+        if (concept_num >= 1 && concept_num <= length(concept_names)) {
+          concept <- concept_names[concept_num]
+          detected_mappings[[concept]] <- NULL
+          cat(sprintf("Removed %s mapping\n", concept))
+        }
+      }
+      
+    } else if (choice == "4") {
+      # Show data preview
+      tryCatch({
+        pd <- pData(gs) %>% slice_head(n = 5)
+        cat("\nSample data preview:\n")
+        print(pd)
+      }, error = function(e) {
+        cat("Could not show data preview\n")
+      })
+      readline("Press Enter to continue...")
+      
+    } else if (choice == "5") {
+      break
+    }
+  }
+  
+  return(detected_mappings)
+}
+
+
+# ============================================================================
 # CORE SETUP AND DATA LOADING
 # ============================================================================
 # Helper function to ensure output directories exist
@@ -1471,26 +1635,67 @@ add_congenics_column <- function(results, candidates = c("CD45.1", "CD45.2", "CD
 # results <- analyze_flow_data(gs)
 # results <- add_congenics_column(results)
 
-# ---------------------------------------------------------------------------
-# WRAPPER: Run analysis and automatically add congenics column
-# ---------------------------------------------------------------------------
-# This wrapper calls your existing `analyze_flow_data()` function with any
-# provided arguments, then appends the `congenics` column to both counts and
-# mfi using `add_congenics_column()` before returning the results.
-# Use this in place of calling `analyze_flow_data()` directly when you want the
-# congenics column added automatically.
+# ============================================================================
+# ENHANCED ANALYSIS FUNCTIONS WITH FLEXIBLE METADATA (UPDATED)
+# ============================================================================
 
-analyze_flow_data_auto <- function(..., add_congenics = TRUE, congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
-  # Call the original analysis function
-  results <- analyze_flow_data(...)
+# Updated main analysis function with metadata detection
+analyze_flow_data_flexible <- function(gs, 
+                                       metadata_config = NULL,
+                                       node_selection = "interactive", 
+                                       parent_selection = "interactive",
+                                       channels = NULL,
+                                       summary_fun = median,
+                                       auto_detect_metadata = TRUE) {
   
-  if(is.null(results)) return(NULL)
+  cat("=== Flexible Flow Cytometry Analysis Pipeline ===\n")
   
-  if(add_congenics) {
+  # Step 1: Configure metadata
+  if (auto_detect_metadata || is.null(metadata_config)) {
+    metadata_config <- detect_metadata_structure(gs, metadata_config, interactive = TRUE)
+  }
+  
+  # Extract available keywords (remove NAs)
+  keywords <- unlist(metadata_config[!is.na(metadata_config)])
+  
+  cat("\nUsing metadata columns:", paste(keywords, collapse = ", "), "\n")
+  
+  # Continue with existing analysis but use flexible keywords
+  result <- analyze_flow_data(
+    gs = gs,
+    node_selection = node_selection,
+    parent_selection = parent_selection, 
+    channels = channels,
+    summary_fun = summary_fun,
+    keywords = keywords
+  )
+  
+  # Add metadata configuration to results
+  if (!is.null(result)) {
+    result$metadata_config <- metadata_config
+    result$keywords_used <- keywords
+  }
+  
+  return(result)
+}
+
+# Enhanced wrapper that maintains backward compatibility
+analyze_flow_data_auto_enhanced <- function(gs, ..., 
+                                            add_congenics = TRUE, 
+                                            congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
+                                            metadata_config = NULL) {
+  
+  # Run flexible analysis
+  results <- analyze_flow_data_flexible(gs, metadata_config = metadata_config, ...)
+  
+  if (is.null(results)) return(NULL)
+  
+  # Add congenics if requested
+  if (add_congenics) {
     results <- add_congenics_column(results, candidates = congenic_candidates)
   }
   
-  results
+  return(results)
 }
 
 #==============================================================================
@@ -2010,6 +2215,57 @@ create_paired_comparison_plots <- function(data) {
 # plots[["CD103+CD69+"]]  # View specific cell population plot (when faceting by GROUPNAME)
 # plots[["Spleen"]]       # View specific tissue plot (when faceting by NodeShort)
 
+# Flexible paired comparison plots (NEW)
+create_flexible_paired_plots <- function(data, metadata_config = NULL, test_type = "t_test") {
+  
+  # Auto-detect grouping variables if not provided
+  if (is.null(metadata_config)) {
+    metadata_config <- .flow_config$current_mappings
+  }
+  
+  # Determine available grouping variables
+  available_groups <- names(metadata_config)[!is.na(metadata_config)]
+  actual_columns <- unlist(metadata_config[!is.na(metadata_config)])
+  
+  # Filter to columns that exist in data and are categorical
+  valid_groups <- available_groups[map_lgl(available_groups, function(concept) {
+    col_name <- metadata_config[[concept]]
+    col_name %in% names(data) && !is.numeric(data[[col_name]])
+  })]
+  
+  if (length(valid_groups) == 0) {
+    stop("No suitable grouping variables found in data")
+  }
+  
+  cat("=== Flexible Paired Comparison Setup ===\n")
+  cat("Available grouping concepts:\n")
+  iwalk(valid_groups, function(concept, idx) {
+    col_name <- metadata_config[[concept]]
+    n_levels <- n_distinct(data[[col_name]], na.rm = TRUE)
+    cat(sprintf("%d. %s (%s) - %d levels\n", idx, concept, col_name, n_levels))
+  })
+  
+  # Interactive selection
+  group_choice <- readline("Select grouping concept number: ")
+  if (grepl("^\\d+$", group_choice)) {
+    group_num <- as.numeric(group_choice)
+    if (group_num >= 1 && group_num <= length(valid_groups)) {
+      selected_concept <- valid_groups[group_num]
+      group_column <- metadata_config[[selected_concept]]
+      
+      cat(sprintf("Using %s (%s) for grouping\n", selected_concept, group_column))
+      
+      # Rename column to standardized name for compatibility
+      data_renamed <- data %>%
+        rename(GROUPNAME = all_of(group_column))
+      
+      # Use existing plotting function
+      return(create_paired_comparison_plots(data_renamed))
+    }
+  }
+  
+  stop("Invalid grouping selection")
+}
 
 #===============================================================================
 # Enhanced MFI heatmaps with additional interactive options
@@ -4314,6 +4570,43 @@ create_engraftment_plot <- function(data,
   }
 }
 
+# Enhanced engraftment plot with flexible metadata (NEW)
+create_flexible_engraftment_plot <- function(data, metadata_config = NULL, ...) {
+  
+  # Auto-detect metadata if not provided
+  if (is.null(metadata_config)) {
+    if (exists(".flow_config") && !is.null(.flow_config$current_mappings)) {
+      metadata_config <- .flow_config$current_mappings
+    } else {
+      # Fallback to original column names
+      metadata_config <- list(
+        sample_id = ifelse("WELLID" %in% names(data), "WELLID", "$WELLID"),
+        tissue = ifelse("GROUPNAME" %in% names(data), "GROUPNAME", "GROUPNAME")
+      )
+    }
+  }
+  
+  # Map to expected column names
+  wellid_col <- metadata_config$sample_id
+  group_col <- metadata_config$tissue
+  
+  if (is.na(wellid_col) || !wellid_col %in% names(data)) {
+    stop("Sample ID column not found. Please configure metadata mappings.")
+  }
+  
+  if (is.na(group_col) || !group_col %in% names(data)) {
+    stop("Tissue/Group column not found. Please configure metadata mappings.")
+  }
+  
+  # Call original function with mapped column names
+  create_engraftment_plot(
+    data = data,
+    wellid_col = wellid_col,
+    group_col = group_col,
+    ...
+  )
+}
+
 #=============================================================================
 # UMAP Interactive tool
 # ============================================================================
@@ -6465,10 +6758,114 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME"))
   return(results)
 }
 
+# Enhanced UMAP analysis with flexible metadata (NEW)
+analyze_flow_umap_flexible <- function(gs, metadata_config = NULL, keywords = NULL) {
+  
+  # Configure metadata
+  if (is.null(metadata_config)) {
+    metadata_config <- detect_metadata_structure(gs, interactive = TRUE)
+  }
+  
+  # Use configured keywords
+  if (is.null(keywords)) {
+    keywords <- unlist(metadata_config[!is.na(metadata_config)])
+  }
+  
+  cat("Using keywords for UMAP analysis:", paste(keywords, collapse = ", "), "\n")
+  
+  # Call enhanced UMAP analysis with flexible keywords
+  return(analyze_flow_umap_enhanced(gs, keywords = keywords))
+}
+
+# ============================================================================
+# UTILITY FUNCTIONS FOR METADATA MANAGEMENT (NEW)
+# ============================================================================
+
+# Function to preview metadata structure
+preview_metadata_structure <- function(gs) {
+  cat("=== Metadata Structure Preview ===\n")
+  
+  tryCatch({
+    pd <- pData(gs)
+    
+    cat("Available columns and sample data:\n")
+    for (col in names(pd)) {
+      unique_vals <- unique(pd[[col]])
+      n_unique <- length(unique_vals)
+      
+      if (n_unique <= 5) {
+        val_preview <- paste(unique_vals, collapse = ", ")
+      } else {
+        val_preview <- paste(c(head(unique_vals, 3), "..."), collapse = ", ")
+      }
+      
+      cat(sprintf("  %s (%d unique): %s\n", col, n_unique, val_preview))
+    }
+  }, error = function(e) {
+    cat("Error accessing metadata:", e$message, "\n")
+  })
+}
+
+# Function to validate metadata configuration
+validate_metadata_config <- function(gs, metadata_config) {
+  cat("=== Metadata Configuration Validation ===\n")
+  
+  tryCatch({
+    pd <- pData(gs)
+    available_cols <- names(pd)
+    
+    validation_results <- map_lgl(names(metadata_config), function(concept) {
+      col_name <- metadata_config[[concept]]
+      
+      if (is.na(col_name)) {
+        cat(sprintf("  %s: NOT SET\n", concept))
+        return(TRUE)  # NA is valid (optional)
+      }
+      
+      if (col_name %in% available_cols) {
+        cat(sprintf("  ✓ %s: %s (valid)\n", concept, col_name))
+        return(TRUE)
+      } else {
+        cat(sprintf("  ✗ %s: %s (MISSING)\n", concept, col_name))
+        return(FALSE)
+      }
+    })
+    
+    all_valid <- all(validation_results)
+    cat(sprintf("\nValidation result: %s\n", 
+                if (all_valid) "✓ PASSED" else "✗ FAILED"))
+    
+    return(all_valid)
+    
+  }, error = function(e) {
+    cat("Error validating configuration:", e$message, "\n")
+    return(FALSE)
+  })
+}
+
+save_metadata_config <- function(config, filename = "metadata_config.rds") {
+  ensure_output_dirs()
+  full_path <- here("out", "data", filename)
+  saveRDS(config, full_path)
+  cat("Metadata configuration saved to:", full_path, "\n")
+}
+
+load_metadata_config <- function(filename = "metadata_config.rds") {
+  full_path <- here("out", "data", filename)
+  if (file.exists(full_path)) {
+    config <- readRDS(full_path)
+    .flow_config$current_mappings <- config
+    cat("Metadata configuration loaded from:", full_path, "\n")
+    return(config)
+  } else {
+    cat("Configuration file not found:", full_path, "\n")
+    return(NULL)
+  }
+}
+
 # ============================================================================
 # UTILITY FUNCTIONS FOR ENHANCED FEATURES
 # ============================================================================
-
 # Function to export all session plots at once
 export_all_session_plots <- function(width = 8, 
                                      height = 6, 
@@ -6771,22 +7168,37 @@ cat("- Fixed all numeric input handling to prevent NA errors\n")
 # export_all_session_plots("plots", format = "png")
 
 #=============================================================================
-# EXAMPLE USAGE
+# ENHANCED EXAMPLE USAGE (UPDATED)
 # ============================================================================
-# 
-# # # Setup
+
+# # Setup (same as before)
 # gs <- setup_flowjo_workspace(
 #   xml_path = here("data/20-Jun-2025.wsp"),
 #   fcs_path = here("data/fcs_files/")
-#  )
-# # 
-# # # Run interactive analysis to get subpop-specifc DFs
-# congenics_results <-analyze_flow_data_auto(gs)
-# 
-# #Clean-Up Data Node naming data 
-# congenics_results <- data_clean_custom(congenics_results)
-# 
-# # Add genotype information (Only works if the code can detect congenic markers)
-# congenics_results_with_genotype <- assign_genotypes_menu(congenics_results1$counts)
+# )
 
-#===============================================================================
+# # NEW: Preview available metadata first
+# preview_metadata_structure(gs)
+
+# # NEW: Configure metadata (interactive)
+# metadata_config <- detect_metadata_structure(gs)
+
+# # NEW: Save configuration for reuse
+# save_metadata_config(metadata_config, "my_experiment_config.rds")
+
+# # Run enhanced analysis (works with any metadata structure)
+# congenics_results <- analyze_flow_data_auto_enhanced(gs, metadata_config = metadata_config)
+
+# # OR use the completely flexible version
+# congenics_results <- analyze_flow_data_flexible(gs, metadata_config = metadata_config)
+
+# # Rest of your workflow stays the same
+# congenics_results <- data_clean_custom(congenics_results)
+# congenics_results_with_genotype <- assign_metadata_menu(congenics_results$counts)
+
+# # NEW: Use flexible plotting functions
+# plots <- create_flexible_paired_plots(congenics_results_with_genotype)
+# engraftment_plot <- create_flexible_engraftment_plot(congenics_results_with_genotype)
+
+# # Enhanced UMAP with flexible metadata
+# umap_results <- analyze_flow_umap_flexible(gs, metadata_config = metadata_config)
