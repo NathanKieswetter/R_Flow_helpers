@@ -5437,27 +5437,6 @@ analyze_flow_data_flexible <- function(gs,
   return(result)
 }
   
-  # Map to expected column names
-  wellid_col <- metadata_config$sample_id
-  group_col <- metadata_config$tissue
-  
-  if (is.na(wellid_col) || !wellid_col %in% names(data)) {
-    stop("Sample ID column not found. Please configure metadata mappings.")
-  }
-  
-  if (is.na(group_col) || !group_col %in% names(data)) {
-    stop("Tissue/Group column not found. Please configure metadata mappings.")
-  }
-  
-  # Call original function with mapped column names
-  create_engraftment_plot(
-    data = data,
-    wellid_col = wellid_col,
-    group_col = group_col,
-    ...
-  )
-}
-
 #=============================================================================
 # UMAP Interactive tool
 # ============================================================================
