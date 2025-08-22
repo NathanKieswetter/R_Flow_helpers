@@ -2154,7 +2154,7 @@ add_congenics_column <- function(results, candidates = c("CD45.1", "CD45.2", "CD
 # ENHANCED ANALYSIS FUNCTIONS WITH FLEXIBLE METADATA (UPDATED)
 # ============================================================================
 
-# Updated main analysis function with metadata detection
+# Enhanced analyze_flow_data_flexible() function that includes congenics by default
 analyze_flow_data_flexible <- function(gs, 
                                        metadata_config = NULL,
                                        node_selection = "interactive", 
@@ -2162,9 +2162,11 @@ analyze_flow_data_flexible <- function(gs,
                                        channels = NULL,
                                        summary_fun = median,
                                        auto_detect_metadata = TRUE,
-                                       interactive_annotation = FALSE) {  # NEW PARAMETER
+                                       interactive_annotation = FALSE,
+                                       add_congenics = TRUE,  # NEW: Default to TRUE
+                                       congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
   
-  cat("=== Flexible Flow Cytometry Analysis Pipeline ===\n")
+  cat("=== Enhanced Flexible Flow Cytometry Analysis Pipeline ===\n")
   
   # Step 0: Handle channel annotation if requested
   if (interactive_annotation) {
@@ -2182,7 +2184,7 @@ analyze_flow_data_flexible <- function(gs,
   
   cat("\nUsing metadata columns:", paste(keywords, collapse = ", "), "\n")
   
-  # Continue with existing analysis but use flexible keywords
+  # Step 2: Continue with existing analysis but use flexible keywords
   result <- analyze_flow_data(
     gs = gs,
     node_selection = node_selection,
@@ -2192,13 +2194,62 @@ analyze_flow_data_flexible <- function(gs,
     keywords = keywords
   )
   
-  # Add metadata configuration to results
-  if (!is.null(result)) {
-    result$metadata_config <- metadata_config
-    result$keywords_used <- keywords
+  if (is.null(result)) return(NULL)
+  
+  # Step 3: Add metadata configuration to results
+  result$metadata_config <- metadata_config
+  result$keywords_used <- keywords
+  
+  # Step 4: Add congenics if requested (NEW FUNCTIONALITY)
+  if (add_congenics) {
+    cat("\nAdding congenic markers...\n")
+    
+    tryCatch({
+      result <- add_congenics_column(result, candidates = congenic_candidates)
+      cat("✓ Successfully added congenics column\n")
+      
+      # Display congenic summary if successful
+      if (!is.null(result$counts) && "congenics" %in% names(result$counts)) {
+        congenic_summary <- result$counts %>%
+          filter(!is.na(congenics)) %>%
+          count(congenics, name = "n_observations") %>%
+          arrange(desc(n_observations))
+        
+        if (nrow(congenic_summary) > 0) {
+          cat("Detected congenics:\n")
+          for (i in 1:nrow(congenic_summary)) {
+            cat(sprintf("  - %s: %d observations\n", 
+                        congenic_summary$congenics[i], 
+                        congenic_summary$n_observations[i]))
+          }
+        } else {
+          cat("⚠️  No congenics detected in the data\n")
+        }
+      }
+      
+    }, error = function(e) {
+      cat("⚠️  Warning: Could not add congenics column:", e$message, "\n")
+      cat("Continuing without congenics...\n")
+    })
   }
   
   return(result)
+}
+
+# For backward compatibility, create an alias that maintains the old interface
+analyze_flow_data_auto_enhanced <- function(gs, ..., 
+                                            add_congenics = TRUE, 
+                                            congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
+                                            metadata_config = NULL) {
+  
+  # Call the enhanced flexible function
+  return(analyze_flow_data_flexible(
+    gs = gs,
+    metadata_config = metadata_config,
+    add_congenics = add_congenics,
+    congenic_candidates = congenic_candidates,
+    ...
+  ))
 }
 
 # Enhanced wrapper that maintains backward compatibility
