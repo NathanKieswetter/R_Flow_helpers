@@ -42,7 +42,7 @@ BiocManager::install(c("CytoML", "flowCore", "flowWorkspace", "ComplexHeatmap"))
 
 ```r
 # Source the analysis functions directly from GitHub
-source("https://raw.githubusercontent.com/yourusername/your-repo/main/your-script.R")
+source("https://raw.githubusercontent.com/NathanKieswetter/R_Flow_helpers/main/Congenics_flow_semi-automated.R")
 ```
 
 ## Project Structure and Setup
