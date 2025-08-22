@@ -9,6 +9,8 @@ This pipeline provides a complete workflow for flow cytometry data analysis, fro
 ### Key Features
 
 - **Interactive Data Analysis**: Menu-driven selection of cell populations, markers, and analysis parameters
+- **Enhanced Metadata Configuration**: Flexible metadata detection and mapping system
+- **Interactive Channel Annotation**: Comprehensive marker naming and annotation tools
 - **Congenic Marker Analysis**: Automated detection and analysis of CD45.1, CD45.2, CD90.1, CD90.2, and CD45.1.2 markers
 - **Engraftment Analysis**: Specialized tools for donor-recipient engraftment studies
 - **Advanced Visualizations**: MFI heatmaps, paired comparisons, density plots, and UMAP analysis
@@ -141,6 +143,100 @@ plot(gs, fontsize = 15, bool = TRUE)
 congenics_results <- analyze_flow_data_auto(gs)
 ```
 
+## Enhanced Features (NEW)
+
+### Metadata Configuration System
+
+The pipeline now includes a flexible metadata detection and configuration system that automatically adapts to different experimental setups.
+
+#### Automatic Metadata Detection
+
+```r
+# Detect metadata structure automatically
+metadata_config <- detect_metadata_structure(gs, interactive = TRUE)
+
+# Preview available metadata
+preview_metadata_structure(gs)
+
+# Validate configuration
+validate_metadata_config(gs, metadata_config)
+
+# Save configuration for reuse
+save_metadata_config(metadata_config, "my_experiment_config.rds")
+
+# Load saved configuration
+loaded_config <- load_metadata_config("my_experiment_config.rds")
+```
+
+#### Flexible Analysis with Custom Metadata
+
+```r
+# Run analysis with custom metadata configuration
+congenics_results <- analyze_flow_data_flexible(
+  gs, 
+  metadata_config = metadata_config,
+  interactive_annotation = TRUE  # Enable channel annotation
+)
+
+# Or use the enhanced auto analysis
+congenics_results <- analyze_flow_data_auto_enhanced(
+  gs, 
+  metadata_config = metadata_config,
+  add_congenics = TRUE
+)
+```
+
+### Interactive Channel Annotation System
+
+For datasets where marker names weren't properly defined during acquisition, the pipeline provides comprehensive annotation tools.
+
+#### Channel Annotation Workflow
+
+```r
+# Check current channel-marker mapping
+current_lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
+
+# Run interactive annotation (comprehensive menu system)
+annotated_lookup <- annotate_channels_interactive(gs, save_annotation = TRUE)
+
+# Load previously saved annotations
+saved_lookup <- load_channel_annotations(gs)
+
+# Apply annotations during analysis
+congenics_results <- analyze_flow_data_flexible(
+  gs,
+  interactive_annotation = TRUE  # Triggers annotation workflow if needed
+)
+```
+
+#### Annotation Features
+
+- **Pattern-based annotation**: Bulk annotate channels using regex patterns
+- **Common panel loading**: Pre-defined marker panels (T-cell, PBMC, tissue analysis)
+- **Data preview**: View expression statistics to help identify markers
+- **Search functionality**: Find markers by keyword
+- **Save/load system**: Reuse annotations across sessions
+
+### Flexible Plotting Functions
+
+Enhanced plotting functions that work with any metadata structure:
+
+```r
+# Flexible paired comparison plots
+plots <- create_flexible_paired_plots(data, metadata_config = metadata_config)
+
+# Flexible engraftment plots
+engraftment_plot <- create_flexible_engraftment_plot(
+  data, 
+  metadata_config = metadata_config,
+  interactive = TRUE,
+  interactive_stats = TRUE
+)
+
+# Enhanced UMAP with flexible metadata
+umap_results <- analyze_flow_umap_flexible(gs, metadata_config = metadata_config)
+```
+
 ## Core Functions
 
 ### Data Import and Setup
@@ -153,27 +249,66 @@ Imports FlowJo workspace and creates a GatingSet object.
 - `fcs_path`: Path to directory containing .fcs files
 - `keywords`: Sample metadata keywords to extract (default: `c("$WELLID", "GROUPNAME")`)
 
-### Interactive Analysis
+### Enhanced Metadata Functions (NEW)
 
-#### `analyze_flow_data_auto(gs, ...)`
-Main interactive analysis function with automatic congenic detection.
+#### `detect_metadata_structure(gs, custom_keywords, interactive)`
+Automatically detects and configures metadata mappings.
+
+**Parameters:**
+- `gs`: GatingSet object
+- `custom_keywords`: Additional custom keyword mappings
+- `interactive`: Enable interactive refinement (default: TRUE)
 
 **Features:**
-- Interactive node/population selection
-- Automatic parent node detection
-- Marker/channel selection with compensation detection
-- Statistical analysis options
-- Automatic congenic marker identification
+- Auto-detection of common metadata patterns
+- Interactive refinement and validation
+- Support for custom experimental designs
+- Comprehensive error handling
+
+#### `annotate_channels_interactive(gs, save_annotation)`
+Interactive channel annotation system for undefined markers.
+
+**Parameters:**
+- `gs`: GatingSet object
+- `save_annotation`: Save annotations for future use (default: TRUE)
+
+**Features:**
+- Menu-driven annotation workflow
+- Pattern-based bulk annotation
+- Common marker panel loading
+- Data preview for marker identification
+- Search and filtering capabilities
+
+### Interactive Analysis
+
+#### `analyze_flow_data_auto_enhanced(gs, ...)`
+Enhanced main analysis function with flexible metadata support.
+
+**New Features:**
+- Automatic metadata detection
+- Optional channel annotation
+- Congenic marker detection
+- Statistical analysis integration
+- Customizable metadata mappings
+
+#### `analyze_flow_data_flexible(gs, metadata_config, ...)`
+Completely flexible analysis function that adapts to any metadata structure.
+
+**Parameters:**
+- `gs`: GatingSet object
+- `metadata_config`: Custom metadata configuration
+- `node_selection`: Node selection method (default: "interactive")
+- `interactive_annotation`: Enable channel annotation workflow
 
 ### Data Processing
 
 #### `data_clean_custom(data)`
-Cleans and standardizes data output.
+Enhanced data cleaning with unstained sample detection.
 
 **Features:**
-- Removes special characters from column names
-- Standardizes node naming
-- Handles unstained sample detection and removal
+- Interactive unstained sample removal
+- Column name standardization
+- Comprehensive data validation
 - Works with both single data frames and lists
 
 #### `assign_metadata_menu(df)`
@@ -185,48 +320,49 @@ Interactive metadata assignment for experimental design.
 - Custom metadata addition (timepoint, batch, sex, etc.)
 - Genotype classification
 
-### Visualization Functions
-
-#### `create_engraftment_plot(data, ...)`
-Creates publication-ready engraftment ratio plots.
-
-**Features:**
-- Interactive statistical method selection
-- Normalization options (to spleen or other control tissues)
-- Paired statistical comparisons
-- Customizable styling
+### Enhanced Visualization Functions
 
 #### `create_mfi_heatmaps_interactive_enhanced(mfi_data)`
 Advanced MFI heatmap creation with statistical testing.
 
-**Features:**
-- Interactive marker and congenic selection
+**New Features:**
+- Interactive congenic and marker selection
 - Multiple scaling methods (Z-score, log, percentile)
-- Statistical testing integration
-- Grouped or combined tissue analysis
+- Comprehensive statistical testing suite
+- Significance annotation on heatmaps
+- Export functionality
 
-#### `create_paired_comparison_plots(data)`
-Creates paired comparison plots for population frequencies.
+#### `create_flexible_paired_plots(data, metadata_config)`
+Flexible paired comparison plots that work with any metadata structure.
 
 **Features:**
-- Interactive statistical test selection
-- Flexible faceting options
-- Paired t-test and Wilcoxon test support
-- Automatic significance annotation
+- Automatic metadata adaptation
+- Multiple statistical test options
+- Flexible grouping variables
+- Publication-ready output
+
+#### `create_flexible_engraftment_plot(data, metadata_config, ...)`
+Enhanced engraftment analysis with flexible metadata support.
+
+**Features:**
+- Interactive statistical method selection
+- Flexible normalization options
+- Multiple comparison types
+- Comprehensive error handling
 
 #### `analyze_flow_umap_enhanced(gs)`
-Comprehensive UMAP analysis with interactive visualization.
+Comprehensive UMAP analysis with enhanced features.
 
 **Features:**
-- Sample exclusion options
-- Event counting and assessment
+- Interactive sample exclusion
 - External metadata import
-- Interactive visualization menu
 - Session-based plot management
+- Enhanced visualization menu
+- Robust error handling
 
 ## Example Workflow
 
-### Basic Setup and Data Import
+### Enhanced Setup and Data Import
 
 ```r
 # 1. Load required libraries
@@ -250,8 +386,8 @@ library(patchwork)
 # 2. Source the analysis functions
 source("https://github.com/NathanKieswetter/R_Flow_helpers/blob/main/Congenics_flow_semi-automated.R")
 
-# 3. Setup folder structure (automatic - creates data/, out/, scripts/ directories)
-# Folders will be created automatically when needed
+# 3. Setup folder structure (automatic)
+ensure_output_dirs()
 
 # 4. Import FlowJo workspace
 gs <- setup_flowjo_workspace(
@@ -259,156 +395,175 @@ gs <- setup_flowjo_workspace(
   fcs_path = here("data", "FCS_D7/")
 )
 
-# 5. Save GatingSet for future use
+# 5. Configure metadata (NEW)
+metadata_config <- detect_metadata_structure(gs, interactive = TRUE)
+save_metadata_config(metadata_config, "experiment_D7_metadata.rds")
+
+# 6. Annotate channels if needed (NEW)
+preview_metadata_structure(gs)
+annotated_lookup <- annotate_channels_interactive(gs, save_annotation = TRUE)
+
+# 7. Save GatingSet for future use
 save_gatingset(gs, "experiment_D7_gatingset.rds")
 
-# 6. Assess gating hierarchy
+# 8. Assess gating hierarchy
 plot(gs, fontsize = 15, bool = TRUE)
 ```
 
-### Interactive Data Analysis
+### Enhanced Interactive Data Analysis
 
 ```r
-# 7. Run interactive analyses for different populations
-# Each analysis will guide you through node selection, parent mapping, and channel selection
-congenics_results <- analyze_flow_data_auto(gs)           # For congenic marker analysis
-KLRG1_CD127_results <- analyze_flow_data_auto(gs)         # For activation markers
-CD69_CD103_results <- analyze_flow_data_auto(gs)          # For tissue residence markers
+# 9. Run enhanced flexible analyses
+congenics_results <- analyze_flow_data_flexible(
+  gs, 
+  metadata_config = metadata_config,
+  interactive_annotation = TRUE,
+  add_congenics = TRUE
+)
 
-# 8. Save analysis results
+# 10. Additional marker analyses with same configuration
+KLRG1_CD127_results <- analyze_flow_data_flexible(gs, metadata_config = metadata_config)
+CD69_CD103_results <- analyze_flow_data_flexible(gs, metadata_config = metadata_config)
+
+# 11. Save analysis results
 save_analysis_results(congenics_results, "congenics_results.rds")
 save_analysis_results(KLRG1_CD127_results, "KLRG1_CD127_results.rds")
 save_analysis_results(CD69_CD103_results, "CD69_CD103_results.rds")
 
-# 9. Clean up data (removes special characters, handles unstained samples)
+# 12. Clean up data
 congenics_results <- data_clean_custom(congenics_results)
 KLRG1_CD127_results <- data_clean_custom(KLRG1_CD127_results)
 CD69_CD103_results <- data_clean_custom(CD69_CD103_results)
 ```
 
-### Metadata Assignment and Experimental Design
+### Enhanced Metadata Assignment and Visualization
 
 ```r
-# 10. Add experimental metadata (interactive menus for WT/KO assignment, timepoints, etc.)
+# 13. Add experimental metadata (enhanced interface)
 congenics_results_with_genotype <- assign_metadata_menu(congenics_results$counts)
 
-# The metadata assignment includes:
-# - WT/KO marker identification
-# - Recipient marker assignment
-# - Custom metadata (timepoint, batch, sex, etc.)
-```
-
-### Visualization and Analysis
-
-```r
-# 11. Create engraftment analysis with statistical testing
-plot_engraftment <- create_engraftment_plot(congenics_results_with_genotype)
+# 14. Create enhanced engraftment analysis
+plot_engraftment <- create_flexible_engraftment_plot(
+  congenics_results_with_genotype,
+  metadata_config = metadata_config,
+  interactive = TRUE,
+  interactive_stats = TRUE
+)
 print(plot_engraftment)
 
-# Save engraftment plot (plots automatically save to out/plots/)
-if(!is.null(plot_engraftment$plot)) {
-  ggsave(here("out", "plots", "engraftment_analysis.png"), 
-         plot_engraftment$plot, width = 10, height = 6, dpi = 300)
-}
-
-# 12. Generate interactive MFI heatmaps with statistical testing
+# 15. Generate enhanced MFI heatmaps with statistics
 mfi_heatmaps <- create_mfi_heatmaps_interactive_enhanced(congenics_results$mfi)
-# This function provides:
-# - Interactive congenic and marker selection
-# - Multiple scaling methods
-# - Statistical testing options
-# - Automatic export to out/plots/
+# Export statistical results
+stats_results <- export_stats_results(mfi_heatmaps$statistics, "mfi_statistical_analysis.csv")
 
-# 13. Create paired comparison plots
-KLRG1_CD127_plots <- create_paired_comparison_plots(KLRG1_CD127_results$counts)
-CD69_CD103_plots <- create_paired_comparison_plots(CD69_CD103_results$counts)
+# 16. Create flexible paired comparison plots
+KLRG1_CD127_plots <- create_flexible_paired_plots(
+  KLRG1_CD127_results$counts, 
+  metadata_config = metadata_config
+)
+CD69_CD103_plots <- create_flexible_paired_plots(
+  CD69_CD103_results$counts,
+  metadata_config = metadata_config
+)
 
-# Access individual plots:
-# KLRG1_CD127_plots[["Spleen"]]        # View specific tissue
-# CD69_CD103_plots[["CD103+CD69+"]]    # View specific population
-
-# 14. Advanced UMAP analysis (interactive with session management)
-umap_results <- analyze_flow_umap_enhanced(gs)
-# Features include:
-# - Sample exclusion (unstained, controls)
-# - Interactive visualization menu
-# - Plot session management
-# - Multiple export options
+# 17. Enhanced UMAP analysis with flexible metadata
+umap_results <- analyze_flow_umap_flexible(gs, metadata_config = metadata_config)
 ```
 
-### Data Export and Session Management
+### Enhanced Data Export and Session Management
 
 ```r
-# 15. Export processed data
-# Export count/frequency data
+# 18. Export processed data with metadata configuration
 write_csv(congenics_results$counts, here("out", "data", "congenics_counts.csv"))
 write_csv(congenics_results$mfi, here("out", "data", "congenics_mfi.csv"))
 
-# Export UMAP data
+# Save metadata configuration with results
+saveRDS(metadata_config, here("out", "data", "metadata_config.rds"))
+
+# 19. Export UMAP data and session
 export_umap_data(umap_results, "umap_analysis.csv")
+export_all_session_plots()
 
-# 16. Save complete session
-session_name <- save_session(gs, congenics_results, "experiment_D7_session")
+# 20. Save complete enhanced session
+session_name <- save_session(gs, congenics_results, "enhanced_experiment_D7_session")
 
-# 17. Manage saved files interactively
+# 21. Advanced session management
 manage_saved_files()  # Interactive menu for loading/deleting saved data
 ```
 
-### Loading Previous Sessions
+### Loading and Continuing Enhanced Sessions
 
 ```r
-# Load a previously saved session
-loaded_session <- load_session("experiment_D7_session")
+# Load previous session
+loaded_session <- load_session("enhanced_experiment_D7_session")
 gs <- loaded_session$gs
 results <- loaded_session$results
 
-# Or load individual components
-gs <- load_gatingset("experiment_D7_gatingset.rds")
-congenics_results <- load_analysis_results("congenics_results.rds")
+# Load saved metadata configuration
+metadata_config <- load_metadata_config("experiment_D7_metadata.rds")
 
-# List available files
-list_available_gatingsets()
-```
+# Load saved channel annotations
+annotated_lookup <- load_channel_annotations(gs, "channel_annotations.rds")
 
-### Advanced Workflow Options
-
-```r
-# 18. Statistical analysis export
-if(!is.null(mfi_heatmaps) && exists("stats_results")) {
-  export_stats_results(stats_results, "mfi_statistical_analysis.csv")
-}
-
-# 19. Continue UMAP visualization session
+# Continue UMAP visualization with enhanced features
 restart_visualization_session(umap_results)
 
-# 20. Export all session plots at once
-export_all_session_plots()  # Saves all plots to out/plots/
-
-# 21. Create quick plots from saved results
-quick_plot <- create_quick_umap_plot(umap_results, "GROUPNAME")
+# Create quick plots with flexible metadata
+quick_plot <- create_quick_umap_plot(umap_results, metadata_config$tissue)
 ggsave(here("out", "plots", "quick_tissue_plot.png"), quick_plot)
 ```
 
-## Configuration Options
+## Enhanced Configuration Options
+
+### Metadata Configuration
+
+The pipeline supports flexible metadata mapping:
+
+```r
+# Custom metadata mappings
+custom_config <- list(
+  tissue = "Location",           # Map tissue to "Location" column
+  sample_id = "SampleName",      # Map sample ID to "SampleName" column
+  time_point = "Day",            # Map timepoint to "Day" column
+  treatment = "Condition",       # Map treatment to "Condition" column
+  batch = "Experiment",          # Map batch to "Experiment" column
+  subject = "MouseID"            # Map subject to "MouseID" column
+)
+
+# Apply custom configuration
+results <- analyze_flow_data_flexible(gs, metadata_config = custom_config)
+```
+
+### Channel Annotation
+
+**Common Marker Panels:**
+- Mouse T-cell Basic (CD3, CD4, CD8, CD45, Live/Dead)
+- Human PBMC Basic (CD3, CD4, CD8, CD19, CD14, CD45, Live/Dead)
+- Mouse Tissue Analysis (CD45, CD3, CD11b, F4/80, Ly6G, Live/Dead)
+
+**Annotation Methods:**
+- **Interactive selection**: Point-and-click marker assignment
+- **Pattern matching**: Bulk annotation using regex patterns
+- **Panel loading**: Apply pre-defined marker panels
+- **Data preview**: Statistical analysis to help identify markers
 
 ### Statistical Testing
-The pipeline supports multiple statistical tests:
-- Paired/unpaired t-tests
-- Mann-Whitney U test
-- Wilcoxon signed-rank test
-- ANOVA with post-hoc comparisons
-- Kruskal-Wallis test
+
+Enhanced statistical testing with comprehensive options:
+- **Two-group tests**: Paired/unpaired t-tests, Mann-Whitney U, Wilcoxon signed-rank
+- **Multi-group tests**: ANOVA, Kruskal-Wallis, repeated measures ANOVA, Friedman
+- **Multiple comparisons**: Bonferroni, FDR, Tukey HSD
+- **Effect size calculations**: Cohen's d, eta-squared
+- **Power analysis**: Sample size recommendations
 
 ### Visualization Options
-- **Color scales**: Viridis, RColorBrewer palettes
-- **Plot types**: Scatter, density, heatmap, paired comparisons
-- **Export formats**: PNG, PDF, SVG, JPEG
-- **Statistical annotations**: P-values, significance stars, custom formatting
 
-### Data Transformation
-- **Flow cytometry**: asinh transformation (recommended)
-- **Alternative**: log10, square root, or no transformation
-- **Scaling**: Z-score, percentile, or raw values
+**Enhanced Features:**
+- **Interactive menus**: Streamlined selection workflows
+- **Session management**: Persistent plot storage and retrieval
+- **Export options**: Multiple formats (PNG, PDF, SVG, JPEG)
+- **Statistical annotations**: P-values, significance stars, effect sizes
+- **Color schemes**: Viridis, RColorBrewer palettes, custom gradients
 
 ## Troubleshooting
 
@@ -418,32 +573,52 @@ The pipeline supports multiple statistical tests:
 2. **File path issues**: Always use `here()` for file paths and ensure your `.Rproj` file is in the project root
 3. **Missing FCS files**: Verify that .fcs files are in the specified directory and match workspace samples
 4. **Memory issues with UMAP**: Reduce `max_cells_per_sample` parameter for large datasets
+5. **Metadata mapping errors**: Use `preview_metadata_structure()` to check available columns
+6. **Channel annotation issues**: Use `get_marker_lookup_enhanced()` to verify current mappings
 
-### Data Requirements
+### Enhanced Data Requirements
 
 - **FlowJo workspace**: Compatible .wsp files (FlowJo 10+)
 - **FCS files**: Standard .fcs format with proper channel naming
 - **Compensation**: Compensated parameters should contain "Comp" in channel names
 - **Sample naming**: Consistent naming between workspace and FCS files
+- **Metadata structure**: Any column-based metadata format supported
 
-## Output Files
+### Performance Optimization
 
-The pipeline generates several types of output:
+- **Large datasets**: Use sample exclusion and cell subsampling
+- **Memory management**: Process data in batches for very large experiments
+- **Visualization**: Use session management to avoid recomputing plots
+- **Statistical testing**: Consider multiple testing correction for large marker panels
+
+## Enhanced Output Files
+
+The pipeline generates comprehensive output with enhanced organization:
 
 ### Data Files
 - `*_counts.csv`: Population counts and frequencies
 - `*_mfi.csv`: Mean fluorescence intensity data
 - `*_umap_data.csv`: UMAP coordinates with marker expression
+- `*_stats_results.csv`: Statistical analysis results
+- `metadata_config.rds`: Saved metadata configuration
+- `channel_annotations.csv/rds`: Saved channel annotations
 
 ### Plots
-- `engraftment_*.png`: Engraftment ratio plots
-- `heatmap_*.png`: MFI heatmaps
+- `engraftment_*.png`: Enhanced engraftment ratio plots
+- `heatmap_*.png`: MFI heatmaps with statistical annotations
 - `paired_comparison_*.png`: Statistical comparison plots
-- `umap_*.png`: UMAP visualizations
+- `umap_*.png`: UMAP visualizations with session management
+- `multi_marker_*.png`: Multi-marker heatmap overlays
 
 ### Session Data
-- `gating_set.rds`: Saved GatingSet object
-- `analysis_results.rds`: Complete analysis results
+- `*_gatingset.rds`: Saved GatingSet object
+- `*_results.rds`: Complete analysis results
+- `*_session.rds`: Complete analysis session with metadata
+
+### Configuration Files
+- `metadata_config.rds`: Reusable metadata mappings
+- `channel_annotations.rds`: Reusable channel annotations
+- `analysis_config.rds`: Complete analysis configuration
 
 ## Contributing
 
@@ -453,14 +628,15 @@ To contribute to this package:
 2. Create a feature branch
 3. Make your changes
 4. Add tests if applicable
-5. Submit a pull request
+5. Update documentation
+6. Submit a pull request
 
 ## Citation
 
 If you use this pipeline in your research, please cite:
 
 ```
-Nathan Scott Kieswetter
+Nathan Scott Kieswetter. Enhanced Interactive Flow Cytometry Analysis Pipeline. 2025.
 ```
 
 ## License
@@ -475,4 +651,4 @@ For questions, issues, or feature requests:
 
 ---
 
-**Note**: This pipeline is specifically designed for congenic marker analysis in flow cytometry data. For other applications, some functions may require modification.
+**Note**: This enhanced pipeline now supports flexible experimental designs and provides comprehensive tools for metadata management, channel annotation, and statistical analysis. The system automatically adapts to different data structures while maintaining backward compatibility with existing workflows.
