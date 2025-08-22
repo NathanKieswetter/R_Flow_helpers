@@ -11,6 +11,9 @@ library(ComplexHeatmap)
 library(circlize)
 library(RColorBrewer)
 library(umap)
+library(viridis)
+library(purrr)
+library(patchwork)
 
 # ============================================================================
 # CORE SETUP AND DATA LOADING
