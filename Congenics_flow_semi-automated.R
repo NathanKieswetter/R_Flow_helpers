@@ -5143,7 +5143,6 @@ create_engraftment_plot <- function(data,
   }
 }
 
-# Enhanced engraftment plot with flexible metadata (NEW)
 # Enhanced flexible engraftment plot function that automatically detects data structure
 create_flexible_engraftment_plot <- function(data, metadata_config = NULL, ...) {
   
@@ -5260,6 +5259,94 @@ create_flexible_engraftment_plot <- function(data, metadata_config = NULL, ...) 
     group_col = tissue_col,
     ...
   ))
+}
+
+# Also update the main analysis function to be more automatic
+analyze_flow_data_flexible <- function(gs, 
+                                       metadata_config = NULL,
+                                       node_selection = "interactive", 
+                                       parent_selection = "interactive",
+                                       channels = NULL,
+                                       summary_fun = median,
+                                       auto_detect_metadata = TRUE,
+                                       interactive_annotation = FALSE,
+                                       add_congenics = TRUE,
+                                       congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
+  
+  cat("=== Enhanced Flexible Flow Cytometry Analysis Pipeline ===\n")
+  
+  # Step 0: Handle channel annotation if requested
+  if (interactive_annotation) {
+    cat("Checking channel annotations...\n")
+    annotated_lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
+  }
+  
+  # Step 1: Configure metadata (more automatic)
+  if (auto_detect_metadata || is.null(metadata_config)) {
+    cat("Auto-detecting metadata structure...\n")
+    metadata_config <- detect_metadata_structure(gs, metadata_config, interactive = FALSE)  # Less interactive
+    
+    # Store in global config for other functions to use
+    if (exists(".flow_config")) {
+      .flow_config$current_mappings <- metadata_config
+    }
+  }
+  
+  # Extract available keywords (remove NAs)
+  keywords <- unlist(metadata_config[!is.na(metadata_config)])
+  
+  cat("Using metadata columns:", paste(keywords, collapse = ", "), "\n")
+  
+  # Step 2: Continue with existing analysis but use flexible keywords
+  result <- analyze_flow_data(
+    gs = gs,
+    node_selection = node_selection,
+    parent_selection = parent_selection, 
+    channels = channels,
+    summary_fun = summary_fun,
+    keywords = keywords
+  )
+  
+  if (is.null(result)) return(NULL)
+  
+  # Step 3: Add metadata configuration to results
+  result$metadata_config <- metadata_config
+  result$keywords_used <- keywords
+  
+  # Step 4: Add congenics automatically
+  if (add_congenics) {
+    cat("Adding congenic markers automatically...\n")
+    
+    tryCatch({
+      result <- add_congenics_column(result, candidates = congenic_candidates)
+      cat("✓ Successfully added congenics column\n")
+      
+      # Display congenic summary if successful
+      if (!is.null(result$counts) && "congenics" %in% names(result$counts)) {
+        congenic_summary <- result$counts %>%
+          filter(!is.na(congenics)) %>%
+          count(congenics, name = "n_observations") %>%
+          arrange(desc(n_observations))
+        
+        if (nrow(congenic_summary) > 0) {
+          cat("Detected congenics:\n")
+          for (i in 1:nrow(congenic_summary)) {
+            cat(sprintf("  - %s: %d observations\n", 
+                        congenic_summary$congenics[i], 
+                        congenic_summary$n_observations[i]))
+          }
+        } else {
+          cat("⚠️  No congenics detected in the data\n")
+        }
+      }
+      
+    }, error = function(e) {
+      cat("⚠️  Warning: Could not add congenics column:", e$message, "\n")
+      cat("Continuing without congenics...\n")
+    })
+  }
+  
+  return(result)
 }
 
 # Also update the main analysis function to be more automatic
