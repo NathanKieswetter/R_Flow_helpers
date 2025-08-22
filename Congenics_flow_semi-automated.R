@@ -5144,20 +5144,211 @@ create_engraftment_plot <- function(data,
 }
 
 # Enhanced engraftment plot with flexible metadata (NEW)
+# Enhanced flexible engraftment plot function that automatically detects data structure
 create_flexible_engraftment_plot <- function(data, metadata_config = NULL, ...) {
   
-  # Auto-detect metadata if not provided
-  if (is.null(metadata_config)) {
-    if (exists(".flow_config") && !is.null(.flow_config$current_mappings)) {
-      metadata_config <- .flow_config$current_mappings
-    } else {
-      # Fallback to original column names
-      metadata_config <- list(
-        sample_id = ifelse("WELLID" %in% names(data), "WELLID", "$WELLID"),
-        tissue = ifelse("GROUPNAME" %in% names(data), "GROUPNAME", "GROUPNAME")
-      )
+  cat("=== Auto-detecting data structure for engraftment plot ===\n")
+  
+  # Step 1: Auto-detect if data has been processed (standardized column names)
+  processed_columns <- c("sample_id", "tissue")
+  has_processed_cols <- all(processed_columns %in% names(data))
+  
+  if (has_processed_cols) {
+    cat("✓ Detected processed data with standardized column names\n")
+    cat("  Using: sample_id, tissue\n")
+    
+    return(create_engraftment_plot(
+      data = data,
+      wellid_col = "sample_id",
+      group_col = "tissue",
+      ...
+    ))
+  }
+  
+  # Step 2: Try common raw column name patterns
+  common_sample_patterns <- c("$WELLID", "WELLID", "Sample", "SampleID", "sample_id")
+  common_tissue_patterns <- c("GROUPNAME", "tissue", "Tissue", "Group", "Location", "Organ")
+  
+  # Find sample ID column
+  sample_col <- NULL
+  for (pattern in common_sample_patterns) {
+    if (pattern %in% names(data)) {
+      sample_col <- pattern
+      break
     }
   }
+  
+  # Find tissue/group column  
+  tissue_col <- NULL
+  for (pattern in common_tissue_patterns) {
+    if (pattern %in% names(data)) {
+      tissue_col <- pattern
+      break
+    }
+  }
+  
+  # Step 3: Use metadata configuration if direct detection failed
+  if (is.null(sample_col) || is.null(tissue_col)) {
+    cat("Direct detection failed, trying metadata configuration...\n")
+    
+    if (is.null(metadata_config)) {
+      # Try global config
+      if (exists(".flow_config") && !is.null(.flow_config$current_mappings)) {
+        metadata_config <- .flow_config$current_mappings
+        cat("Using global metadata configuration\n")
+      } else {
+        # Last resort: try to infer from available columns
+        available_cols <- names(data)
+        cat("Available columns:", paste(available_cols, collapse = ", "), "\n")
+        
+        # Look for columns that might be sample IDs (contain ID, Well, Sample)
+        if (is.null(sample_col)) {
+          sample_candidates <- available_cols[grepl("(?i)(wellid|sample|id|well)", available_cols)]
+          if (length(sample_candidates) > 0) {
+            sample_col <- sample_candidates[1]
+            cat("Inferred sample column:", sample_col, "\n")
+          }
+        }
+        
+        # Look for columns that might be tissues/groups
+        if (is.null(tissue_col)) {
+          tissue_candidates <- available_cols[grepl("(?i)(group|tissue|location|organ|site)", available_cols)]
+          if (length(tissue_candidates) > 0) {
+            tissue_col <- tissue_candidates[1]
+            cat("Inferred tissue column:", tissue_col, "\n")
+          }
+        }
+      }
+    }
+    
+    # Extract from metadata config if available
+    if (!is.null(metadata_config)) {
+      if (is.null(sample_col) && !is.na(metadata_config$sample_id)) {
+        sample_col <- metadata_config$sample_id
+      }
+      if (is.null(tissue_col) && !is.na(metadata_config$tissue)) {
+        tissue_col <- metadata_config$tissue
+      }
+    }
+  }
+  
+  # Step 4: Final validation
+  if (is.null(sample_col) || !sample_col %in% names(data)) {
+    stop(paste(
+      "Could not auto-detect sample ID column.",
+      "\nAvailable columns:", paste(names(data), collapse = ", "),
+      "\nPlease specify manually using: create_engraftment_plot(data, wellid_col = 'your_column')"
+    ))
+  }
+  
+  if (is.null(tissue_col) || !tissue_col %in% names(data)) {
+    stop(paste(
+      "Could not auto-detect tissue/group column.",
+      "\nAvailable columns:", paste(names(data), collapse = ", "),
+      "\nPlease specify manually using: create_engraftment_plot(data, group_col = 'your_column')"
+    ))
+  }
+  
+  # Step 5: Success! Use detected columns
+  cat("✓ Auto-detected columns:\n")
+  cat("  Sample ID:", sample_col, "\n")
+  cat("  Tissue/Group:", tissue_col, "\n")
+  
+  return(create_engraftment_plot(
+    data = data,
+    wellid_col = sample_col,
+    group_col = tissue_col,
+    ...
+  ))
+}
+
+# Also update the main analysis function to be more automatic
+analyze_flow_data_flexible <- function(gs, 
+                                       metadata_config = NULL,
+                                       node_selection = "interactive", 
+                                       parent_selection = "interactive",
+                                       channels = NULL,
+                                       summary_fun = median,
+                                       auto_detect_metadata = TRUE,
+                                       interactive_annotation = FALSE,
+                                       add_congenics = TRUE,
+                                       congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
+  
+  cat("=== Enhanced Flexible Flow Cytometry Analysis Pipeline ===\n")
+  
+  # Step 0: Handle channel annotation if requested
+  if (interactive_annotation) {
+    cat("Checking channel annotations...\n")
+    annotated_lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
+  }
+  
+  # Step 1: Configure metadata (more automatic)
+  if (auto_detect_metadata || is.null(metadata_config)) {
+    cat("Auto-detecting metadata structure...\n")
+    metadata_config <- detect_metadata_structure(gs, metadata_config, interactive = FALSE)  # Less interactive
+    
+    # Store in global config for other functions to use
+    if (exists(".flow_config")) {
+      .flow_config$current_mappings <- metadata_config
+    }
+  }
+  
+  # Extract available keywords (remove NAs)
+  keywords <- unlist(metadata_config[!is.na(metadata_config)])
+  
+  cat("Using metadata columns:", paste(keywords, collapse = ", "), "\n")
+  
+  # Step 2: Continue with existing analysis but use flexible keywords
+  result <- analyze_flow_data(
+    gs = gs,
+    node_selection = node_selection,
+    parent_selection = parent_selection, 
+    channels = channels,
+    summary_fun = summary_fun,
+    keywords = keywords
+  )
+  
+  if (is.null(result)) return(NULL)
+  
+  # Step 3: Add metadata configuration to results
+  result$metadata_config <- metadata_config
+  result$keywords_used <- keywords
+  
+  # Step 4: Add congenics automatically
+  if (add_congenics) {
+    cat("Adding congenic markers automatically...\n")
+    
+    tryCatch({
+      result <- add_congenics_column(result, candidates = congenic_candidates)
+      cat("✓ Successfully added congenics column\n")
+      
+      # Display congenic summary if successful
+      if (!is.null(result$counts) && "congenics" %in% names(result$counts)) {
+        congenic_summary <- result$counts %>%
+          filter(!is.na(congenics)) %>%
+          count(congenics, name = "n_observations") %>%
+          arrange(desc(n_observations))
+        
+        if (nrow(congenic_summary) > 0) {
+          cat("Detected congenics:\n")
+          for (i in 1:nrow(congenic_summary)) {
+            cat(sprintf("  - %s: %d observations\n", 
+                        congenic_summary$congenics[i], 
+                        congenic_summary$n_observations[i]))
+          }
+        } else {
+          cat("⚠️  No congenics detected in the data\n")
+        }
+      }
+      
+    }, error = function(e) {
+      cat("⚠️  Warning: Could not add congenics column:", e$message, "\n")
+      cat("Continuing without congenics...\n")
+    })
+  }
+  
+  return(result)
+}
   
   # Map to expected column names
   wellid_col <- metadata_config$sample_id
