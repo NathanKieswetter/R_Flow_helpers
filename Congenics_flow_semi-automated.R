@@ -178,6 +178,514 @@ refine_metadata_mappings <- function(detected_mappings, available_cols) {
   return(detected_mappings)
 }
 
+# ============================================================================
+# INTERACTIVE MARKER ANNOTATION SYSTEM (NEW)
+# ============================================================================
+
+# Function to interactively annotate channels with marker names
+annotate_channels_interactive <- function(gs, save_annotation = TRUE) {
+  cat("=== Interactive Channel Annotation ===\n")
+  cat("This function helps you assign marker names to cytometer channels\n")
+  cat("when they weren't properly defined during acquisition.\n\n")
+  
+  # Get current marker lookup
+  lookup <- get_marker_lookup(gs)
+  
+  cat("Current channel-marker mapping:\n")
+  print(lookup)
+  
+  # Identify channels that need annotation
+  needs_annotation <- lookup %>%
+    filter(is.na(marker) | marker == "" | marker == colname)
+  
+  if (nrow(needs_annotation) == 0) {
+    cat("\n✓ All channels already have marker annotations!\n")
+    return(lookup)
+  }
+  
+  cat(sprintf("\nFound %d channels that need marker annotation:\n", nrow(needs_annotation)))
+  print(needs_annotation)
+  
+  # Interactive annotation loop
+  annotated_lookup <- annotate_channels_menu(lookup, gs)
+  
+  # Save annotations if requested
+  if (save_annotation) {
+    save_choice <- readline("\nSave channel annotations for future use? (y/n): ")
+    if (tolower(save_choice) == "y") {
+      save_channel_annotations(annotated_lookup, gs)
+    }
+  }
+  
+  return(annotated_lookup)
+}
+
+# Main annotation menu
+annotate_channels_menu <- function(lookup, gs) {
+  cat("\n=== Channel Annotation Menu ===\n")
+  
+  # Create working copy
+  working_lookup <- lookup
+  
+  while (TRUE) {
+    cat("\nCurrent annotations:\n")
+    print_annotation_status(working_lookup)
+    
+    cat("\nOptions:\n")
+    cat("1. Annotate specific channels\n")
+    cat("2. Bulk annotate by pattern\n")
+    cat("3. Load common marker panel\n")
+    cat("4. Preview data for channel identification\n")
+    cat("5. Reset all annotations\n")
+    cat("6. Finish annotation\n")
+    
+    choice <- readline("Choose option (1-6): ")
+    
+    if (choice == "1") {
+      working_lookup <- annotate_specific_channels(working_lookup)
+    } else if (choice == "2") {
+      working_lookup <- bulk_annotate_by_pattern(working_lookup)
+    } else if (choice == "3") {
+      working_lookup <- load_marker_panel(working_lookup)
+    } else if (choice == "4") {
+      preview_channel_data(gs, working_lookup)
+    } else if (choice == "5") {
+      working_lookup <- reset_annotations(lookup)
+    } else if (choice == "6") {
+      break
+    } else {
+      cat("Invalid choice. Please select 1-6.\n")
+    }
+  }
+  
+  return(working_lookup)
+}
+
+# Print current annotation status
+print_annotation_status <- function(lookup) {
+  annotated <- lookup %>%
+    mutate(
+      status = case_when(
+        is.na(marker) | marker == "" ~ "❌ Not annotated",
+        marker == colname ~ "⚠️  Using channel name",
+        TRUE ~ "✅ Annotated"
+      )
+    )
+  
+  cat("\nChannel Status:\n")
+  for (i in 1:nrow(annotated)) {
+    cat(sprintf("  %s: %s -> %s\n", 
+                annotated$status[i], 
+                annotated$colname[i], 
+                ifelse(is.na(annotated$marker[i]), "NONE", annotated$marker[i])))
+  }
+  
+  n_annotated <- sum(!is.na(annotated$marker) & annotated$marker != "" & annotated$marker != annotated$colname)
+  cat(sprintf("\nProgress: %d/%d channels properly annotated\n", n_annotated, nrow(annotated)))
+}
+
+# Annotate specific channels
+annotate_specific_channels <- function(lookup) {
+  cat("\n=== Specific Channel Annotation ===\n")
+  
+  # Show channels that need annotation
+  needs_work <- lookup %>%
+    mutate(row_num = row_number()) %>%
+    filter(is.na(marker) | marker == "" | marker == colname)
+  
+  if (nrow(needs_work) == 0) {
+    cat("All channels are already annotated!\n")
+    return(lookup)
+  }
+  
+  cat("Channels needing annotation:\n")
+  for (i in 1:nrow(needs_work)) {
+    cat(sprintf("%d. %s (currently: %s)\n", 
+                needs_work$row_num[i], 
+                needs_work$colname[i],
+                ifelse(is.na(needs_work$marker[i]), "NONE", needs_work$marker[i])))
+  }
+  
+  # Select channel to annotate
+  channel_choice <- readline("Enter channel number to annotate (or 'done'): ")
+  
+  if (tolower(channel_choice) == "done") {
+    return(lookup)
+  }
+  
+  if (grepl("^\\d+$", channel_choice)) {
+    channel_num <- as.numeric(channel_choice)
+    if (channel_num %in% needs_work$row_num) {
+      row_idx <- which(lookup$colname == needs_work$colname[needs_work$row_num == channel_num])
+      
+      cat(sprintf("\nAnnotating channel: %s\n", lookup$colname[row_idx]))
+      cat("Current marker name:", ifelse(is.na(lookup$marker[row_idx]), "NONE", lookup$marker[row_idx]), "\n")
+      
+      new_marker <- readline("Enter marker name (e.g., 'CD3', 'CD4', 'Live/Dead'): ")
+      
+      if (new_marker != "") {
+        lookup$marker[row_idx] <- new_marker
+        cat(sprintf("✓ Updated %s -> %s\n", lookup$colname[row_idx], new_marker))
+      }
+    }
+  }
+  
+  return(lookup)
+}
+
+# Bulk annotate by pattern matching
+bulk_annotate_by_pattern <- function(lookup) {
+  cat("\n=== Bulk Pattern Annotation ===\n")
+  cat("This helps annotate multiple channels based on naming patterns.\n")
+  
+  cat("\nAvailable channels:\n")
+  iwalk(lookup$colname, ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  pattern <- readline("\nEnter pattern to match (regex, e.g., 'CD.*', 'BV.*'): ")
+  if (pattern == "") return(lookup)
+  
+  matches <- grep(pattern, lookup$colname, ignore.case = TRUE)
+  
+  if (length(matches) == 0) {
+    cat("No channels match that pattern.\n")
+    return(lookup)
+  }
+  
+  cat(sprintf("Pattern '%s' matches %d channels:\n", pattern, length(matches)))
+  for (i in matches) {
+    cat(sprintf("  %s\n", lookup$colname[i]))
+  }
+  
+  marker_name <- readline("Enter marker name for all matched channels: ")
+  if (marker_name != "") {
+    confirm <- readline(sprintf("Annotate all %d channels with '%s'? (y/n): ", length(matches), marker_name))
+    if (tolower(confirm) == "y") {
+      lookup$marker[matches] <- marker_name
+      cat(sprintf("✓ Annotated %d channels\n", length(matches)))
+    }
+  }
+  
+  return(lookup)
+}
+
+# Load common marker panels
+load_marker_panel <- function(lookup) {
+  cat("\n=== Load Common Marker Panel ===\n")
+  
+  # Define common panels
+  common_panels <- list(
+    "Mouse T-cell Basic" = list(
+      "CD3" = c("CD3", "TCR"),
+      "CD4" = c("CD4"),
+      "CD8" = c("CD8", "CD8a", "CD8alpha"),
+      "CD45" = c("CD45", "CD45.1", "CD45.2"),
+      "Live/Dead" = c("Live", "Dead", "Viability", "PI", "7AAD")
+    ),
+    
+    "Human PBMC Basic" = list(
+      "CD3" = c("CD3"),
+      "CD4" = c("CD4"),
+      "CD8" = c("CD8"),
+      "CD19" = c("CD19"),
+      "CD14" = c("CD14"),
+      "CD45" = c("CD45"),
+      "Live/Dead" = c("Live", "Dead", "Viability")
+    ),
+    
+    "Mouse Tissue Analysis" = list(
+      "CD45" = c("CD45", "CD45.1", "CD45.2"),
+      "CD3" = c("CD3"),
+      "CD11b" = c("CD11b"),
+      "F4/80" = c("F4", "F480"),
+      "Ly6G" = c("Ly6G", "Gr1"),
+      "Live/Dead" = c("Live", "Dead", "Viability")
+    )
+  )
+  
+  cat("Available marker panels:\n")
+  iwalk(names(common_panels), ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  panel_choice <- readline("Select panel number: ")
+  if (grepl("^\\d+$", panel_choice)) {
+    panel_num <- as.numeric(panel_choice)
+    if (panel_num >= 1 && panel_num <= length(common_panels)) {
+      selected_panel <- common_panels[[panel_num]]
+      panel_name <- names(common_panels)[panel_num]
+      
+      cat(sprintf("\nApplying %s panel...\n", panel_name))
+      lookup <- apply_marker_panel(lookup, selected_panel)
+    }
+  }
+  
+  return(lookup)
+}
+
+# Apply marker panel to lookup
+apply_marker_panel <- function(lookup, panel) {
+  annotations_made <- 0
+  
+  for (marker_name in names(panel)) {
+    possible_channels <- panel[[marker_name]]
+    
+    # Find matching channels
+    for (channel_pattern in possible_channels) {
+      matches <- grep(channel_pattern, lookup$colname, ignore.case = TRUE)
+      
+      if (length(matches) > 0) {
+        # Annotate first match
+        match_idx <- matches[1]
+        old_marker <- lookup$marker[match_idx]
+        lookup$marker[match_idx] <- marker_name
+        
+        cat(sprintf("  ✓ %s -> %s\n", lookup$colname[match_idx], marker_name))
+        annotations_made <- annotations_made + 1
+        break  # Only annotate first match per marker
+      }
+    }
+  }
+  
+  cat(sprintf("Applied %d annotations from panel\n", annotations_made))
+  return(lookup)
+}
+
+# Preview channel data to help with identification
+preview_channel_data <- function(gs, lookup) {
+  cat("\n=== Channel Data Preview ===\n")
+  cat("This shows expression data to help identify markers.\n")
+  
+  # Get a sample for preview
+  sample_names <- sampleNames(gs)
+  if (length(sample_names) == 0) {
+    cat("No samples available for preview\n")
+    return()
+  }
+  
+  # Use first sample
+  sample_name <- sample_names[1]
+  cat(sprintf("Using sample: %s\n", sample_name))
+  
+  tryCatch({
+    # Get root population data
+    gh <- gs[[sample_name]]
+    ff <- gh_pop_get_data(gh, "/")
+    
+    if (is.null(ff)) {
+      cat("Could not retrieve data from sample\n")
+      return()
+    }
+    
+    expr_data <- if (inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
+    
+    # Show channels needing annotation
+    needs_work <- lookup %>%
+      filter(is.na(marker) | marker == "" | marker == colname)
+    
+    if (nrow(needs_work) == 0) {
+      cat("All channels are annotated!\n")
+      return()
+    }
+    
+    cat("\nChannels needing annotation:\n")
+    for (i in 1:nrow(needs_work)) {
+      channel <- needs_work$colname[i]
+      if (channel %in% colnames(expr_data)) {
+        channel_data <- expr_data[, channel]
+        stats <- summary(channel_data)
+        
+        cat(sprintf("\n%d. Channel: %s\n", i, channel))
+        cat(sprintf("   Range: %.1f to %.1f\n", min(channel_data, na.rm = TRUE), max(channel_data, na.rm = TRUE)))
+        cat(sprintf("   Median: %.1f, Mean: %.1f\n", median(channel_data, na.rm = TRUE), mean(channel_data, na.rm = TRUE)))
+        cat(sprintf("   Has negative values: %s\n", ifelse(any(channel_data < 0, na.rm = TRUE), "Yes", "No")))
+        
+        # Suggest marker type based on data characteristics
+        suggest_marker_type(channel, channel_data)
+      }
+    }
+    
+  }, error = function(e) {
+    cat("Error accessing sample data:", e$message, "\n")
+  })
+  
+  readline("\nPress Enter to continue...")
+}
+
+# Suggest marker type based on data characteristics
+suggest_marker_type <- function(channel, data) {
+  has_negatives <- any(data < 0, na.rm = TRUE)
+  data_range <- max(data, na.rm = TRUE) - min(data, na.rm = TRUE)
+  median_val <- median(data, na.rm = TRUE)
+  
+  suggestions <- character(0)
+  
+  # Check for common patterns
+  if (grepl("FSC|SSC", channel, ignore.case = TRUE)) {
+    suggestions <- c(suggestions, "Scatter parameter (size/granularity)")
+  } else if (grepl("Time", channel, ignore.case = TRUE)) {
+    suggestions <- c(suggestions, "Time parameter")
+  } else if (!has_negatives && median_val < 1000) {
+    suggestions <- c(suggestions, "Possible fluorescence marker")
+  } else if (has_negatives) {
+    suggestions <- c(suggestions, "Possible compensated fluorescence")
+  } else if (data_range > 100000) {
+    suggestions <- c(suggestions, "Possible scatter or autofluorescence")
+  }
+  
+  if (length(suggestions) > 0) {
+    cat(sprintf("   Suggestions: %s\n", paste(suggestions, collapse = ", ")))
+  }
+}
+
+# Reset annotations
+reset_annotations <- function(original_lookup) {
+  confirm <- readline("Reset all annotations to original state? (y/n): ")
+  if (tolower(confirm) == "y") {
+    cat("Annotations reset\n")
+    return(original_lookup)
+  }
+  return(original_lookup)
+}
+
+# Save channel annotations
+save_channel_annotations <- function(lookup, gs) {
+  ensure_output_dirs()
+  
+  # Create annotation file
+  annotation_data <- list(
+    lookup = lookup,
+    samples = sampleNames(gs),
+    timestamp = Sys.time(),
+    sample_count = length(sampleNames(gs))
+  )
+  
+  filename <- readline("Enter filename for annotations (default: channel_annotations.rds): ")
+  if (filename == "") {
+    filename <- "channel_annotations.rds"
+  }
+  
+  if (!str_detect(filename, "\\.rds$")) {
+    filename <- paste0(filename, ".rds")
+  }
+  
+  full_path <- here("out", "data", filename)
+  saveRDS(annotation_data, full_path)
+  
+  cat("Channel annotations saved to:", full_path, "\n")
+  
+  # Also save as CSV for easy viewing
+  csv_filename <- str_replace(filename, "\\.rds$", ".csv")
+  csv_path <- here("out", "data", csv_filename)
+  write_csv(lookup, csv_path)
+  cat("Lookup table saved as CSV:", csv_path, "\n")
+}
+
+# Load channel annotations
+load_channel_annotations <- function(gs, filename = NULL) {
+  data_dir <- here("out", "data")
+  
+  if (is.null(filename)) {
+    # List available annotation files
+    annotation_files <- list.files(data_dir, pattern = ".*annotation.*\\.rds$", full.names = FALSE)
+    
+    if (length(annotation_files) == 0) {
+      cat("No annotation files found in:", data_dir, "\n")
+      return(NULL)
+    }
+    
+    cat("Available annotation files:\n")
+    iwalk(annotation_files, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    file_choice <- readline("Enter file number or filename: ")
+    
+    if (grepl("^\\d+$", file_choice)) {
+      file_num <- as.numeric(file_choice)
+      if (file_num >= 1 && file_num <= length(annotation_files)) {
+        filename <- annotation_files[file_num]
+      }
+    } else {
+      filename <- file_choice
+    }
+  }
+  
+  if (is.null(filename)) {
+    cat("No file selected\n")
+    return(NULL)
+  }
+  
+  if (!str_detect(filename, "\\.rds$")) {
+    filename <- paste0(filename, ".rds")
+  }
+  
+  full_path <- file.path(data_dir, filename)
+  
+  if (!file.exists(full_path)) {
+    cat("File not found:", full_path, "\n")
+    return(NULL)
+  }
+  
+  tryCatch({
+    annotation_data <- readRDS(full_path)
+    cat("Loaded annotations from:", filename, "\n")
+    cat("Original sample count:", annotation_data$sample_count, "\n")
+    cat("Current sample count:", length(sampleNames(gs)), "\n")
+    
+    return(annotation_data$lookup)
+    
+  }, error = function(e) {
+    cat("Error loading annotations:", e$message, "\n")
+    return(NULL)
+  })
+}
+
+# Enhanced get_marker_lookup that can use saved annotations
+get_marker_lookup_enhanced <- function(gs, use_saved_annotations = TRUE) {
+  # Get basic lookup
+  lookup <- get_marker_lookup(gs)
+  
+  # Try to load saved annotations if requested
+  if (use_saved_annotations) {
+    cat("Checking for saved channel annotations...\n")
+    saved_lookup <- load_channel_annotations(gs)
+    
+    if (!is.null(saved_lookup)) {
+      use_saved <- readline("Use saved annotations? (y/n): ")
+      if (tolower(use_saved) == "y") {
+        # Merge saved annotations with current lookup
+        lookup <- merge_annotations(lookup, saved_lookup)
+        cat("Applied saved annotations\n")
+      }
+    }
+  }
+  
+  # Check if annotation is needed
+  needs_annotation <- lookup %>%
+    filter(is.na(marker) | marker == "" | marker == colname)
+  
+  if (nrow(needs_annotation) > 0) {
+    cat(sprintf("Found %d channels that may need annotation\n", nrow(needs_annotation)))
+    annotate_now <- readline("Run interactive annotation now? (y/n): ")
+    
+    if (tolower(annotate_now) == "y") {
+      lookup <- annotate_channels_interactive(gs)
+    }
+  }
+  
+  return(lookup)
+}
+
+# Merge saved annotations with current lookup
+merge_annotations <- function(current_lookup, saved_lookup) {
+  # Match by channel name and update markers
+  for (i in 1:nrow(current_lookup)) {
+    channel <- current_lookup$colname[i]
+    saved_match <- saved_lookup[saved_lookup$colname == channel, ]
+    
+    if (nrow(saved_match) > 0 && !is.na(saved_match$marker) && saved_match$marker != "") {
+      current_lookup$marker[i] <- saved_match$marker
+    }
+  }
+  
+  return(current_lookup)
+}
 
 # ============================================================================
 # CORE SETUP AND DATA LOADING
@@ -1091,15 +1599,22 @@ preview_parent_mapping <- function(nodes, parent_mapping, gs) {
 # DATA EXTRACTION
 # ============================================================================
 
-# Get marker lookup table
-get_marker_lookup <- function(gs) {
+# Enhanced marker lookup with annotation support
+get_marker_lookup <- function(gs, interactive_annotation = FALSE) {
   fh <- gh_pop_get_data(gs[[1]], "/")
   params <- pData(parameters(fh))
   
-  tibble(
+  lookup <- tibble(
     colname = params$name,
     marker = if_else(is.na(params$desc) | params$desc == "", params$name, params$desc)
   )
+  
+  # Check if interactive annotation is needed/requested
+  if (interactive_annotation) {
+    lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
+  }
+  
+  return(lookup)
 }
 
 # Select channels for MFI analysis with back navigation
@@ -1646,9 +2161,16 @@ analyze_flow_data_flexible <- function(gs,
                                        parent_selection = "interactive",
                                        channels = NULL,
                                        summary_fun = median,
-                                       auto_detect_metadata = TRUE) {
+                                       auto_detect_metadata = TRUE,
+                                       interactive_annotation = FALSE) {  # NEW PARAMETER
   
   cat("=== Flexible Flow Cytometry Analysis Pipeline ===\n")
+  
+  # Step 0: Handle channel annotation if requested
+  if (interactive_annotation) {
+    cat("Checking channel annotations...\n")
+    annotated_lookup <- get_marker_lookup_enhanced(gs, use_saved_annotations = TRUE)
+  }
   
   # Step 1: Configure metadata
   if (auto_detect_metadata || is.null(metadata_config)) {
@@ -7176,6 +7698,20 @@ cat("- Fixed all numeric input handling to prevent NA errors\n")
 #   xml_path = here("data/20-Jun-2025.wsp"),
 #   fcs_path = here("data/fcs_files/")
 # )
+
+# # NEW: Annotate channels if markers weren't defined during acquisition
+# preview_metadata_structure(gs)  # Check what's available
+# annotated_lookup <- annotate_channels_interactive(gs)  # Interactive annotation
+
+# # OR: Run analysis with built-in annotation check
+# congenics_results <- analyze_flow_data_flexible(gs, interactive_annotation = TRUE)
+
+# # Load previously saved annotations
+# saved_lookup <- load_channel_annotations(gs)
+
+# # View current channel mapping
+# current_lookup <- get_marker_lookup_enhanced(gs)
+# print(current_lookup)
 
 # # NEW: Preview available metadata first
 # preview_metadata_structure(gs)
