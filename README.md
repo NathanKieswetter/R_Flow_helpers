@@ -1,4 +1,4 @@
-# Flow Cytometry Analysis Pipeline for Adoptive Transfer Experiments using Congenic Cells
+# Flow Cytometry Analysis Pipeline
 
 A comprehensive R package for automated flow cytometry analysis with interactive visualization tools, specifically designed for congenic marker analysis and engraftment studies.
 
@@ -226,52 +226,167 @@ Comprehensive UMAP analysis with interactive visualization.
 
 ## Example Workflow
 
-```r
-# Load libraries and setup
-library(here)
-# ... (load all required libraries)
+### Basic Setup and Data Import
 
-# Source analysis functions
+```r
+# 1. Load required libraries
+library(here)
+library(CytoML)
+library(flowCore)
+library(flowWorkspace)
+library(tidyverse)
+library(ggpubr)
+library(rstatix)
+library(scales)
+library(glue)
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(umap)
+library(viridis)
+library(purrr)
+library(patchwork)
+
+# 2. Source the analysis functions
 source("https://github.com/NathanKieswetter/R_Flow_helpers/blob/main/Congenics_flow_semi-automated.R")
 
-# Setup folder structure (automatic)
-# Folders will be created if they don't exist
+# 3. Setup folder structure (automatic - creates data/, out/, scripts/ directories)
+# Folders will be created automatically when needed
 
-# Import FlowJo workspace
+# 4. Import FlowJo workspace
 gs <- setup_flowjo_workspace(
   xml_path = here("data", "Exp2_D7.wsp"),
   fcs_path = here("data", "FCS_D7/")
 )
 
-# Assess gating hierarchy
+# 5. Save GatingSet for future use
+save_gatingset(gs, "experiment_D7_gatingset.rds")
+
+# 6. Assess gating hierarchy
 plot(gs, fontsize = 15, bool = TRUE)
+```
 
-# Run interactive analyses for different populations
-congenics_results <- analyze_flow_data_auto(gs)
-KLRG1_CD127_results <- analyze_flow_data_auto(gs)
-CD69_CD103_results <- analyze_flow_data_auto(gs)
+### Interactive Data Analysis
 
-# Clean up data
+```r
+# 7. Run interactive analyses for different populations
+# Each analysis will guide you through node selection, parent mapping, and channel selection
+congenics_results <- analyze_flow_data_auto(gs)           # For congenic marker analysis
+KLRG1_CD127_results <- analyze_flow_data_auto(gs)         # For activation markers
+CD69_CD103_results <- analyze_flow_data_auto(gs)          # For tissue residence markers
+
+# 8. Save analysis results
+save_analysis_results(congenics_results, "congenics_results.rds")
+save_analysis_results(KLRG1_CD127_results, "KLRG1_CD127_results.rds")
+save_analysis_results(CD69_CD103_results, "CD69_CD103_results.rds")
+
+# 9. Clean up data (removes special characters, handles unstained samples)
 congenics_results <- data_clean_custom(congenics_results)
 KLRG1_CD127_results <- data_clean_custom(KLRG1_CD127_results)
 CD69_CD103_results <- data_clean_custom(CD69_CD103_results)
+```
 
-# Add experimental metadata
+### Metadata Assignment and Experimental Design
+
+```r
+# 10. Add experimental metadata (interactive menus for WT/KO assignment, timepoints, etc.)
 congenics_results_with_genotype <- assign_metadata_menu(congenics_results$counts)
 
-# Create engraftment analysis
+# The metadata assignment includes:
+# - WT/KO marker identification
+# - Recipient marker assignment
+# - Custom metadata (timepoint, batch, sex, etc.)
+```
+
+### Visualization and Analysis
+
+```r
+# 11. Create engraftment analysis with statistical testing
 plot_engraftment <- create_engraftment_plot(congenics_results_with_genotype)
 print(plot_engraftment)
 
-# Generate MFI heatmaps
-mfi_heatmaps <- create_mfi_heatmaps_interactive_enhanced(congenics_results$mfi)
+# Save engraftment plot (plots automatically save to out/plots/)
+if(!is.null(plot_engraftment$plot)) {
+  ggsave(here("out", "plots", "engraftment_analysis.png"), 
+         plot_engraftment$plot, width = 10, height = 6, dpi = 300)
+}
 
-# Create paired comparison plots
+# 12. Generate interactive MFI heatmaps with statistical testing
+mfi_heatmaps <- create_mfi_heatmaps_interactive_enhanced(congenics_results$mfi)
+# This function provides:
+# - Interactive congenic and marker selection
+# - Multiple scaling methods
+# - Statistical testing options
+# - Automatic export to out/plots/
+
+# 13. Create paired comparison plots
 KLRG1_CD127_plots <- create_paired_comparison_plots(KLRG1_CD127_results$counts)
 CD69_CD103_plots <- create_paired_comparison_plots(CD69_CD103_results$counts)
 
-# Advanced UMAP analysis
+# Access individual plots:
+# KLRG1_CD127_plots[["Spleen"]]        # View specific tissue
+# CD69_CD103_plots[["CD103+CD69+"]]    # View specific population
+
+# 14. Advanced UMAP analysis (interactive with session management)
 umap_results <- analyze_flow_umap_enhanced(gs)
+# Features include:
+# - Sample exclusion (unstained, controls)
+# - Interactive visualization menu
+# - Plot session management
+# - Multiple export options
+```
+
+### Data Export and Session Management
+
+```r
+# 15. Export processed data
+# Export count/frequency data
+write_csv(congenics_results$counts, here("out", "data", "congenics_counts.csv"))
+write_csv(congenics_results$mfi, here("out", "data", "congenics_mfi.csv"))
+
+# Export UMAP data
+export_umap_data(umap_results, "umap_analysis.csv")
+
+# 16. Save complete session
+session_name <- save_session(gs, congenics_results, "experiment_D7_session")
+
+# 17. Manage saved files interactively
+manage_saved_files()  # Interactive menu for loading/deleting saved data
+```
+
+### Loading Previous Sessions
+
+```r
+# Load a previously saved session
+loaded_session <- load_session("experiment_D7_session")
+gs <- loaded_session$gs
+results <- loaded_session$results
+
+# Or load individual components
+gs <- load_gatingset("experiment_D7_gatingset.rds")
+congenics_results <- load_analysis_results("congenics_results.rds")
+
+# List available files
+list_available_gatingsets()
+```
+
+### Advanced Workflow Options
+
+```r
+# 18. Statistical analysis export
+if(!is.null(mfi_heatmaps) && exists("stats_results")) {
+  export_stats_results(stats_results, "mfi_statistical_analysis.csv")
+}
+
+# 19. Continue UMAP visualization session
+restart_visualization_session(umap_results)
+
+# 20. Export all session plots at once
+export_all_session_plots()  # Saves all plots to out/plots/
+
+# 21. Create quick plots from saved results
+quick_plot <- create_quick_umap_plot(umap_results, "GROUPNAME")
+ggsave(here("out", "plots", "quick_tissue_plot.png"), quick_plot)
 ```
 
 ## Configuration Options
