@@ -16,7 +16,7 @@ library(umap)
 # CORE SETUP AND DATA LOADING
 # ============================================================================
 
-setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("$WELLID", "GROUPNAME")) {
+setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("pairing_factor", "tissue_factor")) {
   ws <- open_flowjo_xml(xml_path)
   gs <- flowjo_to_gatingset(
     ws, 
@@ -29,7 +29,7 @@ setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("$WELLID", "
 }
 
 # ============================================================================
-# INTERACTIVE KEYWORD SELECTION FOR FLOWJO WORKSPACE SETUP
+# IMPROVED INTERACTIVE KEYWORD SELECTION FOR FLOWJO WORKSPACE SETUP
 # ============================================================================
 
 # Function to extract and preview keywords from FCS files
@@ -91,11 +91,51 @@ preview_fcs_keywords <- function(fcs_path, sample_limit = 5) {
     values <- map_chr(all_keywords, function(file_keywords) {
       if(kw %in% names(file_keywords)) {
         val <- file_keywords[[kw]]
-        if(is.null(val) || is.na(val) || val == "") {
+        
+        # Handle NULL values first
+        if(is.null(val)) {
           return("(empty)")
-        } else {
-          return(as.character(val))
         }
+        
+        # Handle different value types safely
+        tryCatch({
+          # Check if it's a vector with multiple elements
+          if(length(val) > 1) {
+            # For vectors, show first few elements
+            if(length(val) > 3) {
+              collapsed_val <- paste(c(as.character(head(val, 3)), "..."), collapse = ", ")
+            } else {
+              collapsed_val <- paste(as.character(val), collapse = ", ")
+            }
+            return(paste0("[vector:", length(val), "] ", collapsed_val))
+          }
+          
+          # Handle single values
+          if(length(val) == 1) {
+            # Convert to character safely
+            char_val <- as.character(val)
+            
+            # Check for empty/NA after conversion
+            if(is.na(char_val) || char_val == "" || char_val == " " || char_val == "NA") {
+              return("(empty)")
+            } else {
+              return(char_val)
+            }
+          }
+          
+          # Handle zero-length values
+          if(length(val) == 0) {
+            return("(empty)")
+          }
+          
+          # Fallback
+          return("(unknown)")
+          
+        }, error = function(e) {
+          # If any error occurs in processing, return a safe value
+          return(paste0("(error: ", class(val)[1], ")"))
+        })
+        
       } else {
         return("(missing)")
       }
@@ -105,14 +145,26 @@ preview_fcs_keywords <- function(fcs_path, sample_limit = 5) {
     non_empty_values <- values[values != "(empty)" & values != "(missing)"]
     unique_values <- unique(non_empty_values)
     
+    # Create proper example values string - FIXED!
+    example_values_str <- if(length(unique_values) > 0) {
+      if(length(unique_values) <= 3) {
+        paste(unique_values, collapse = ", ")
+      } else {
+        paste(c(head(unique_values, 3), "..."), collapse = ", ")
+      }
+    } else {
+      "(no examples)"
+    }
+    
     tibble(
       keyword = kw,
       present_in_files = sum(values != "(missing)"),
       total_files = length(values),
       non_empty_values = length(non_empty_values),
       unique_values = length(unique_values),
-      example_values = paste(head(unique_values, 3), collapse = ", "),
-      all_values = list(values)
+      example_values = example_values_str,  # This is now the actual examples, not count!
+      all_values = list(values),
+      all_unique_values = list(unique_values)  # Store unique values for detailed view
     )
   }) %>%
     arrange(desc(present_in_files), desc(non_empty_values), keyword)
@@ -130,92 +182,100 @@ display_keyword_info <- function(keyword_data, show_all = FALSE) {
   summary_df <- keyword_data$keyword_summary
   
   if(nrow(summary_df) == 0) {
-    cat("No keywords found in FCS files\n")
+    cat("No keywords found that are present in ALL FCS files\n")
+    cat("This suggests inconsistent FCS file formats\n")
     return()
   }
   
   cat("\n", paste(rep("=", 80), collapse = ""), "\n")
-  cat("KEYWORD ANALYSIS SUMMARY\n")
+  cat("KEYWORDS PRESENT IN ALL SAMPLED FILES\n")
   cat(paste(rep("=", 80), collapse = ""), "\n")
   cat("Files analyzed:", length(keyword_data$files_sampled), "\n")
-  cat("Total unique keywords found:", nrow(summary_df), "\n\n")
+  cat("Keywords present in ALL files:", nrow(summary_df), "\n\n")
   
   # Categorize keywords for better display
-  complete_keywords <- summary_df %>% 
-    filter(present_in_files == total_files, non_empty_values == total_files)
+  useful_keywords <- summary_df %>% 
+    filter(non_empty_values == total_files, unique_values > 1) %>%
+    arrange(desc(unique_values))
   
-  mostly_complete <- summary_df %>% 
-    filter(present_in_files == total_files, non_empty_values < total_files)
+  constant_keywords <- summary_df %>% 
+    filter(non_empty_values == total_files, unique_values == 1)
   
-  partial_keywords <- summary_df %>% 
-    filter(present_in_files < total_files, present_in_files > 0)
+  mostly_empty <- summary_df %>% 
+    filter(non_empty_values < total_files)
   
-  # Display categories
-  if(nrow(complete_keywords) > 0) {
-    cat("COMPLETE KEYWORDS (present and non-empty in all files):\n")
-    cat("These are the most reliable keywords for analysis\n\n")
+  # Display useful keywords (varying values)
+  if(nrow(useful_keywords) > 0) {
+    cat("🎯 USEFUL KEYWORDS (varying values across files):\n")
+    cat("These are most likely to be useful for analysis\n\n")
     
-    display_df <- complete_keywords %>%
+    display_df <- useful_keywords %>%
       select(keyword, unique_values, example_values) %>%
-      slice_head(n = if(show_all) nrow(complete_keywords) else 15)
+      slice_head(n = if(show_all) nrow(useful_keywords) else 15)
     
     for(i in 1:nrow(display_df)) {
       row <- display_df[i, ]
-      cat(sprintf("%-25s | %2d unique values | Examples: %s\n", 
+      cat(sprintf("%-30s | %2d unique values | Examples: %s\n", 
                   row$keyword, row$unique_values, row$example_values))
     }
     
-    if(!show_all && nrow(complete_keywords) > 15) {
-      cat(sprintf("... and %d more complete keywords\n", nrow(complete_keywords) - 15))
+    if(!show_all && nrow(useful_keywords) > 15) {
+      cat(sprintf("... and %d more useful keywords (use option 2 to see all)\n", 
+                  nrow(useful_keywords) - 15))
     }
     cat("\n")
   }
   
-  if(nrow(mostly_complete) > 0) {
-    cat("MOSTLY COMPLETE KEYWORDS (present in all files, some empty values):\n")
+  # Display constant keywords
+  if(nrow(constant_keywords) > 0) {
+    cat("📊 CONSTANT KEYWORDS (same value in all files):\n")
+    cat("These might be useful for experiment metadata\n\n")
     
-    display_df <- mostly_complete %>%
-      select(keyword, non_empty_values, total_files, example_values) %>%
-      slice_head(n = if(show_all) nrow(mostly_complete) else 10)
+    display_df <- constant_keywords %>%
+      select(keyword, example_values) %>%
+      slice_head(n = if(show_all) nrow(constant_keywords) else 10)
     
     for(i in 1:nrow(display_df)) {
       row <- display_df[i, ]
-      cat(sprintf("%-25s | %2d/%2d non-empty | Examples: %s\n", 
+      cat(sprintf("%-30s | Constant value: %s\n", 
+                  row$keyword, row$example_values))
+    }
+    
+    if(!show_all && nrow(constant_keywords) > 10) {
+      cat(sprintf("... and %d more constant keywords\n", nrow(constant_keywords) - 10))
+    }
+    cat("\n")
+  }
+  
+  # Display mostly empty keywords
+  if(nrow(mostly_empty) > 0) {
+    cat("⚠️  MOSTLY EMPTY KEYWORDS (some empty values):\n")
+    cat("Use with caution\n\n")
+    
+    display_df <- mostly_empty %>%
+      select(keyword, non_empty_values, total_files, example_values) %>%
+      slice_head(n = if(show_all) nrow(mostly_empty) else 5)
+    
+    for(i in 1:nrow(display_df)) {
+      row <- display_df[i, ]
+      cat(sprintf("%-30s | %2d/%2d non-empty | Examples: %s\n", 
                   row$keyword, row$non_empty_values, row$total_files, row$example_values))
     }
     
-    if(!show_all && nrow(mostly_complete) > 10) {
-      cat(sprintf("... and %d more mostly complete keywords\n", nrow(mostly_complete) - 10))
+    if(!show_all && nrow(mostly_empty) > 5) {
+      cat(sprintf("... and %d more mostly empty keywords\n", nrow(mostly_empty) - 5))
     }
     cat("\n")
   }
   
-  if(nrow(partial_keywords) > 0) {
-    cat("PARTIAL KEYWORDS (missing from some files):\n")
-    cat("Use with caution - may cause issues in analysis\n\n")
-    
-    display_df <- partial_keywords %>%
-      select(keyword, present_in_files, total_files, example_values) %>%
-      slice_head(n = if(show_all) nrow(partial_keywords) else 5)
-    
-    for(i in 1:nrow(display_df)) {
-      row <- display_df[i, ]
-      cat(sprintf("%-25s | %2d/%2d files | Examples: %s\n", 
-                  row$keyword, row$present_in_files, row$total_files, row$example_values))
-    }
-    
-    if(!show_all && nrow(partial_keywords) > 5) {
-      cat(sprintf("... and %d more partial keywords\n", nrow(partial_keywords) - 5))
-    }
-    cat("\n")
-  }
+  cat("💡 TIP: Use option 6 to see detailed examples for any keyword\n")
 }
 
 # Function to show detailed examples for a specific keyword
 show_keyword_examples <- function(keyword_data, keyword_name) {
   
   if(!keyword_name %in% keyword_data$keyword_summary$keyword) {
-    cat("Keyword", keyword_name, "not found\n")
+    cat("Keyword", keyword_name, "not found in available keywords\n")
     return()
   }
   
@@ -223,21 +283,119 @@ show_keyword_examples <- function(keyword_data, keyword_name) {
     filter(keyword == keyword_name)
   
   values <- keyword_info$all_values[[1]]
+  unique_vals <- keyword_info$all_unique_values[[1]]
   file_names <- names(keyword_data$file_keywords)
   
-  cat("\n", paste(rep("-", 60), collapse = ""), "\n")
+  cat("\n", paste(rep("-", 80), collapse = ""), "\n")
   cat("DETAILED EXAMPLES FOR:", keyword_name, "\n")
-  cat(paste(rep("-", 60), collapse = ""), "\n")
+  cat(paste(rep("-", 80), collapse = ""), "\n")
   
-  cat("Present in", keyword_info$present_in_files, "out of", keyword_info$total_files, "files\n")
+  cat("Present in ALL", keyword_info$total_files, "files\n")
   cat("Non-empty values:", keyword_info$non_empty_values, "\n")
   cat("Unique values:", keyword_info$unique_values, "\n\n")
   
-  cat("Examples from each file:\n")
+  # Show all unique values if reasonable number
+  if(length(unique_vals) <= 20 && length(unique_vals) > 1) {
+    cat("🎯 ALL UNIQUE VALUES:\n")
+    iwalk(unique_vals, ~cat(sprintf("  %2d. %s\n", .y, .x)))
+    cat("\n")
+  } else if(length(unique_vals) > 20) {
+    cat("🎯 SAMPLE OF UNIQUE VALUES (", length(unique_vals), "total):\n")
+    sample_vals <- if(length(unique_vals) > 20) head(unique_vals, 20) else unique_vals
+    iwalk(sample_vals, ~cat(sprintf("  %2d. %s\n", .y, .x)))
+    cat("  ... and", length(unique_vals) - 20, "more unique values\n\n")
+  } else if(length(unique_vals) == 1) {
+    cat("🎯 CONSTANT VALUE: ", unique_vals[1], "\n\n")
+  }
+  
+  cat("📁 VALUES FROM EACH FILE:\n")
   for(i in seq_along(values)) {
-    cat(sprintf("%-30s: %s\n", str_trunc(file_names[i], 28), values[i]))
+    # Truncate very long values for display
+    display_value <- values[i]
+    if(nchar(display_value) > 60) {
+      display_value <- paste0(str_trunc(display_value, 57), "...")
+    }
+    cat(sprintf("%-35s: %s\n", str_trunc(file_names[i], 33), display_value))
   }
   cat("\n")
+}
+
+# Improved biological relevance detection
+detect_biological_relevance <- function(keyword_data) {
+  
+  # Define more specific biological patterns with word boundaries
+  bio_patterns <- list(
+    tissues = list(
+      pattern = "\\b(liver|spleen|kidney|lymph_node|LN|medLN|cLN|gut|fat|tumor|skin|blood|PBMC|SPL|cIEL|cLN|lymph node|cervical|intestine|colon|SI|SG)\\b",
+      description = "tissue types"
+    ),
+    treatments = list(
+      pattern = "\\b(stim|stimulated|control|unstained|KO|WT|wildtype|congenic)\\b",
+      description = "treatments"
+    ),
+    timepoints = list(
+      pattern = "\\b(D[0-9]+|DPI|day|days)\\b",
+      description = "timepoints"
+    ),
+    well_positions = list(
+      pattern = "\\b[A-H][0-9]{1,2}\\b",
+      description = "well positions"
+    ),
+    mouse_info = list(
+      pattern = "\\b(M[0-9]+|mouse|mice)\\b",
+      description = "mouse identifiers"
+    ),
+    sample_info = list(
+      pattern = "\\b(tissue_type|sample_type|group|condition|treatment)\\b",
+      description = "sample metadata"
+    )
+  )
+  
+  # Check each keyword for biological relevance
+  bio_relevant_indices <- c()
+  relevance_info <- list()
+  
+  for(i in 1:nrow(keyword_data$keyword_summary)) {
+    row <- keyword_data$keyword_summary[i, ]
+    found_patterns <- character(0)
+    
+    # Check keyword name and values against each pattern
+    for(pattern_name in names(bio_patterns)) {
+      pattern <- bio_patterns[[pattern_name]]$pattern
+      description <- bio_patterns[[pattern_name]]$description
+      
+      # Check keyword name
+      keyword_match <- str_detect(tolower(row$keyword), regex(pattern, ignore_case = TRUE))
+      
+      # Check example values
+      values_match <- FALSE
+      if(!is.na(row$example_values) && row$example_values != "" && row$example_values != "(no examples)") {
+        values_match <- str_detect(tolower(row$example_values), regex(pattern, ignore_case = TRUE))
+      }
+      
+      # Check all unique values for more thorough matching
+      if(!values_match && "all_unique_values" %in% names(row)) {
+        all_vals <- row$all_unique_values[[1]]
+        if(length(all_vals) > 0) {
+          values_match <- any(str_detect(tolower(all_vals), regex(pattern, ignore_case = TRUE)))
+        }
+      }
+      
+      if(keyword_match || values_match) {
+        found_patterns <- c(found_patterns, description)
+      }
+    }
+    
+    if(length(found_patterns) > 0) {
+      bio_relevant_indices <- c(bio_relevant_indices, i)
+      relevance_info[[row$keyword]] <- found_patterns
+    }
+  }
+  
+  return(list(
+    indices = bio_relevant_indices,
+    relevance_info = relevance_info
+  ))
 }
 
 # Main interactive keyword selection function
@@ -267,7 +425,7 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
     cat("1. Show keyword overview\n")
     cat("2. Show all keywords (detailed)\n")
     cat("3. Select keywords from complete list\n")
-    cat("4. Select from recommended keywords\n")
+    cat("4. Select from recommended keywords (Best for 1st pass\n")
     cat("5. Search keywords by pattern\n")
     cat("6. View detailed examples for a keyword\n")
     cat("7. Remove selected keywords\n")
@@ -319,24 +477,79 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
       }
       
     } else if(choice == "4") {
-      # Recommended keywords
-      recommended <- keyword_data$keyword_summary %>%
-        filter(present_in_files == total_files, non_empty_values == total_files) %>%
-        head(20) %>%
-        pull(keyword)
+      # Improved recommended keywords with better biological relevance detection
       
-      if(length(recommended) == 0) {
-        cat("No fully complete keywords found. Showing best available:\n")
-        recommended <- keyword_data$keyword_summary %>%
-          arrange(desc(present_in_files), desc(non_empty_values)) %>%
-          head(15) %>%
-          pull(keyword)
+      # Detect biologically relevant keywords
+      bio_detection <- detect_biological_relevance(keyword_data)
+      bio_relevant_keywords <- keyword_data$keyword_summary[bio_detection$indices, ] %>%
+        arrange(desc(unique_values), desc(non_empty_values))
+      
+      # Also get other useful keywords (varying values) as backup
+      other_useful <- keyword_data$keyword_summary %>%
+        filter(
+          non_empty_values == total_files, 
+          unique_values > 1,
+          # Exclude those already in bio_relevant
+          !keyword %in% bio_relevant_keywords$keyword
+        ) %>%
+        arrange(desc(unique_values)) %>%
+        head(10)
+      
+      # Combine recommendations with bio-relevant first
+      if(nrow(bio_relevant_keywords) > 0) {
+        cat("\n🧬 BIOLOGICALLY RELEVANT KEYWORDS:\n")
+        cat("These keywords contain tissue, treatment, or experimental information\n\n")
+        
+        for(i in 1:nrow(bio_relevant_keywords)) {
+          row <- bio_relevant_keywords[i, ]
+          
+          # Get relevance information
+          relevance_info <- bio_detection$relevance_info[[row$keyword]]
+          highlight_info <- if(length(relevance_info) > 0) {
+            paste0(" [detected: ", paste(relevance_info, collapse = ", "), "]")
+          } else {
+            ""
+          }
+          
+          cat(sprintf("%2d. %-25s | %2d values | %s%s\n", 
+                      i, row$keyword, row$unique_values, 
+                      row$example_values, highlight_info))
+        }
+        
+        recommended <- bio_relevant_keywords$keyword
+        
+      } else {
+        cat("\n🎯 NO BIOLOGICALLY RELEVANT KEYWORDS FOUND\n")
+        cat("Showing other useful keywords instead:\n\n")
+        recommended <- character(0)
       }
       
-      cat("\nRecommended keywords (complete across all files):\n")
-      iwalk(recommended, ~cat(sprintf("%d. %s\n", .y, .x)))
+      # Add other useful keywords if we have space or no bio-relevant ones found
+      if(nrow(other_useful) > 0) {
+        start_num <- length(recommended) + 1
+        
+        if(length(recommended) > 0) {
+          cat(sprintf("\n🔬 OTHER USEFUL KEYWORDS (%d more):\n", nrow(other_useful)))
+        } else {
+          cat("\n🔬 USEFUL KEYWORDS (varying values):\n")
+        }
+        
+        for(i in 1:nrow(other_useful)) {
+          row <- other_useful[i, ]
+          cat(sprintf("%2d. %-25s | %2d values | %s\n", 
+                      start_num + i - 1, row$keyword, row$unique_values, row$example_values))
+        }
+        
+        recommended <- c(recommended, other_useful$keyword)
+      }
       
-      cat("\nEnter keyword numbers (space or comma-separated): ")
+      if(length(recommended) == 0) {
+        cat("No suitable keywords found for recommendation\n")
+        next
+      }
+      
+      cat(sprintf("\nTotal recommendations: %d keywords\n", length(recommended)))
+      cat("Enter keyword numbers (space or comma-separated): ")
       selection <- readline()
       
       if(selection != "") {
@@ -355,6 +568,16 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
             new_keywords <- recommended[valid_indices]
             selected_keywords <- unique(c(selected_keywords, new_keywords))
             cat("Added keywords:", paste(new_keywords, collapse = ", "), "\n")
+            
+            # Show what biological relevance was detected
+            for(kw in new_keywords) {
+              if(kw %in% names(bio_detection$relevance_info)) {
+                relevance_info <- bio_detection$relevance_info[[kw]]
+                if(length(relevance_info) > 0) {
+                  cat("  └─", kw, "detected as:", paste(relevance_info, collapse = ", "), "\n")
+                }
+              }
+            }
           } else {
             cat("No valid selections made\n")
           }
@@ -463,8 +686,8 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
   cat(paste(rep("=", 60), collapse = ""), "\n")
   
   if(length(selected_keywords) == 0) {
-    cat("No keywords selected. Using default keywords: $WELLID, GROUPNAME\n")
-    selected_keywords <- c("$WELLID", "GROUPNAME")
+    cat("No keywords selected. Using default keywords: pairing_factor, tissue_factor\n")
+    selected_keywords <- c("pairing_factor", "tissue_factor")
   } else {
     cat("Selected", length(selected_keywords), "keywords:\n")
     iwalk(selected_keywords, ~cat(sprintf("  %d. %s\n", .y, .x)))
@@ -473,6 +696,220 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
   return(selected_keywords)
 }
 
+# Enhanced setup function with interactive keyword selection
+setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
+  
+  cat("=== Enhanced FlowJo Workspace Setup ===\n")
+  
+  # Interactive keyword selection if not provided
+  if(is.null(keywords)) {
+    cat("No keywords specified. Starting interactive keyword selection...\n")
+    keywords <- select_keywords_interactive(fcs_path, sample_limit)
+  } else {
+    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  }
+  
+  cat("\nSetting up FlowJo workspace...\n")
+  
+  # Setup workspace with selected keywords
+  ws <- open_flowjo_xml(xml_path)
+  gs <- flowjo_to_gatingset(
+    ws, 
+    keywords = keywords,
+    keywords.source = "FCS", 
+    path = fcs_path, 
+    extend_val = -10000
+  )
+  
+  cat("Workspace setup complete!\n")
+  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
+  cat("Samples loaded:", length(sampleNames(gs)), "\n")
+  
+  return(gs)
+}
+
+# Convenience function for just previewing keywords without selection
+preview_keywords_only <- function(fcs_path, sample_limit = 5) {
+  cat("=== FCS Keyword Preview ===\n")
+  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
+  display_keyword_info(keyword_data, show_all = FALSE)
+  
+  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
+  
+  return(keyword_data)
+}
+
+#===============================================================================
+# Enhanced setup function with interactive keyword selection
+setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
+  
+  cat("=== Enhanced FlowJo Workspace Setup ===\n")
+  
+  # Interactive keyword selection if not provided
+  if(is.null(keywords)) {
+    cat("No keywords specified. Starting interactive keyword selection...\n")
+    keywords <- select_keywords_interactive(fcs_path, sample_limit)
+  } else {
+    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  }
+  
+  cat("\nSetting up FlowJo workspace...\n")
+  
+  # Setup workspace with selected keywords
+  ws <- open_flowjo_xml(xml_path)
+  gs <- flowjo_to_gatingset(
+    ws, 
+    keywords = keywords,
+    keywords.source = "FCS", 
+    path = fcs_path, 
+    extend_val = -10000
+  )
+  
+  cat("Workspace setup complete!\n")
+  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
+  cat("Samples loaded:", length(sampleNames(gs)), "\n")
+  
+  return(gs)
+}
+
+# Convenience function for just previewing keywords without selection
+preview_keywords_only <- function(fcs_path, sample_limit = 5) {
+  cat("=== FCS Keyword Preview ===\n")
+  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
+  display_keyword_info(keyword_data, show_all = FALSE)
+  
+  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
+  
+  return(keyword_data)
+}
+# Enhanced setup function with interactive keyword selection
+setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
+  
+  cat("=== Enhanced FlowJo Workspace Setup ===\n")
+  
+  # Interactive keyword selection if not provided
+  if(is.null(keywords)) {
+    cat("No keywords specified. Starting interactive keyword selection...\n")
+    keywords <- select_keywords_interactive(fcs_path, sample_limit)
+  } else {
+    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  }
+  
+  cat("\nSetting up FlowJo workspace...\n")
+  
+  # Setup workspace with selected keywords
+  ws <- open_flowjo_xml(xml_path)
+  gs <- flowjo_to_gatingset(
+    ws, 
+    keywords = keywords,
+    keywords.source = "FCS", 
+    path = fcs_path, 
+    extend_val = -10000
+  )
+  
+  cat("Workspace setup complete!\n")
+  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
+  cat("Samples loaded:", length(sampleNames(gs)), "\n")
+  
+  return(gs)
+}
+
+# Convenience function for just previewing keywords without selection
+preview_keywords_only <- function(fcs_path, sample_limit = 5) {
+  cat("=== FCS Keyword Preview ===\n")
+  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
+  display_keyword_info(keyword_data, show_all = FALSE)
+  
+  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
+  
+  return(keyword_data)
+}
+
+# Enhanced setup function with interactive keyword selection
+setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
+  
+  cat("=== Enhanced FlowJo Workspace Setup ===\n")
+  
+  # Interactive keyword selection if not provided
+  if(is.null(keywords)) {
+    cat("No keywords specified. Starting interactive keyword selection...\n")
+    keywords <- select_keywords_interactive(fcs_path, sample_limit)
+  } else {
+    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  }
+  
+  cat("\nSetting up FlowJo workspace...\n")
+  
+  # Setup workspace with selected keywords
+  ws <- open_flowjo_xml(xml_path)
+  gs <- flowjo_to_gatingset(
+    ws, 
+    keywords = keywords,
+    keywords.source = "FCS", 
+    path = fcs_path, 
+    extend_val = -10000
+  )
+  
+  cat("Workspace setup complete!\n")
+  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
+  cat("Samples loaded:", length(sampleNames(gs)), "\n")
+  
+  return(gs)
+}
+
+# Convenience function for just previewing keywords without selection
+preview_keywords_only <- function(fcs_path, sample_limit = 5) {
+  cat("=== FCS Keyword Preview ===\n")
+  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
+  display_keyword_info(keyword_data, show_all = FALSE)
+  
+  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
+  
+  return(keyword_data)
+}
+
+# Enhanced setup function with interactive keyword selection
+setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
+  
+  cat("=== Enhanced FlowJo Workspace Setup ===\n")
+  
+  # Interactive keyword selection if not provided
+  if(is.null(keywords)) {
+    cat("No keywords specified. Starting interactive keyword selection...\n")
+    keywords <- select_keywords_interactive(fcs_path, sample_limit)
+  } else {
+    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  }
+  
+  cat("\nSetting up FlowJo workspace...\n")
+  
+  # Setup workspace with selected keywords
+  ws <- open_flowjo_xml(xml_path)
+  gs <- flowjo_to_gatingset(
+    ws, 
+    keywords = keywords,
+    keywords.source = "FCS", 
+    path = fcs_path, 
+    extend_val = -10000
+  )
+  
+  cat("Workspace setup complete!\n")
+  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
+  cat("Samples loaded:", length(sampleNames(gs)), "\n")
+  
+  return(gs)
+}
+
+# Convenience function for just previewing keywords without selection
+preview_keywords_only <- function(fcs_path, sample_limit = 5) {
+  cat("=== FCS Keyword Preview ===\n")
+  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
+  display_keyword_info(keyword_data, show_all = FALSE)
+  
+  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
+  
+  return(keyword_data)
+}
 # Enhanced setup function with interactive keyword selection
 setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
   
@@ -1089,7 +1526,7 @@ select_channels_interactive <- function(gs) {
 }
 
 # Extract counts and frequencies
-extract_counts_freqs <- function(gs, nodes, parent_mapping = NULL, keywords = c("$WELLID", "GROUPNAME")) {
+extract_counts_freqs <- function(gs, nodes, parent_mapping = NULL, keywords = c("pairing_factor", "tissue_factor")) {
   
   # Helper to safely get counts for a node in a sample
   safe_get_count <- function(gh, node) {
@@ -1177,7 +1614,7 @@ extract_counts_freqs <- function(gs, nodes, parent_mapping = NULL, keywords = c(
 
 # Extract MFI data
 # Extract MFI data
-extract_mfi <- function(gs, nodes, channels = NULL, summary_fun = median, keywords = c("$WELLID", "GROUPNAME")) {
+extract_mfi <- function(gs, nodes, channels = NULL, summary_fun = median, keywords = c("pairing_factor", "tissue_factor")) {
   if(is.null(channels)) {
     channels <- select_channels_interactive(gs)
     if(length(channels) == 0) return(tibble())
@@ -1266,7 +1703,7 @@ analyze_flow_data <- function(gs,
                               parent_selection = "interactive",
                               channels = NULL,
                               summary_fun = median,
-                              keywords = c("$WELLID", "GROUPNAME")) {
+                              keywords = c("pairing_factor", "tissue_factor")) {
   
   cat("=== Flow Cytometry Analysis Pipeline ===\n")
   cat("Navigate with 'back' options throughout the process.\n\n")
@@ -1697,120 +2134,829 @@ assign_metadata_menu <- function(df) {
   return(df_updated)
 }
 
+# ============================================================================
+# INTERACTIVE FACTOR DEFINITION FOR GENERALIZABLE ANALYSIS
+# ============================================================================
+
+#' Interactive definition of tissue and pairing factors
+#' This function allows users to specify which columns to use for tissue grouping
+#' and paired analysis, making the code more generalizable
+define_analysis_factors <- function(df) {
+  
+  cat("=== Analysis Factor Definition ===\n")
+  cat("This step will define the key variables for your analysis:\n")
+  cat("• Tissue Factor: Groups samples by tissue/treatment/condition\n")
+  cat("• Pairing Factor: Identifies paired samples for statistical analysis\n\n")
+  
+  # Show available columns
+  available_cols <- names(df)
+  cat("Available columns in your data:\n")
+  iwalk(available_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
+  
+  # Preview data
+  cat("\nData preview (first 5 rows):\n")
+  print(head(df %>% select(1:min(6, ncol(df))), 5))
+  
+  # ==========================================================================
+  # TISSUE FACTOR DEFINITION
+  # ==========================================================================
+  
+  tissue_factor <- NULL
+  
+  while(is.null(tissue_factor)) {
+    cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+    cat("TISSUE FACTOR DEFINITION\n")
+    cat(paste(rep("=", 70), collapse = ""), "\n")
+    
+    cat("The tissue factor groups your samples for analysis.\n")
+    cat("Common examples:\n")
+    cat("• tissue_factor (tissue types: Spleen, Liver, etc.)\n")
+    cat("• Treatment (Control, Drug_A, Drug_B, etc.)\n")
+    cat("• Timepoint (Day_0, Day_7, Day_14, etc.)\n")
+    cat("• Genotype (WT, KO, etc.)\n\n")
+    
+    # Show unique values for potential tissue factors
+    cat("Column preview with unique values:\n")
+    for(i in seq_along(available_cols)) {
+      col_name <- available_cols[i]
+      unique_vals <- unique(df[[col_name]])
+      
+      # Only show if reasonable number of unique values (likely categorical)
+      if(length(unique_vals) <= 20 && length(unique_vals) > 1) {
+        cat(sprintf("%2d. %-20s | %d groups: %s\n", 
+                    i, col_name, length(unique_vals),
+                    paste(head(unique_vals, 4), collapse = ", ")))
+        if(length(unique_vals) > 4) cat(sprintf("%-24s   ... and %d more\n", "", length(unique_vals) - 4))
+      } else if(length(unique_vals) == 1) {
+        cat(sprintf("%2d. %-20s | 1 group: %s\n", i, col_name, unique_vals[1]))
+      } else {
+        cat(sprintf("%2d. %-20s | %d unique values (likely continuous)\n", i, col_name, length(unique_vals)))
+      }
+    }
+    
+    tissue_choice <- readline("\nEnter column number or name for TISSUE FACTOR: ")
+    
+    # Parse choice
+    selected_tissue_factor <- NULL
+    if(grepl("^\\d+$", tissue_choice)) {
+      choice_num <- as.numeric(tissue_choice)
+      if(!is.na(choice_num) && choice_num >= 1 && choice_num <= length(available_cols)) {
+        selected_tissue_factor <- available_cols[choice_num]
+      }
+    } else if(tissue_choice %in% available_cols) {
+      selected_tissue_factor <- tissue_choice
+    }
+    
+    if(is.null(selected_tissue_factor)) {
+      cat("❌ Invalid selection. Please try again.\n")
+      next
+    }
+    
+    # Show tissue factor summary
+    tissue_summary <- df %>%
+      count(.data[[selected_tissue_factor]], name = "n_samples") %>%
+      arrange(desc(n_samples))
+    
+    cat(sprintf("\n✅ Selected tissue factor: %s\n", selected_tissue_factor))
+    cat("Groups found:\n")
+    print(tissue_summary)
+    
+    confirm <- readline("Confirm this tissue factor? (y/n): ")
+    if(tolower(confirm) == "y") {
+      tissue_factor <- selected_tissue_factor
+    } else {
+      cat("Selection cancelled. Choose again.\n")
+    }
+  }
+  
+  # ==========================================================================
+  # PAIRING FACTOR DEFINITION
+  # ==========================================================================
+  
+  tissue_factor <- NULL
+  
+  while(is.null(tissue_factor)) {
+    cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+    cat("PAIRING FACTOR DEFINITION\n")
+    cat(paste(rep("=", 70), collapse = ""), "\n")
+    
+    cat("The pairing factor identifies which samples come from the same subject/mouse.\n")
+    cat("This is crucial for paired statistical analyses.\n\n")
+    
+    cat("Pairing options:\n")
+    cat("1. Use existing column (e.g., Mouse_ID, Subject_ID)\n")
+    cat("2. Extract from WELL ID (row letter = same mouse)\n")
+    cat("3. Create custom pairing based on pattern\n")
+    cat("4. No pairing (unpaired analysis only)\n")
+    
+    pairing_option <- readline("Choose pairing option (1-4): ")
+    
+    if(pairing_option == "1") {
+      # Use existing column
+      cat("\nColumns that might contain pairing information:\n")
+      
+      # Show columns with reasonable number of unique values for pairing
+      pairing_candidates <- character(0)
+      counter <- 1
+      
+      for(col_name in available_cols) {
+        unique_vals <- unique(df[[col_name]])
+        n_unique <- length(unique_vals)
+        n_total <- nrow(df)
+        
+        # Good pairing candidates: fewer unique values than total rows, but more than 1
+        if(n_unique > 1 && n_unique < n_total && n_unique >= (n_total * 0.1)) {
+          avg_samples_per_group <- round(n_total / n_unique, 1)
+          cat(sprintf("%2d. %-20s | %d groups, avg %.1f samples/group\n", 
+                      counter, col_name, n_unique, avg_samples_per_group))
+          pairing_candidates <- c(pairing_candidates, col_name)
+          counter <- counter + 1
+        }
+      }
+      
+      if(length(pairing_candidates) == 0) {
+        cat("No obvious pairing candidates found. Showing all columns:\n")
+        iwalk(available_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+        pairing_candidates <- available_cols
+      }
+      
+      pair_choice <- readline("Enter column number or name for PAIRING: ")
+      
+      # Parse pairing choice
+      if(grepl("^\\d+$", pair_choice)) {
+        choice_num <- as.numeric(pair_choice)
+        if(!is.na(choice_num) && choice_num >= 1 && choice_num <= length(pairing_candidates)) {
+          tissue_factor <- pairing_candidates[choice_num]
+        }
+      } else if(pair_choice %in% available_cols) {
+        tissue_factor <- pair_choice
+      }
+      
+    } else if(pairing_option == "2") {
+      # Extract from WELL ID
+      cat("\nWELL ID Pairing Options:\n")
+      cat("a. Row letter pairing (A1,A2,A3 = Mouse 1; B1,B2,B3 = Mouse 2)\n")
+      cat("b. Custom pattern extraction\n")
+      
+      # Look for pairing_factor columns
+      wellid_cols <- available_cols[grepl("pairing_factor|wellid|WellID|Well_ID", available_cols, ignore.case = TRUE)]
+      
+      if(length(wellid_cols) > 0) {
+        cat("\nFound potential pairing_factor columns:\n")
+        iwalk(wellid_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+        
+        # Show examples
+        for(col in wellid_cols) {
+          sample_vals <- head(unique(df[[col]]), 5)
+          cat(sprintf("  %s examples: %s\n", col, paste(sample_vals, collapse = ", ")))
+        }
+        
+        wellid_choice <- readline("Enter pairing_factor column number or name: ")
+        
+        # Parse pairing_factor choice
+        selected_wellid <- NULL
+        if(grepl("^\\d+$", wellid_choice)) {
+          choice_num <- as.numeric(wellid_choice)
+          if(!is.na(choice_num) && choice_num >= 1 && choice_num <= length(wellid_cols)) {
+            selected_wellid <- wellid_cols[choice_num]
+          }
+        } else if(wellid_choice %in% wellid_cols) {
+          selected_wellid <- wellid_choice
+        }
+        
+        if(!is.null(selected_wellid)) {
+          cat("\nPairing method:\n")
+          cat("a. Row letter (A1,A2→A; B1,B2→B)\n")
+          cat("b. Custom pattern\n")
+          
+          method_choice <- readline("Choose method (a/b): ")
+          
+          if(tolower(method_choice) == "a") {
+            # Create row letter pairing
+            tissue_factor <- "tissue_factor"  # We'll create this column
+            df <- df %>%
+              mutate(tissue_factor = str_extract(.data[[selected_wellid]], "^[A-H]"))
+            
+            # Show pairing preview
+            pairing_preview <- df %>%
+              count(tissue_factor, name = "n_samples") %>%
+              arrange(tissue_factor)
+            
+            cat("\nPairing groups created from row letters:\n")
+            print(pairing_preview)
+            
+          } else if(tolower(method_choice) == "b") {
+            pattern <- readline("Enter regex pattern to extract pairing ID: ")
+            if(pattern != "") {
+              tissue_factor <- "tissue_factor"
+              df <- df %>%
+                mutate(tissue_factor = str_extract(.data[[selected_wellid]], pattern))
+              
+              # Show results
+              pairing_preview <- df %>%
+                count(tissue_factor, name = "n_samples") %>%
+                arrange(tissue_factor)
+              
+              cat("\nPairing groups created from pattern:\n")
+              print(pairing_preview)
+            }
+          }
+        }
+        
+      } else {
+        cat("No pairing_factor columns found. Please choose option 1 or 3.\n")
+        next
+      }
+      
+    } else if(pairing_option == "3") {
+      # Custom pairing
+      cat("\nCustom Pairing Creation:\n")
+      cat("This will create pairing groups based on a pattern or rule you define.\n")
+      
+      cat("Available columns:\n")
+      iwalk(available_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      base_col_choice <- readline("Enter base column number or name: ")
+      
+      # Parse base column choice
+      base_col <- NULL
+      if(grepl("^\\d+$", base_col_choice)) {
+        choice_num <- as.numeric(base_col_choice)
+        if(!is.na(choice_num) && choice_num >= 1 && choice_num <= length(available_cols)) {
+          base_col <- available_cols[choice_num]
+        }
+      } else if(base_col_choice %in% available_cols) {
+        base_col <- base_col_choice
+      }
+      
+      if(!is.null(base_col)) {
+        cat("\nExamples from", base_col, ":\n")
+        sample_vals <- head(unique(df[[base_col]]), 10)
+        iwalk(sample_vals, ~cat(sprintf("%d. %s\n", .y, .x)))
+        
+        cat("\nTransformation options:\n")
+        cat("1. Extract pattern with regex\n")
+        cat("2. Remove suffix/prefix\n")
+        cat("3. Use first N characters\n")
+        cat("4. Use as-is\n")
+        
+        transform_choice <- readline("Choose transformation (1-4): ")
+        
+        if(transform_choice == "1") {
+          pattern <- readline("Enter regex pattern to extract: ")
+          if(pattern != "") {
+            tissue_factor <- "tissue_factor"
+            df <- df %>%
+              mutate(tissue_factor = str_extract(.data[[base_col]], pattern))
+          }
+        } else if(transform_choice == "2") {
+          cat("Remove:\n1. Prefix\n2. Suffix\n")
+          remove_choice <- readline("Choose (1/2): ")
+          pattern_to_remove <- readline("Enter pattern to remove: ")
+          
+          if(pattern_to_remove != "") {
+            tissue_factor <- "tissue_factor"
+            if(remove_choice == "1") {
+              df <- df %>%
+                mutate(tissue_factor = str_remove(.data[[base_col]], paste0("^", pattern_to_remove)))
+            } else {
+              df <- df %>%
+                mutate(tissue_factor = str_remove(.data[[base_col]], paste0(pattern_to_remove, "$")))
+            }
+          }
+        } else if(transform_choice == "3") {
+          n_chars <- readline("Enter number of characters to keep: ")
+          if(grepl("^\\d+$", n_chars)) {
+            n <- as.numeric(n_chars)
+            tissue_factor <- "tissue_factor"
+            df <- df %>%
+              mutate(tissue_factor = str_sub(.data[[base_col]], 1, n))
+          }
+        } else if(transform_choice == "4") {
+          tissue_factor <- base_col
+        }
+        
+        # Show results if we created a new column
+        if(tissue_factor == "tissue_factor") {
+          pairing_preview <- df %>%
+            count(tissue_factor, name = "n_samples") %>%
+            arrange(tissue_factor)
+          
+          cat("\nPairing groups created:\n")
+          print(pairing_preview)
+        }
+      }
+      
+    } else if(pairing_option == "4") {
+      # No pairing
+      tissue_factor <- "none"
+      cat("✅ No pairing selected. Only unpaired analyses will be available.\n")
+    }
+    
+    if(is.null(tissue_factor)) {
+      cat("❌ Invalid selection. Please try again.\n")
+      next
+    }
+    
+    # Confirm pairing factor (unless "none")
+    if(tissue_factor != "none") {
+      # Show pairing summary
+      if(tissue_factor %in% names(df)) {
+        pairing_summary <- df %>%
+          count(.data[[tissue_factor]], name = "n_samples") %>%
+          arrange(desc(n_samples))
+        
+        cat(sprintf("\n✅ Selected pairing factor: %s\n", tissue_factor))
+        cat("Pairing groups:\n")
+        print(head(pairing_summary, 10))
+        if(nrow(pairing_summary) > 10) {
+          cat("... and", nrow(pairing_summary) - 10, "more groups\n")
+        }
+      }
+      
+      confirm <- readline("Confirm this pairing factor? (y/n): ")
+      if(tolower(confirm) != "y") {
+        tissue_factor <- NULL
+        cat("Selection cancelled. Choose again.\n")
+      }
+    }
+  }
+  
+  # ==========================================================================
+  # CREATE FINAL FACTOR COLUMNS
+  # ==========================================================================
+  
+  cat("\n", paste(rep("=", 70), collapse = ""), "\n")
+  cat("CREATING ANALYSIS FACTORS\n")
+  cat(paste(rep("=", 70), collapse = ""), "\n")
+  
+  # Create tissue_factor column (duplicate and rename for clarity)
+  df <- df %>%
+    mutate(tissue_factor = .data[[tissue_factor]])
+  
+  cat("✅ Created 'tissue_factor' column based on:", tissue_factor, "\n")
+  
+  # Create tissue_factor column if not "none"
+  if(tissue_factor != "none") {
+    if(tissue_factor != "tissue_factor") {  # If not already created above
+      df <- df %>%
+        mutate(tissue_factor = .data[[tissue_factor]])
+    }
+    cat("✅ Created 'tissue_factor' column based on:", tissue_factor, "\n")
+  } else {
+    df <- df %>%
+      mutate(tissue_factor = "no_pairing")
+    cat("✅ Created 'tissue_factor' column with value: no_pairing\n")
+  }
+  
+  # Final summary
+  cat("\n=== FACTOR DEFINITION COMPLETE ===\n")
+  cat("Analysis factors created:\n")
+  
+  tissue_final <- df %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
+  cat("\nTissue Factor Groups:\n")
+  print(tissue_final)
+  
+  if(tissue_factor != "none") {
+    pairing_final <- df %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
+    cat("\nPairing Factor Groups:\n")
+    print(head(pairing_final, 15))
+    if(nrow(pairing_final) > 15) {
+      cat("... and", nrow(pairing_final) - 15, "more pairing groups\n")
+    }
+  } else {
+    cat("\nPairing Factor: No pairing (unpaired analyses only)\n")
+  }
+  
+  return(list(
+    data = df,
+    tissue_factor = "tissue_factor",
+    tissue_factor = "tissue_factor",
+    original_tissue_col = tissue_factor,
+    original_pairing_col = if(tissue_factor != "none") tissue_factor else NULL,
+    pairing_enabled = tissue_factor != "none"
+  ))
+}
+
+#' Wrapper function that combines enhanced analysis with factor definition
+analyze_flow_data_auto_enhanced <- function(..., add_congenics = TRUE, 
+                                            congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
+                                            define_factors = TRUE) {
+  
+  # Call the original analysis function
+  results <- analyze_flow_data(...)
+  
+  if(is.null(results)) return(NULL)
+  
+  # Add congenics if requested
+  if(add_congenics) {
+    results <- add_congenics_column(results, candidates = congenic_candidates)
+  }
+  
+  # Define analysis factors if requested
+  if(define_factors) {
+    cat("\n=== DEFINING ANALYSIS FACTORS ===\n")
+    cat("Setting up standardized factor columns for downstream analyses.\n\n")
+    
+    # Define factors ONCE using the counts data, then apply to both datasets
+    factor_info <- NULL
+    
+    if(!is.null(results$counts) && nrow(results$counts) > 0) {
+      cat("Defining factors using counts data...\n")
+      counts_factors <- define_analysis_factors(results$counts)
+      results$counts <- counts_factors$data
+      factor_info <- counts_factors  # Store the factor mapping
+    }
+    
+    # Apply the SAME factor mapping to MFI data without asking again
+    if(!is.null(results$mfi) && nrow(results$mfi) > 0) {
+      cat("Applying same factor definitions to MFI data...\n")
+      
+      if(!is.null(factor_info)) {
+        # Determine the pairing_factor column outside of mutate
+        wellid_col <- if("pairing_factor" %in% names(results$mfi)) {
+          "pairing_factor"
+        } else if("pairing_factor" %in% names(results$mfi)) {
+          "pairing_factor"
+        } else {
+          NULL
+        }
+        
+        # Apply the same factor definitions without interactive prompts
+        results$mfi <- results$mfi %>%
+          mutate(
+            tissue_factor = .data[[factor_info$original_tissue_col]],
+            tissue_factor = if(factor_info$pairing_enabled) {
+              if(factor_info$original_pairing_col == "tissue_factor") {
+                # Already created tissue_factor in counts, apply same logic
+                if(!is.null(wellid_col)) {
+                  str_extract(.data[[wellid_col]], "^[A-H]")
+                } else {
+                  "no_pairing"
+                }
+              } else {
+                .data[[factor_info$original_pairing_col]]
+              }
+            } else {
+              "no_pairing"
+            }
+          )
+        
+        cat("✅ Applied factor definitions to MFI data\n")
+        
+        # Show summary for MFI data
+        cat("MFI tissue groups:", n_distinct(results$mfi$tissue_factor), "\n")
+        cat("MFI pairing groups:", n_distinct(results$mfi$tissue_factor), "\n")
+      } else {
+        cat("⚠️  No factor info available, MFI data unchanged\n")
+      }
+    }
+    
+    # Store factor information
+    results$factor_info <- list(
+      tissue_factor = "tissue_factor",
+      tissue_factor = "tissue_factor",
+      original_tissue_col = if(!is.null(factor_info)) factor_info$original_tissue_col else NULL,
+      original_pairing_col = if(!is.null(factor_info)) factor_info$original_pairing_col else NULL,
+      pairing_enabled = if(!is.null(factor_info)) factor_info$pairing_enabled else FALSE
+    )
+    
+    cat("\n✅ Factor definition complete!\n")
+    cat("All subsequent analyses will use:\n")
+    cat("• tissue_factor for grouping\n")
+    cat("• tissue_factor for paired analyses\n")
+  }
+  
+  return(results)
+}
+
+#' Enhanced metadata assignment with factor definition
+assign_metadata_menu_enhanced <- function(df, include_factor_definition = TRUE) {
+  
+  # First, define analysis factors if requested
+  if(include_factor_definition) {
+    factor_results <- define_analysis_factors(df)
+    df <- factor_results$data
+    cat("\nFactor definition complete. Continuing with metadata assignment...\n")
+  }
+  
+  # Check what congenic markers are present
+  available_markers <- unique(df$congenics)
+  available_markers <- available_markers[!is.na(available_markers)]
+  
+  if(length(available_markers) < 1) {
+    stop("No congenic markers found in the data")
+  }
+  
+  # WT selection menu
+  cat("\n=== Select Wild Type (WT) Marker ===\n")
+  wt_choice <- menu(available_markers, title = "Choose WT marker:")
+  if(wt_choice == 0) stop("WT marker selection cancelled")
+  wt_marker <- available_markers[wt_choice]
+  
+  # KO selection menu  
+  remaining_markers <- available_markers[-wt_choice]
+  ko_marker <- NULL
+  
+  if(length(remaining_markers) > 0) {
+    cat("\n=== Select Knock Out (KO) Marker (Optional) ===\n")
+    ko_options <- c(remaining_markers, "Skip KO assignment")
+    ko_choice <- menu(ko_options, title = "Choose KO marker:")
+    
+    if(ko_choice > 0 && ko_choice <= length(remaining_markers)) {
+      ko_marker <- remaining_markers[ko_choice]
+      remaining_markers <- remaining_markers[-ko_choice]
+    }
+  }
+  
+  # Recipient selection menu
+  recipient_marker <- NULL
+  
+  if(length(remaining_markers) > 0) {
+    cat("\n=== Select Recipient Marker (Optional) ===\n")
+    recipient_options <- c(remaining_markers, "Skip Recipient assignment")
+    recipient_choice <- menu(recipient_options, title = "Choose Recipient marker:")
+    
+    if(recipient_choice > 0 && recipient_choice <= length(remaining_markers)) {
+      recipient_marker <- remaining_markers[recipient_choice]
+    }
+  }
+  
+  # Create genotype column
+  df_updated <- df %>%
+    mutate(genotype = case_when(
+      congenics == wt_marker ~ "donor_WT",
+      TRUE ~ "Other"
+    ))
+  
+  # Add KO assignments if ko_marker was selected
+  if(!is.null(ko_marker)) {
+    df_updated <- df_updated %>%
+      mutate(genotype = case_when(
+        congenics == ko_marker ~ "donor_KO",
+        TRUE ~ genotype
+      ))
+  }
+  
+  # Add Recipient assignments if recipient_marker was selected
+  if(!is.null(recipient_marker)) {
+    df_updated <- df_updated %>%
+      mutate(genotype = case_when(
+        congenics == recipient_marker ~ "Recipient",
+        TRUE ~ genotype
+      ))
+  }
+  
+  # Display genotype results
+  cat("\n=== Genotype Assignment Complete ===\n")
+  cat(paste("WT:", wt_marker, "\n"))
+  if(!is.null(ko_marker)) cat(paste("KO:", ko_marker, "\n"))
+  if(!is.null(recipient_marker)) cat(paste("Recipient:", recipient_marker, "\n"))
+  cat("\nGenotype counts:\n")
+  print(table(df_updated$genotype, useNA = "ifany"))
+  
+  # Continue with rest of original metadata assignment function...
+  # [Rest of the original assign_metadata_menu function continues here]
+  
+  # Metadata addition section
+  cat("\n=== Add Custom Metadata ===\n")
+  
+  metadata_complete <- FALSE
+  
+  while(!metadata_complete) {
+    metadata_options <- c(
+      "Add timepoint",
+      "Add batch",
+      "Add sex",
+      "Add custom metadata column",
+      "Finish and return data"
+    )
+    
+    cat("\n--- Metadata Menu ---\n")
+    metadata_choice <- menu(metadata_options, title = "Choose metadata option:")
+    
+    if(metadata_choice == 0) {
+      cat("Metadata addition cancelled. Returning data with genotype assignments only.\n")
+      break
+    }
+    
+    if(metadata_choice == 1) {
+      # Add timepoint
+      cat("\n=== Add Timepoint ===\n")
+      timepoint_value <- readline(prompt = "Enter timepoint value: ")
+      if(timepoint_value != "") {
+        df_updated <- df_updated %>%
+          mutate(timepoint = timepoint_value)
+        cat(paste("Added timepoint:", timepoint_value, "\n"))
+      } else {
+        cat("Timepoint addition skipped (empty input).\n")
+      }
+      
+    } else if(metadata_choice == 2) {
+      # Add batch
+      cat("\n=== Add Batch ===\n")
+      batch_value <- readline(prompt = "Enter batch value: ")
+      if(batch_value != "") {
+        df_updated <- df_updated %>%
+          mutate(batch = batch_value)
+        cat(paste("Added batch:", batch_value, "\n"))
+      } else {
+        cat("Batch addition skipped (empty input).\n")
+      }
+      
+    } else if(metadata_choice == 3) {
+      # Add sex
+      cat("\n=== Add Sex ===\n")
+      sex_options <- c("m", "f", "Enter custom value")
+      sex_choice <- menu(sex_options, title = "Choose sex:")
+      
+      if(sex_choice == 0) {
+        cat("Sex addition cancelled.\n")
+      } else if(sex_choice == 1) {
+        df_updated <- df_updated %>%
+          mutate(sex = "m")
+        cat("Added sex: m\n")
+      } else if(sex_choice == 2) {
+        df_updated <- df_updated %>%
+          mutate(sex = "f")
+        cat("Added sex: f\n")
+      } else if(sex_choice == 3) {
+        sex_value <- readline(prompt = "Enter custom sex value: ")
+        if(sex_value != "") {
+          df_updated <- df_updated %>%
+            mutate(sex = sex_value)
+          cat(paste("Added sex:", sex_value, "\n"))
+        } else {
+          cat("Sex addition skipped (empty input).\n")
+        }
+      }
+      
+    } else if(metadata_choice == 4) {
+      # Add custom metadata column
+      cat("\n=== Add Custom Metadata Column ===\n")
+      column_name <- readline(prompt = "Enter column name: ")
+      
+      if(column_name != "" && !column_name %in% names(df_updated)) {
+        column_value <- readline(prompt = paste("Enter value for", column_name, ": "))
+        if(column_value != "") {
+          df_updated <- df_updated %>%
+            mutate(!!sym(column_name) := column_value)
+          cat(paste("Added", column_name, ":", column_value, "\n"))
+        } else {
+          cat("Custom column addition skipped (empty value).\n")
+        }
+      } else if(column_name == "") {
+        cat("Custom column addition skipped (empty column name).\n")
+      } else {
+        cat("Column name already exists. Please choose a different name.\n")
+      }
+      
+    } else if(metadata_choice == 5) {
+      # Finish and return data
+      metadata_complete <- TRUE
+    }
+  }
+  
+  # Display final results
+  cat("\n=== Final Results ===\n")
+  cat("Columns in dataset:\n")
+  cat(paste(names(df_updated), collapse = ", "), "\n")
+  cat("\nDataset summary:\n")
+  cat(paste("Rows:", nrow(df_updated), "\n"))
+  cat(paste("Columns:", ncol(df_updated), "\n"))
+  
+  # Summary of analysis factors if they exist
+  if("tissue_factor" %in% names(df_updated)) {
+    cat("\nTissue Factor Summary:\n")
+    tissue_summary <- df_updated %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
+    print(tissue_summary)
+  }
+  
+  if("tissue_factor" %in% names(df_updated)) {
+    pairing_summary <- df_updated %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
+    cat("\nPairing Factor Summary:\n")
+    print(head(pairing_summary, 10))
+    if(nrow(pairing_summary) > 10) {
+      cat("... and", nrow(pairing_summary) - 10, "more pairing groups\n")
+    }
+  }
+  
+  return(df_updated)
+}
+
 #============================================================================
 # Data Cleanup Functions
 #============================================================================
 data_clean_custom <- function(data) {
   # Function to handle unstained sample detection and removal
-  handle_unstained_samples <- function(df) {
-    # Check if Sample column exists
+  handle_unstained_samples <- function(df, data_type = "data") {
     if (!"Sample" %in% names(df)) {
       return(df)
     }
     
-    # Define unstained patterns (case insensitive)
     unstained_patterns <- c("unstained", "no stain", "no_stain")
-    
-    # Create regex pattern for case-insensitive matching
     pattern <- paste(unstained_patterns, collapse = "|")
     
-    # Find rows with unstained samples
     unstained_rows <- df %>%
       mutate(row_id = row_number()) %>%
       filter(str_detect(tolower(Sample), pattern)) %>%
       pull(row_id)
     
-    # If no unstained samples found, return original dataframe
     if (length(unstained_rows) == 0) {
-      cat("No unstained samples detected.\n")
       return(df)
     }
     
-    # Display detected unstained samples
-    cat("\n=== Unstained Samples Detected ===\n")
-    cat(paste("Found", length(unstained_rows), "unstained sample(s):\n"))
-    
-    unstained_data <- df %>%
-      slice(unstained_rows)
-    
-    # Select relevant columns for display
-    if ("NodeShort" %in% names(df)) {
-      unstained_data <- unstained_data %>%
-        select(Sample, NodeShort)
-    } else {
-      unstained_data <- unstained_data %>%
-        select(Sample)
+    # Only show interactive prompt for the first dataset
+    if (!exists(".unstained_decision", envir = .GlobalEnv)) {
+      cat("\n=== Unstained Samples Detected in", data_type, "===\n")
+      cat(paste("Found", length(unstained_rows), "unstained sample(s)\n"))
+      
+      unstained_data <- df %>% slice(unstained_rows)
+      if ("NodeShort" %in% names(df)) {
+        print(unstained_data %>% select(Sample, NodeShort) %>% head(10))
+      } else {
+        print(unstained_data %>% select(Sample) %>% head(10))
+      }
+      
+      action_options <- c(
+        "Remove unstained samples from ALL datasets",
+        "Keep unstained samples in ALL datasets"
+      )
+      
+      user_choice <- menu(action_options, title = "What would you like to do with unstained samples?")
+      
+      # Store decision globally
+      .unstained_decision <<- if (user_choice == 1) "remove" else "keep"
+      
+      if (.unstained_decision == "remove") {
+        cat("Will remove unstained samples from all datasets\n")
+      } else {
+        cat("Will keep unstained samples in all datasets\n")
+      }
     }
     
-    print(unstained_data)
-    
-    # Interactive prompt for user decision
-    cat("\n=== Action Required ===\n")
-    action_options <- c(
-      "Remove unstained samples from dataset",
-      "Keep unstained samples in dataset"
-    )
-    
-    user_choice <- menu(action_options, title = "What would you like to do with these unstained samples?")
-    
-    if (user_choice == 0) {
-      cat("Action cancelled. Keeping unstained samples in dataset.\n")
-      return(df)
-    } else if (user_choice == 1) {
-      # Remove unstained samples
-      df_cleaned <- df %>%
-        slice(-unstained_rows)
-      
-      cat(paste("Removed", length(unstained_rows), "unstained sample(s).\n"))
-      cat(paste("Dataset reduced from", nrow(df), "to", nrow(df_cleaned), "rows.\n"))
-      
+    # Apply the stored decision
+    if (.unstained_decision == "remove") {
+      df_cleaned <- df %>% slice(-unstained_rows)
+      cat("Removed", length(unstained_rows), "unstained samples from", data_type, "\n")
       return(df_cleaned)
     } else {
-      # Keep unstained samples
-      cat("Keeping unstained samples in dataset.\n")
       return(df)
     }
   }
   
   # Function to clean a single data frame
-  clean_single_df <- function(df) {
-    # Clean column names - remove "$" symbols
+  clean_single_df <- function(df, data_type = "data") {
     names(df) <- str_remove_all(names(df), "\\$")
     
-    # Clean NodeShort column if it exists
     if ("NodeShort" %in% names(df)) {
       df <- df %>%
         mutate(
           NodeShort = NodeShort %>%
-            str_remove(".*:") %>%        # Remove everything before and including ":"
-            str_remove_all(" ") %>%      # Remove all spaces
-            str_remove_all(",") %>%      # Remove all commas
-            str_remove_all(":")          # Remove any remaining colons
+            str_remove(".*:") %>%
+            str_remove_all(" ") %>%
+            str_remove_all(",") %>%
+            str_remove_all(":")
         )
     }
     
-    # Handle unstained samples
-    df <- handle_unstained_samples(df)
-    
+    df <- handle_unstained_samples(df, data_type)
     return(df)
+  }
+  
+  # Clear any existing decision at the start
+  if (exists(".unstained_decision", envir = .GlobalEnv)) {
+    rm(.unstained_decision, envir = .GlobalEnv)
   }
   
   # Check if input is a list
   if (is.list(data) && !is.data.frame(data)) {
     # Apply cleaning function to each element in the list
-    cleaned_data <- map(data, ~ {
+    cleaned_data <- imap(data, ~ {
       if (is.data.frame(.x)) {
-        clean_single_df(.x)
+        data_type <- if (.y == "counts") "counts data" else if (.y == "mfi") "MFI data" else .y
+        clean_single_df(.x, data_type)
       } else {
-        .x  # Return unchanged if not a data frame
+        .x
       }
     })
+    
+    # Clean up the global decision variable
+    if (exists(".unstained_decision", envir = .GlobalEnv)) {
+      rm(.unstained_decision, envir = .GlobalEnv)
+    }
+    
     return(cleaned_data)
   } else if (is.data.frame(data)) {
-    # Apply cleaning function to single data frame
-    return(clean_single_df(data))
+    result <- clean_single_df(data, "single dataset")
+    
+    # Clean up the global decision variable
+    if (exists(".unstained_decision", envir = .GlobalEnv)) {
+      rm(.unstained_decision, envir = .GlobalEnv)
+    }
+    
+    return(result)
   } else {
-    # Return unchanged if neither list nor data frame
     warning("Input is neither a list nor a data frame. Returning unchanged.")
     return(data)
   }
@@ -1820,7 +2966,7 @@ data_clean_custom <- function(data) {
 # Plotting helper functions
 #=============================================================================
 # Helper function to create individual subgroup plots
-create_subgroup_plot <- function(df, test_type = "t_test", facet_var = "GROUPNAME") {
+create_subgroup_plot <- function(df, test_type = "t_test", facet_var = "tissue_factor") {
   # Check if we have enough data for statistical testing
   if (length(unique(df$congenics)) < 2) {
     warning(paste("Subgroup has less than 2 'congenics' levels for comparison. Skipping statistical test."))
@@ -1842,9 +2988,9 @@ create_subgroup_plot <- function(df, test_type = "t_test", facet_var = "GROUPNAM
         add_xy_position(x = "congenics") %>%
         mutate(p.format = scales::pvalue(p, accuracy = 0.001, add_p = TRUE))
     } else {
-      # When faceting by GROUPNAME or no faceting, group by GROUPNAME
+      # When faceting by tissue_factor or no faceting, group by tissue_factor
       stat_test_results <- df %>%
-        group_by(GROUPNAME) %>%
+        group_by(tissue_factor) %>%
         filter(n_distinct(congenics) == 2) %>%
         {
           if (test_type == "t_test") {
@@ -1868,25 +3014,25 @@ create_subgroup_plot <- function(df, test_type = "t_test", facet_var = "GROUPNAM
   upper_y_limit <- max_y_position * 1.2
   
   # Create the base plot
-  p <- ggplot(df, aes(x = congenics, y = Freq, group = WELLID)) +
+  p <- ggplot(df, aes(x = congenics, y = Freq, group = pairing_factor)) +
     geom_line(color = "black", linewidth = 0.4, alpha = 0.7, show.legend = FALSE) +
     geom_point(shape = 21, fill = "white", color = "black", size = 3, show.legend = FALSE)
   
   # Add faceting if requested
-  if (facet_var == "GROUPNAME") {
-    p <- p + facet_wrap(~ GROUPNAME, scales = "free_y", strip.position = "top")
+  if (facet_var == "tissue_factor") {
+    p <- p + facet_wrap(~ tissue_factor, scales = "free_y", strip.position = "top")
   } else if (facet_var == "NodeShort") {
     p <- p + facet_wrap(~ NodeShort, scales = "free_y", strip.position = "top")
   }
   
   # Dynamic title and y-axis label based on faceting
-  if (facet_var == "GROUPNAME") {
+  if (facet_var == "tissue_factor") {
     # When faceting by tissue, title should show the NodeShort
     plot_title <- paste("Cell Population:", unique(df$NodeShort))
     y_label <- paste0(unique(df$NodeShort), " (%)")
   } else if (facet_var == "NodeShort") {
     # When faceting by NodeShort, title should show the tissue
-    plot_title <- paste("Tissue:", unique(df$GROUPNAME))
+    plot_title <- paste("Tissue:", unique(df$tissue_factor))
     y_label <- "Cell Frequency (%)"
   } else {
     # No faceting
@@ -1948,7 +3094,7 @@ create_paired_comparison_plots <- function(data) {
     stop("Please provide a valid data frame")
   }
   
-  required_cols <- c("NodeShort", "GROUPNAME", "WELLID", "congenics", "Freq")
+  required_cols <- c("NodeShort", "tissue_factor", "pairing_factor", "congenics", "Freq")
   missing_cols <- setdiff(required_cols, names(data))
   if (length(missing_cols) > 0) {
     stop(paste("Missing required columns:", paste(missing_cols, collapse = ', ')))
@@ -1960,55 +3106,72 @@ create_paired_comparison_plots <- function(data) {
   test_type <- c("t_test", "wilcox_test")[test_choice]
   
   # Interactive faceting selection
-  facet_choice <- menu(c("GROUPNAME (tissue)", "NodeShort (subpopulation of interest)", "No faceting"),
+  facet_choice <- menu(c("tissue_factor (tissue)", "NodeShort (subpopulation of interest)", "No faceting"),
                        title = "Choose how to facet the plots:")
-  facet_var <- c("GROUPNAME", "NodeShort", "none")[facet_choice]
+  facet_var <- c("tissue_factor", "NodeShort", "none")[facet_choice]
   
   # Print information about the analysis
   test_description <- switch(test_type, 
                              't_test' = 'paired t-test', 
                              'wilcox_test' = 'Wilcoxon signed-rank test')
   facet_description <- switch(facet_var,
-                              'GROUPNAME' = 'tissue',
+                              'tissue_factor' = 'tissue',
                               'NodeShort' = 'subpopulation of interest',
-                              'none' = 'no faceting (single plot)')
+                              'none' = 'no faceting (separate plots)')
   
   # FIXED: Choose split variable based on what you want separate plots for
-  if (facet_var == "GROUPNAME") {
+  if (facet_var == "tissue_factor") {
     # If faceting BY tissue, you want separate plots FOR each NodeShort
     split_var <- "NodeShort"
     plot_description <- "cell population(s)"
-  } else {
-    # If faceting BY NodeShort or no faceting, you want separate plots FOR each tissue
-    split_var <- "GROUPNAME"  
+  } else if (facet_var == "NodeShort") {
+    # If faceting BY NodeShort, you want separate plots FOR each tissue
+    split_var <- "tissue_factor"  
     plot_description <- "tissue(s)"
+  } else {
+    # No faceting - create separate plots for each NodeShort-tissue combination
+    split_var <- c("NodeShort", "tissue_factor")
+    plot_description <- "NodeShort-tissue combination(s)"
   }
   
   cat("Creating paired comparison plots using", test_description, "\n")
   cat("Faceting by", facet_description, "\n")
-  cat("Processing", n_distinct(data[[split_var]]), plot_description, "\n\n")
+  
+  # Calculate number of plots that will be created
+  if (facet_var == "none") {
+    n_plots <- data %>% 
+      distinct(NodeShort, tissue_factor) %>% 
+      nrow()
+    cat("Processing", n_plots, plot_description, "\n\n")
+  } else {
+    n_plots <- n_distinct(data[[split_var]])
+    cat("Processing", n_plots, plot_description, "\n\n")
+  }
   
   # FIXED: Create plots based on the correct splitting logic
-  if (facet_var == "GROUPNAME") {
+  if (facet_var == "tissue_factor") {
     # Split by NodeShort to get separate plots for each cell population
-    # Each plot will be faceted by tissue (GROUPNAME)
+    # Each plot will be faceted by tissue (tissue_factor)
     plots <- data %>%
       group_split(NodeShort, .keep = TRUE) %>%
-      map(~ create_subgroup_plot(.x, test_type = test_type, facet_var = "GROUPNAME")) %>%
+      map(~ create_subgroup_plot(.x, test_type = test_type, facet_var = "tissue_factor")) %>%
       set_names(map_chr(data %>% distinct(NodeShort) %>% pull(NodeShort), as.character))
   } else if (facet_var == "NodeShort") {
-    # Split by GROUPNAME to get separate plots for each tissue
+    # Split by tissue_factor to get separate plots for each tissue
     # Each plot will be faceted by cell population (NodeShort)  
     plots <- data %>%
-      group_split(GROUPNAME, .keep = TRUE) %>%
+      group_split(tissue_factor, .keep = TRUE) %>%
       map(~ create_subgroup_plot(.x, test_type = test_type, facet_var = "NodeShort")) %>%
-      set_names(map_chr(data %>% distinct(GROUPNAME) %>% pull(GROUPNAME), as.character))
+      set_names(map_chr(data %>% distinct(tissue_factor) %>% pull(tissue_factor), as.character))
   } else {
-    # No faceting - split by NodeShort for individual plots
+    # No faceting - create separate plots for each NodeShort-tissue combination
     plots <- data %>%
-      group_split(NodeShort, .keep = TRUE) %>%
+      group_split(NodeShort, tissue_factor, .keep = TRUE) %>%
       map(~ create_subgroup_plot(.x, test_type = test_type, facet_var = "none")) %>%
-      set_names(map_chr(data %>% distinct(NodeShort) %>% pull(NodeShort), as.character))
+      set_names(map_chr(1:length(.), ~ {
+        df <- data %>% group_split(NodeShort, tissue_factor, .keep = TRUE) %>% .[[.x]]
+        paste0(unique(df$NodeShort), "_", unique(df$tissue_factor))
+      }))
   }
   
   # Print summary
@@ -2021,7 +3184,7 @@ create_paired_comparison_plots <- function(data) {
 
 # Example usage:
 # plots <- create_paired_comparison_plots(your_data)  # User will be prompted to choose test type
-# plots[["CD103+CD69+"]]  # View specific cell population plot (when faceting by GROUPNAME)
+# plots[["CD103+CD69+"]]  # View specific cell population plot (when faceting by tissue_factor)
 # plots[["Spleen"]]       # View specific tissue plot (when faceting by NodeShort)
 
 
@@ -2082,7 +3245,7 @@ select_congenics_interactive <- function(mfi_data) {
       cat("\n--- Congenic Distribution by Tissue ---\n")
       distribution <- mfi_data %>%
         filter(!is.na(congenics)) %>%
-        count(GROUPNAME, congenics) %>%
+        count(tissue_factor, congenics) %>%
         pivot_wider(names_from = congenics, values_from = n, values_fill = 0)
       
       print(distribution)
@@ -2116,7 +3279,7 @@ select_congenics_interactive <- function(mfi_data) {
 }
 
 select_grouping_option <- function(mfi_data) {
-  available_groups <- unique(mfi_data$GROUPNAME)
+  available_groups <- unique(mfi_data$tissue_factor)
   
   cat("\n", paste(rep("=", 70), collapse = ""), "\n")
   cat("GROUPING OPTIONS\n")
@@ -2137,16 +3300,16 @@ select_grouping_option <- function(mfi_data) {
       cat("\n--- Tissue Distribution ---\n")
       distribution <- mfi_data %>%
         filter(!is.na(congenics)) %>%
-        count(GROUPNAME, congenics) %>%
-        arrange(GROUPNAME, congenics)
+        count(tissue_factor, congenics) %>%
+        arrange(tissue_factor, congenics)
       
       cat("Available tissues:", paste(available_groups, collapse = ", "), "\n")
       print(distribution)
       
       marker_dist <- mfi_data %>%
         filter(!is.na(congenics)) %>%
-        count(GROUPNAME, marker) %>%
-        group_by(GROUPNAME) %>%
+        count(tissue_factor, marker) %>%
+        group_by(tissue_factor) %>%
         summarise(
           n_markers = n_distinct(marker),
           total_measurements = sum(n),
@@ -2206,8 +3369,8 @@ select_markers_interactive <- function(mfi_data) {
       cat("\n--- Marker Distribution by Tissue ---\n")
       distribution <- mfi_data %>%
         filter(!is.na(congenics)) %>%
-        count(GROUPNAME, marker) %>%
-        pivot_wider(names_from = GROUPNAME, values_from = n, values_fill = 0)
+        count(tissue_factor, marker) %>%
+        pivot_wider(names_from = tissue_factor, values_from = n, values_fill = 0)
       
       print(distribution)
       cat("\nPress Enter to continue...")
@@ -2420,7 +3583,7 @@ configure_two_group_test <- function(test_type, pairing, selected_congenics, mfi
                      "wilcoxon" = "Wilcoxon signed-rank test"),
               pairing))
   
-  tissue_col <- "GROUPNAME"  # Default tissue column
+  tissue_col <- "tissue_factor"  # Default tissue column
   sig_display <- select_significance_display()
   alpha <- get_alpha_level()
   
@@ -2453,7 +3616,7 @@ configure_multi_group_test <- function(test_type, selected_congenics, mfi_data) 
                      "rm_anova" = "Repeated measures ANOVA",
                      "friedman" = "Friedman test")))
   
-  tissue_col <- "GROUPNAME"  # Default tissue column
+  tissue_col <- "tissue_factor"  # Default tissue column
   sig_display <- select_significance_display()
   alpha <- get_alpha_level()
   
@@ -2553,7 +3716,7 @@ diagnose_mfi_data <- function(mfi_data) {
   cat("Dataset dimensions:", nrow(mfi_data), "rows x", ncol(mfi_data), "columns\n")
   cat("Column names:", paste(names(mfi_data), collapse = ", "), "\n\n")
   
-  required_cols <- c("marker", "MFI", "GROUPNAME", "congenics", "NodeShort")
+  required_cols <- c("marker", "MFI", "tissue_factor", "congenics", "NodeShort")
   missing_cols <- setdiff(required_cols, names(mfi_data))
   if (length(missing_cols) > 0) {
     cat("⚠️  Missing required columns:", paste(missing_cols, collapse = ", "), "\n")
@@ -2586,8 +3749,8 @@ diagnose_mfi_data <- function(mfi_data) {
     cat("Congenics (", length(congenics_unique), "):", paste(congenics_unique, collapse = ", "), "\n")
   }
   
-  if ("GROUPNAME" %in% names(mfi_data)) {
-    groups_unique <- unique(mfi_data$GROUPNAME[!is.na(mfi_data$GROUPNAME)])
+  if ("tissue_factor" %in% names(mfi_data)) {
+    groups_unique <- unique(mfi_data$tissue_factor[!is.na(mfi_data$tissue_factor)])
     cat("Tissues (", length(groups_unique), "):", paste(groups_unique, collapse = ", "), "\n")
   }
   
@@ -2598,11 +3761,11 @@ diagnose_mfi_data <- function(mfi_data) {
     cat("\n")
   }
   
-  if (all(c("GROUPNAME", "congenics") %in% names(mfi_data))) {
+  if (all(c("tissue_factor", "congenics") %in% names(mfi_data))) {
     cat("\n--- Sample Distribution ---\n")
     sample_dist <- mfi_data %>%
-      filter(!is.na(congenics), !is.na(GROUPNAME)) %>%
-      count(GROUPNAME, congenics) %>%
+      filter(!is.na(congenics), !is.na(tissue_factor)) %>%
+      count(tissue_factor, congenics) %>%
       pivot_wider(names_from = congenics, values_from = n, values_fill = 0)
     
     print(sample_dist)
@@ -2722,7 +3885,7 @@ perform_statistical_analysis <- function(mfi_data, selected_congenics, selected_
     return(NULL)
   }
   
-  unique_tissues <- unique(filtered_data$GROUPNAME)
+  unique_tissues <- unique(filtered_data$tissue_factor)
   cat("Performing tests within each tissue separately:\n")
   cat("Tissues:", paste(unique_tissues, collapse = ", "), "\n")
   
@@ -2731,7 +3894,7 @@ perform_statistical_analysis <- function(mfi_data, selected_congenics, selected_
   for (current_tissue in unique_tissues) {
     cat(sprintf("\nProcessing tissue: %s\n", current_tissue))
     
-    tissue_data <- filtered_data %>% filter(GROUPNAME == current_tissue)
+    tissue_data <- filtered_data %>% filter(tissue_factor == current_tissue)
     
     if (nrow(tissue_data) == 0) {
       warning(paste("No data for tissue:", current_tissue))
@@ -3149,7 +4312,7 @@ create_mfi_heatmaps_with_stats <- function(mfi_data,
                                            percentile_range = c(0.05, 0.95),
                                            stats_config = NULL) {
   
-  required_cols <- c("marker", "MFI", "GROUPNAME", "congenics", "NodeShort")
+  required_cols <- c("marker", "MFI", "tissue_factor", "congenics", "NodeShort")
   missing_cols <- setdiff(required_cols, names(mfi_data))
   if (length(missing_cols) > 0) {
     stop(paste("Missing required columns:", paste(missing_cols, collapse = ', ')))
@@ -3205,7 +4368,7 @@ create_separate_heatmaps_with_stats <- function(mfi_clean, scale_method, aggrega
                                                 show_row_names, show_column_names, show_cell_values,
                                                 log_base, percentile_range, stats_results, stats_config) {
   
-  group_names <- unique(mfi_clean$GROUPNAME)
+  group_names <- unique(mfi_clean$tissue_factor)
   cat("Creating separate heatmaps for", length(group_names), "tissue(s):", paste(group_names, collapse = ", "), "\n")
   
   heatmap_list <- list()
@@ -3214,7 +4377,7 @@ create_separate_heatmaps_with_stats <- function(mfi_clean, scale_method, aggrega
     cat("Processing tissue:", group, "\n")
     
     group_data <- mfi_clean %>%
-      filter(GROUPNAME == group)
+      filter(tissue_factor == group)
     
     if (nrow(group_data) == 0) {
       warning(paste("No data found for tissue:", group))
@@ -3254,7 +4417,7 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method, aggregat
   
   cat("Creating combined heatmap for all tissues\n")
   
-  unique_tissues <- sort(unique(mfi_clean$GROUPNAME))
+  unique_tissues <- sort(unique(mfi_clean$tissue_factor))
   unique_congenics <- sort(unique(mfi_clean$congenics))
   
   cat("Tissues found:", paste(unique_tissues, collapse = ", "), "\n")
@@ -3274,9 +4437,9 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method, aggregat
   }
   
   heatmap_data <- mfi_clean %>%
-    group_by(marker, GROUPNAME, congenics) %>%
+    group_by(marker, tissue_factor, congenics) %>%
     summarise(agg_MFI = agg_fun(MFI, na.rm = TRUE), .groups = "drop") %>%
-    mutate(tissue_congenic = paste(GROUPNAME, congenics, sep = "_"))
+    mutate(tissue_congenic = paste(tissue_factor, congenics, sep = "_"))
   
   heatmap_matrix <- heatmap_data %>%
     select(marker, tissue_congenic, agg_MFI) %>%
@@ -3806,8 +4969,8 @@ FEATURES:
 # Engraftment plot of congenic markers
 #===============================================================================
 create_engraftment_plot <- function(data, 
-                                    wellid_col = "WELLID",
-                                    group_col = "GROUPNAME", 
+                                    wellid_col = "pairing_factor",
+                                    group_col = "tissue_factor", 
                                     marker_col = "congenics",
                                     freq_col = "Freq",
                                     ko_marker = "CD45.1.2",
@@ -3944,7 +5107,7 @@ create_engraftment_plot <- function(data,
   # Process the data to calculate engraftment ratios
   congenic_engraftment <- data %>%
     select(all_of(c(wellid_col, group_col, marker_col, freq_col))) %>%
-    # Extract the first letter from WELLID to create matching groups
+    # Extract the first letter from pairing_factor to create matching groups
     mutate(
       well_letter = substr(.data[[wellid_col]], 1, 1)
     )
@@ -4323,6 +5486,1000 @@ create_engraftment_plot <- function(data,
     return(p)
   } else {
     return(result)
+  }
+}
+
+# ============================================================================
+# UPDATED ANALYSIS FUNCTIONS USING STANDARDIZED FACTORS
+# ============================================================================
+
+#' Updated paired comparison plots using standardized factors
+create_paired_comparison_plots_enhanced <- function(data, 
+                                                    tissue_col = "tissue_factor",
+                                                    pairing_col = "tissue_factor",
+                                                    test_type = "paired_t_test", 
+                                                    facet_var = "tissue_factor") {
+  
+  # Interactive test selection if not specified
+  if(missing(test_type)) {
+    test_choice <- menu(c("Paired t-test", "Wilcoxon signed-rank test"),
+                        title = "Choose statistical test:")
+    test_type <- c("paired_t_test", "wilcox_test")[test_choice]
+  }
+  
+  # Interactive faceting selection if not specified
+  if(missing(facet_var)) {
+    facet_choice <- menu(c("tissue_factor (tissue)", "NodeShort (subpopulation of interest)", "No faceting"),
+                         title = "Choose how to facet the plots:")
+    facet_var <- c("tissue_factor", "NodeShort", "none")[facet_choice]
+  }
+  
+  # Validate required columns
+  required_cols <- c("NodeShort", tissue_col, pairing_col, "congenics", "Freq")
+  missing_cols <- setdiff(required_cols, names(data))
+  
+  if(length(missing_cols) > 0) {
+    stop(paste("Missing required columns:", paste(missing_cols, collapse = ', ')))
+  }
+  
+  # Check if pairing is enabled
+  pairing_enabled <- !all(data[[pairing_col]] %in% c("no_pairing", "none", NA))
+  
+  if(!pairing_enabled && test_type == "paired_t_test") {
+    cat("⚠️  Pairing not available. Switching to unpaired t-test.\n")
+    test_type <- "t_test"
+  }
+  
+  # Print information about the analysis
+  test_description <- switch(test_type, 
+                             'paired_t_test' = 'paired t-test', 
+                             't_test' = 'unpaired t-test',
+                             'wilcox_test' = 'Wilcoxon signed-rank test')
+  
+  facet_description <- switch(facet_var,
+                              'tissue_factor' = 'tissue',
+                              'NodeShort' = 'subpopulation of interest',
+                              'none' = 'no faceting (separate plots)')
+  
+  # Determine split variable based on faceting choice
+  if(facet_var == "tissue_factor") {
+    split_var <- "NodeShort"
+    plot_description <- "cell population(s)"
+  } else if(facet_var == "NodeShort") {
+    split_var <- tissue_col
+    plot_description <- "tissue(s)"
+  } else {
+    # No faceting - create separate plots for each NodeShort-tissue combination
+    split_var <- c("NodeShort", tissue_col)
+    plot_description <- "NodeShort-tissue combination(s)"
+  }
+  
+  cat("Creating paired comparison plots using", test_description, "\n")
+  cat("Faceting by", facet_description, "\n")
+  
+  # Calculate number of plots that will be created
+  if(facet_var == "none") {
+    n_plots <- data %>% 
+      distinct(NodeShort, .data[[tissue_col]]) %>% 
+      nrow()
+    cat("Processing", n_plots, plot_description, "\n\n")
+  } else {
+    n_plots <- n_distinct(data[[split_var]])
+    cat("Processing", n_plots, plot_description, "\n\n")
+  }
+  
+  # Helper function to create individual subgroup plots with enhanced pairing support
+  create_subgroup_plot_enhanced <- function(df, test_type = "paired_t_test", facet_var = "tissue_factor") {
+    
+    # Check if we have enough data for statistical testing
+    if(length(unique(df$congenics)) < 2) {
+      warning(paste("Subgroup has less than 2 'congenics' levels for comparison. Skipping statistical test."))
+      stat_test_results <- NULL
+    } else {
+      
+      # Perform statistical test based on test_type and facet_var
+      if(facet_var == "NodeShort") {
+        # When faceting by NodeShort, group by NodeShort for stats
+        if(test_type == "paired_t_test" && pairing_enabled) {
+          stat_test_results <- df %>%
+            group_by(NodeShort) %>%
+            filter(n_distinct(congenics) == 2) %>%
+            pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
+                            paired = TRUE, 
+                            p.adjust.method = "bonferroni") %>%
+            add_xy_position(x = "congenics") %>%
+            mutate(p.format = scales::pvalue(p.adj, accuracy = 0.001, add_p = TRUE))
+        } else if(test_type == "wilcox_test" && pairing_enabled) {
+          stat_test_results <- df %>%
+            group_by(NodeShort) %>%
+            filter(n_distinct(congenics) == 2) %>%
+            pairwise_wilcox_test(as.formula(paste("Freq ~", "congenics")), 
+                                 paired = TRUE,
+                                 p.adjust.method = "bonferroni") %>%
+            add_xy_position(x = "congenics") %>%
+            mutate(p.format = scales::pvalue(p.adj, accuracy = 0.001, add_p = TRUE))
+        } else {
+          # Unpaired tests
+          stat_test_results <- df %>%
+            group_by(NodeShort) %>%
+            filter(n_distinct(congenics) == 2) %>%
+            pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
+                            paired = FALSE,
+                            p.adjust.method = "bonferroni") %>%
+            add_xy_position(x = "congenics") %>%
+            mutate(p.format = scales::pvalue(p.adj, accuracy = 0.001, add_p = TRUE))
+        }
+      } else {
+        # When faceting by tissue_factor or no faceting, group by tissue_factor
+        if(test_type == "paired_t_test" && pairing_enabled) {
+          stat_test_results <- df %>%
+            group_by(.data[[tissue_col]]) %>%
+            filter(n_distinct(congenics) == 2) %>%
+            pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
+                            paired = TRUE,
+                            p.adjust.method = "bonferroni") %>%
+            add_xy_position(x = "congenics") %>%
+            mutate(p.format = scales::pvalue(p.adj, accuracy = 0.001, add_p = TRUE))
+        } else if(test_type == "wilcox_test" && pairing_enabled) {
+          stat_test_results <- df %>%
+            group_by(.data[[tissue_col]]) %>%
+            filter(n_distinct(congenics) == 2) %>%
+            pairwise_wilcox_test(as.formula(paste("Freq ~", "congenics")), 
+                                 paired = TRUE,
+                                 p.adjust.method = "bonferroni") %>%
+            add_xy_position(x = "congenics") %>%
+            mutate(p.format = scales::pvalue(p.adj, accuracy = 0.001, add_p = TRUE))
+        } else {
+          # Unpaired tests
+          stat_test_results <- df %>%
+            group_by(.data[[tissue_col]]) %>%
+            filter(n_distinct(congenics) == 2) %>%
+            pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
+                            paired = FALSE,
+                            p.adjust.method = "bonferroni") %>%
+            add_xy_position(x = "congenics") %>%
+            mutate(p.format = scales::pvalue(p.adj, accuracy = 0.001, add_p = TRUE))
+        }
+      }
+    }
+    
+    # Calculate y-axis limits
+    max_freq <- max(df$Freq, na.rm = TRUE)
+    max_y_position <- if(!is.null(stat_test_results) && nrow(stat_test_results) > 0) {
+      max(max_freq, stat_test_results$y.position, na.rm = TRUE)
+    } else {
+      max_freq
+    }
+    upper_y_limit <- max_y_position * 1.2
+    
+    # Create the base plot using pairing_col for connecting lines
+    p <- ggplot(df, aes(x = congenics, y = Freq, group = pairing_factor))+
+      geom_line(color = "black", linewidth = 0.4, alpha = 0.7, show.legend = FALSE) +
+      geom_point(shape = 21, fill = "white", color = "black", size = 3, show.legend = FALSE)
+    
+    # Add faceting if requested
+    if(facet_var == tissue_col) {
+      p <- p + facet_wrap(as.formula(paste("~", tissue_col)), scales = "free_y", strip.position = "top")
+    } else if(facet_var == "NodeShort") {
+      p <- p + facet_wrap(~ NodeShort, scales = "free_y", strip.position = "top")
+    }
+    
+    # Dynamic title and y-axis label based on faceting
+    if(facet_var == tissue_col) {
+      plot_title <- paste("Cell Population:", unique(df$NodeShort))
+      y_label <- paste0(unique(df$NodeShort), " (%)")
+    } else if(facet_var == "NodeShort") {
+      plot_title <- paste("Tissue:", unique(df[[tissue_col]]))
+      y_label <- "Cell Frequency (%)"
+    } else {
+      plot_title <- paste("Subgroup:", unique(df$NodeShort), "in", unique(df[[tissue_col]]))
+      y_label <- paste0(unique(df$NodeShort), " (%)")
+    }
+    
+    # Continue with plot formatting
+    p <- p +
+      scale_y_continuous(
+        limits = c(0, upper_y_limit),
+        expand = expansion(mult = c(0.02, 0.05))
+      ) +
+      labs(
+        title = plot_title,
+        x = "Congenic Marker",
+        y = y_label
+      ) +
+      theme_minimal(base_size = 14) +
+      theme(
+        strip.text = element_text(face = "bold"),
+        plot.title = element_text(hjust = 0.5),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.line.x = element_line(color = "black", linewidth = 0.4),
+        axis.line.y = element_line(color = "black", linewidth = 0.4),
+        panel.border = element_blank(),
+        panel.background = element_blank(),
+        axis.text.x = element_text(angle = 0, hjust = 0.5),
+        strip.placement = "outside"
+      )
+    
+    # Add statistical annotations if available
+    if(!is.null(stat_test_results) && nrow(stat_test_results) > 0) {
+      p <- p + stat_pvalue_manual(
+        stat_test_results,
+        label = "p.format",
+        tip.length = 0,
+        bracket.size = 0.5,
+        hide.ns = FALSE
+      )
+    }
+    
+    return(p)
+  }
+  
+  # Create plots based on the correct splitting logic
+  if(facet_var == tissue_col) {
+    # Split by NodeShort to get separate plots for each cell population
+    # Each plot will be faceted by tissue_factor
+    plots <- data %>%
+      group_split(NodeShort, .keep = TRUE) %>%
+      map(~ create_subgroup_plot_enhanced(.x, test_type = test_type, facet_var = tissue_col)) %>%
+      set_names(map_chr(data %>% distinct(NodeShort) %>% pull(NodeShort), as.character))
+  } else if(facet_var == "NodeShort") {
+    # Split by tissue_factor to get separate plots for each tissue
+    # Each plot will be faceted by cell population (NodeShort)  
+    plots <- data %>%
+      group_split(.data[[tissue_col]], .keep = TRUE) %>%
+      map(~ create_subgroup_plot_enhanced(.x, test_type = test_type, facet_var = "NodeShort")) %>%
+      set_names(map_chr(data %>% distinct(.data[[tissue_col]]) %>% pull(.data[[tissue_col]]), as.character))
+  } else {
+    # No faceting - create separate plots for each NodeShort-tissue combination
+    plots <- data %>%
+      group_split(NodeShort, .data[[tissue_col]], .keep = TRUE) %>%
+      map(~ create_subgroup_plot_enhanced(.x, test_type = test_type, facet_var = "none")) %>%
+      set_names(map_chr(1:length(.), ~ {
+        df <- data %>% group_split(NodeShort, .data[[tissue_col]], .keep = TRUE) %>% .[[.x]]
+        paste0(unique(df$NodeShort), "_", unique(df[[tissue_col]]))
+      }))
+  }
+  
+  # Print summary
+  plot_count <- length(plots)
+  cat("Successfully created", plot_count, "plot(s)", "\n")
+  cat("Available plots:", paste(names(plots), collapse = ", "), "\n")
+  
+  return(plots)
+}
+#' Updated engraftment plot using standardized factors
+create_engraftment_plot_enhanced <- function(data, 
+                                             tissue_col = "tissue_factor",
+                                             pairing_col = "tissue_factor",
+                                             marker_col = "congenics",
+                                             freq_col = "Freq",
+                                             ko_marker = "CD45.1.2",
+                                             wt_marker = "CD45.1",
+                                             normalization_tissue = "Spleen",
+                                             fill_colors = c("Spleen" = "white", "SG" = "black", "IEL" = "grey60"),
+                                             plot_title = "Engraftment Ratio by Tissue",
+                                             x_label = "Tissue",
+                                             y_label = "Log2(ratio KO:WT)",
+                                             caption_text = "*Normalized to paired controls",
+                                             order_by_mean = TRUE,
+                                             interactive = TRUE,
+                                             add_stats = TRUE,
+                                             stat_method = "paired_t_test",
+                                             interactive_stats = TRUE) {
+  
+  # Check if required columns exist
+  required_cols <- c(pairing_col, tissue_col, marker_col, freq_col)
+  missing_cols <- required_cols[!required_cols %in% names(data)]
+  
+  if(length(missing_cols) > 0) {
+    stop(paste("Missing columns:", paste(missing_cols, collapse = ", "), 
+               "\nAvailable columns:", paste(names(data), collapse = ", ")))
+  }
+  
+  # Check if pairing is enabled
+  pairing_enabled <- !all(data[[pairing_col]] %in% c("no_pairing", "none", NA))
+  
+  # Interactive statistical method selection
+  if(interactive_stats && add_stats) {
+    cat("\n=== Statistical Analysis Options ===\n")
+    
+    stat_options <- if(pairing_enabled) {
+      c("Paired t-test (recommended for engraftment data)", 
+        "Unpaired t-test", 
+        "ANOVA with post-hoc comparisons", 
+        "No statistical testing")
+    } else {
+      c("Unpaired t-test", 
+        "ANOVA with post-hoc comparisons", 
+        "No statistical testing")
+    }
+    
+    iwalk(stat_options, ~cat(sprintf("%d: %s\n", .y, .x)))
+    
+    stat_choice <- as.integer(readline(prompt = "Select statistical method (enter number): "))
+    
+    if(is.na(stat_choice) || stat_choice < 1 || stat_choice > length(stat_options)) {
+      stop("Invalid selection. Please run the function again and choose a valid number.")
+    }
+    
+    if(pairing_enabled) {
+      if(stat_choice == 1) {
+        stat_method <- "paired_t_test"
+        cat("Selected: Paired t-test\n")
+      } else if(stat_choice == 2) {
+        stat_method <- "t_test"
+        cat("Selected: Unpaired t-test\n")
+      } else if(stat_choice == 3) {
+        stat_method <- "anova"
+        cat("Selected: ANOVA with post-hoc\n")
+      } else {
+        add_stats <- FALSE
+        cat("Selected: No statistical testing\n")
+      }
+    } else {
+      if(stat_choice == 1) {
+        stat_method <- "t_test"
+        cat("Selected: Unpaired t-test\n")
+      } else if(stat_choice == 2) {
+        stat_method <- "anova"
+        cat("Selected: ANOVA with post-hoc\n")
+      } else {
+        add_stats <- FALSE
+        cat("Selected: No statistical testing\n")
+      }
+    }
+    
+    # If doing comparisons, ask about control group
+    if(add_stats && stat_choice %in% c(1, 2, 3)) {
+      cat("\n=== Comparison Options ===\n")
+      cat("1: All pairwise comparisons\n")
+      cat("2: Compare all groups to a control group\n")
+      
+      comp_choice <- as.integer(readline(prompt = "Select comparison type (enter number): "))
+      
+      if(is.na(comp_choice) || comp_choice < 1 || comp_choice > 2) {
+        comparison_type <- "pairwise"
+        cat("Invalid selection - defaulting to pairwise comparisons\n")
+      } else if(comp_choice == 1) {
+        comparison_type <- "pairwise"
+        cat("Selected: All pairwise comparisons\n")
+      } else {
+        comparison_type <- "vs_control"
+        
+        # Select control group
+        available_groups <- unique(data[[tissue_col]])
+        cat("\nAvailable groups for control:\n")
+        for(i in seq_along(available_groups)) {
+          cat(paste(i, ":", available_groups[i], "\n"))
+        }
+        
+        control_choice <- as.integer(readline(prompt = "Select control group (enter number): "))
+        
+        if(is.na(control_choice) || control_choice < 1 || control_choice > length(available_groups)) {
+          control_group <- available_groups[1]
+          cat(paste("Invalid selection - defaulting to:", control_group, "\n"))
+        } else {
+          control_group <- available_groups[control_choice]
+          cat(paste("Selected control group:", control_group, "\n"))
+        }
+      }
+    }
+  } else {
+    # Non-interactive mode
+    comparison_type <- "pairwise"
+    control_group <- NULL
+  }
+  
+  # Interactive selection of normalization tissue
+  use_normalization <- FALSE
+  
+  if(interactive) {
+    # Show available tissue types
+    available_tissues <- unique(data[[tissue_col]])
+    cat("\nAvailable tissues for normalization:\n")
+    for(i in seq_along(available_tissues)) {
+      cat(paste(i, ":", available_tissues[i], "\n"))
+    }
+    cat(paste(length(available_tissues) + 1, ": No normalization (use raw frequencies)\n"))
+    
+    # Get user choice
+    choice <- as.integer(readline(prompt = "Select normalization tissue (enter number): "))
+    
+    if(is.na(choice) || choice < 1 || choice > length(available_tissues) + 1) {
+      stop("Invalid selection. Please run the function again and choose a valid number.")
+    }
+    
+    if(choice <= length(available_tissues)) {
+      normalization_tissue <- available_tissues[choice]
+      use_normalization <- TRUE
+      cat(paste("Selected:", normalization_tissue, "for normalization\n"))
+    } else {
+      use_normalization <- FALSE
+      normalization_tissue <- NULL
+      cat("No normalization selected - using raw frequencies\n")
+    }
+  } else {
+    # Non-interactive mode - use provided normalization_tissue if it exists
+    if(!is.null(normalization_tissue) && normalization_tissue %in% unique(data[[tissue_col]])) {
+      use_normalization <- TRUE
+    } else {
+      use_normalization <- FALSE
+      normalization_tissue <- NULL
+    }
+  }
+  
+  # Process the data to calculate engraftment ratios
+  # Create a generic pairing identifier
+  if(pairing_enabled) {
+    pairing_id_col <- pairing_col
+  } else {
+    # If no pairing, create a unique ID for each row
+    data <- data %>%
+      mutate(temp_pairing_id = row_number())
+    pairing_id_col <- "temp_pairing_id"
+  }
+  
+  congenic_engraftment <- data %>%
+    select(all_of(c(pairing_id_col, tissue_col, marker_col, freq_col)))
+  
+  # Apply normalization if selected
+  if(use_normalization && pairing_enabled) {
+    congenic_engraftment <- congenic_engraftment %>%
+      # For each marker and pairing group, get the normalization tissue frequency
+      group_by(across(all_of(c(marker_col, pairing_id_col)))) %>%
+      mutate(
+        norm_freq = .data[[freq_col]][.data[[tissue_col]] == normalization_tissue],
+        normalized_freq = .data[[freq_col]] / norm_freq
+      ) %>%
+      ungroup() %>%
+      select(all_of(c(pairing_id_col, tissue_col, marker_col)), normalized_freq) %>%
+      pivot_wider(names_from = all_of(marker_col), values_from = normalized_freq)
+    
+    # Update plot labels for normalized data
+    y_label <- paste0("Log2(ratio KO:WT normalized to ", normalization_tissue, ")")
+    caption_text <- paste0("*Normalized to paired ", normalization_tissue, " controls")
+    
+  } else {
+    congenic_engraftment <- congenic_engraftment %>%
+      select(all_of(c(pairing_id_col, tissue_col, marker_col, freq_col))) %>%
+      pivot_wider(names_from = all_of(marker_col), values_from = all_of(freq_col))
+    
+    # Update plot labels for non-normalized data
+    y_label <- "Log2(ratio KO:WT - raw frequencies)"
+    caption_text <- "*Using raw frequencies (no normalization)"
+  }
+  
+  # Calculate engraftment ratio
+  congenic_engraftment <- congenic_engraftment %>%
+    mutate(
+      engraftment_ratio = log2(.data[[ko_marker]] / .data[[wt_marker]])
+    ) %>%
+    # Filter out infinite values
+    filter(is.finite(engraftment_ratio)) %>%
+    select(all_of(c(pairing_id_col, tissue_col)), engraftment_ratio)
+  
+  # Check if we have data after processing
+  if(nrow(congenic_engraftment) == 0) {
+    stop("No valid engraftment ratios calculated. Check your marker names and data.")
+  }
+  
+  # Calculate summary statistics
+  summary_stats <- congenic_engraftment %>%
+    group_by(across(all_of(tissue_col))) %>%
+    summarise(
+      mean_val = mean(engraftment_ratio, na.rm = TRUE),
+      sd_val = sd(engraftment_ratio, na.rm = TRUE),
+      n = n(),
+      sem_val = sd_val / sqrt(n),
+      .groups = 'drop'
+    )
+  
+  # Create factor levels with normalization group first, then order by mean if requested
+  all_groups <- unique(summary_stats[[tissue_col]])
+  
+  if(use_normalization && normalization_tissue %in% all_groups) {
+    # Put normalization tissue first
+    other_groups <- setdiff(all_groups, normalization_tissue)
+    
+    if(order_by_mean) {
+      # Order other groups by mean (excluding normalization tissue)
+      other_stats <- summary_stats %>% 
+        filter(.data[[tissue_col]] != normalization_tissue)
+      other_groups_ordered <- other_stats[[tissue_col]][order(-other_stats$mean_val)]
+      factor_levels <- c(normalization_tissue, other_groups_ordered)
+    } else {
+      factor_levels <- c(normalization_tissue, other_groups)
+    }
+  } else {
+    # No normalization, just order by mean if requested
+    if(order_by_mean) {
+      factor_levels <- summary_stats[[tissue_col]][order(-summary_stats$mean_val)]
+    } else {
+      factor_levels <- all_groups
+    }
+  }
+  
+  # Apply factor levels to both summary stats and original data
+  summary_stats <- summary_stats %>%
+    mutate(!!sym(tissue_col) := factor(.data[[tissue_col]], levels = factor_levels))
+  
+  congenic_engraftment <- congenic_engraftment %>%
+    mutate(!!sym(tissue_col) := factor(.data[[tissue_col]], levels = factor_levels))
+  
+  # Calculate error bar positions based on bar direction
+  summary_stats <- summary_stats %>%
+    mutate(
+      error_ymin = ifelse(mean_val >= 0, mean_val, mean_val - sem_val),
+      error_ymax = ifelse(mean_val >= 0, mean_val + sem_val, mean_val)
+    )
+  
+  # Perform statistical tests if requested
+  stat_results <- NULL
+  if(add_stats && nrow(summary_stats) > 1) {
+    
+    # Create formula dynamically
+    formula_str <- paste("engraftment_ratio ~", tissue_col)
+    test_formula <- as.formula(formula_str)
+    
+    if(stat_method == "paired_t_test" && pairing_enabled) {
+      # For paired t-test, use the existing congenic_engraftment data
+      # Determine comparisons based on user choice
+      all_groups <- levels(congenic_engraftment[[tissue_col]])
+      
+      if(comparison_type == "vs_control" && !is.null(control_group)) {
+        # Only compare each group to control
+        other_groups <- setdiff(all_groups, control_group)
+        comparisons <- lapply(other_groups, function(g) c(control_group, g))
+      } else {
+        # All pairwise comparisons
+        comparisons <- combn(all_groups, 2, simplify = FALSE)
+      }
+      
+      # Perform paired t-test for each comparison
+      stat_list <- list()
+      for(i in seq_along(comparisons)) {
+        group1_name <- comparisons[[i]][1]
+        group2_name <- comparisons[[i]][2]
+        
+        # Get data for both groups, ensuring we have paired data
+        paired_data <- congenic_engraftment %>%
+          filter(.data[[tissue_col]] %in% c(group1_name, group2_name)) %>%
+          select(all_of(c(tissue_col, pairing_id_col)), engraftment_ratio) %>%
+          pivot_wider(names_from = all_of(tissue_col), values_from = engraftment_ratio) %>%
+          filter(complete.cases(.))
+        
+        if(nrow(paired_data) >= 3) {  # Need at least 3 pairs for meaningful test
+          # Perform paired t-test
+          test_result <- t.test(paired_data[[group1_name]], 
+                                paired_data[[group2_name]], 
+                                paired = TRUE)
+          
+          stat_list[[i]] <- data.frame(
+            group1 = group1_name,
+            group2 = group2_name,
+            n1 = nrow(paired_data),
+            n2 = nrow(paired_data),
+            statistic = test_result$statistic,
+            p = test_result$p.value,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+      
+      if(length(stat_list) > 0) {
+        stat_results <- bind_rows(stat_list) %>%
+          mutate(
+            p.adj = p.adjust(p, method = "bonferroni"),
+            p.adj.signif = case_when(
+              p.adj <= 0.001 ~ "***",
+              p.adj <= 0.01 ~ "**", 
+              p.adj <= 0.05 ~ "*",
+              TRUE ~ "ns"
+            )
+          )
+      } else {
+        stat_results <- NULL
+      }
+      
+    } else if(stat_method == "t_test") {
+      # Unpaired t-test
+      if(comparison_type == "vs_control" && !is.null(control_group)) {
+        stat_results <- congenic_engraftment %>%
+          pairwise_t_test(test_formula, 
+                          ref.group = control_group,
+                          p.adjust.method = "bonferroni") %>%
+          add_significance("p.adj")
+      } else {
+        stat_results <- congenic_engraftment %>%
+          pairwise_t_test(test_formula, 
+                          p.adjust.method = "bonferroni") %>%
+          add_significance("p.adj")
+      }
+      
+    } else if(stat_method == "anova") {
+      # Perform ANOVA first
+      anova_result <- congenic_engraftment %>%
+        anova_test(test_formula)
+      
+      cat("\n=== ANOVA Results ===\n")
+      print(anova_result)
+      
+      # If significant, proceed with post-hoc
+      if(anova_result$p < 0.05) {
+        if(comparison_type == "vs_control" && !is.null(control_group)) {
+          stat_results <- congenic_engraftment %>%
+            dunn_test(test_formula, p.adjust.method = "bonferroni") %>%
+            filter(group1 == control_group | group2 == control_group) %>%
+            add_significance("p.adj")
+        } else {
+          stat_results <- congenic_engraftment %>%
+            tukey_hsd(test_formula) %>%
+            add_significance("p.adj")
+        }
+      } else {
+        stat_results <- NULL
+        cat("ANOVA not significant - no post-hoc testing performed\n")
+      }
+    }
+    
+    # Filter out non-significant results (p > 0.05)
+    if(!is.null(stat_results)) {
+      stat_results <- stat_results %>%
+        filter(p.adj <= 0.05) %>%
+        mutate(
+          group1 = factor(group1, levels = factor_levels),
+          group2 = factor(group2, levels = factor_levels)
+        )
+    }
+    
+    # Add y positions for stat annotations with proper spacing
+    if(!is.null(stat_results) && nrow(stat_results) > 0) {
+      y_max <- max(summary_stats$error_ymax, na.rm = TRUE)
+      y_min <- min(summary_stats$error_ymin, na.rm = TRUE)
+      y_range <- y_max - y_min
+      
+      # Sort by x-distance to minimize overlap
+      stat_results <- stat_results %>%
+        mutate(
+          x1_pos = as.numeric(group1),
+          x2_pos = as.numeric(group2),
+          x_distance = abs(x2_pos - x1_pos)
+        ) %>%
+        arrange(x_distance, x1_pos)
+      
+      # Calculate y positions with adequate spacing and proper text placement
+      base_height <- y_max + y_range * 0.08
+      spacing <- y_range * 0.15
+      
+      stat_results <- stat_results %>%
+        mutate(
+          layer = row_number(),
+          y.position = base_height + (layer - 1) * spacing,
+          p_label = case_when(
+            p.adj < 0.001 ~ paste0("p=", format(p.adj, scientific = TRUE, digits = 2)),
+            p.adj < 0.01 ~ paste0("p=", format(round(p.adj, 4), nsmall = 4)),
+            TRUE ~ paste0("p=", format(round(p.adj, 3), nsmall = 3))
+          )
+        )
+    }
+  }
+  
+  # Create base plot using aes() instead of deprecated aes_string()
+  p <- ggplot(summary_stats, aes(x = .data[[tissue_col]], y = mean_val)) +
+    geom_col(aes(fill = .data[[tissue_col]]), alpha = 0.8, 
+             color = "black", linewidth = 0.3) +
+    geom_errorbar(aes(ymin = error_ymin, ymax = error_ymax), 
+                  width = 0.3, color = "black", linewidth = 0.3) +
+    # Always add individual data points with jitter
+    geom_jitter(data = congenic_engraftment, 
+                aes(x = .data[[tissue_col]], y = engraftment_ratio), 
+                size = 2, alpha = 0.7, width = 0.2, height = 0,
+                inherit.aes = FALSE) +
+    labs(
+      title = plot_title,
+      x = x_label,
+      y = y_label,
+      caption = caption_text
+    ) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      panel.grid = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.3),
+      panel.border = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5)
+  
+  # Add statistical annotations if available
+  if(add_stats && !is.null(stat_results) && nrow(stat_results) > 0) {
+    # Add comparison brackets and p-values with proper spacing
+    for(i in 1:nrow(stat_results)) {
+      row <- stat_results[i, ]
+      
+      # Get x positions for the groups
+      x1 <- as.numeric(row$group1)
+      x2 <- as.numeric(row$group2)
+      
+      # Calculate bracket and text positioning
+      bracket_height <- row$y.position
+      text_height <- bracket_height + max(summary_stats$error_ymax) * 0.04
+      bracket_offset <- max(summary_stats$error_ymax) * 0.03
+      
+      # Add bracket lines
+      p <- p + 
+        annotate("segment", 
+                 x = x1, xend = x1, 
+                 y = bracket_height - bracket_offset, yend = bracket_height,
+                 color = "black", linewidth = 0.4) +
+        annotate("segment", 
+                 x = x1, xend = x2, 
+                 y = bracket_height, yend = bracket_height,
+                 color = "black", linewidth = 0.4) +
+        annotate("segment", 
+                 x = x2, xend = x2, 
+                 y = bracket_height, yend = bracket_height - bracket_offset,
+                 color = "black", linewidth = 0.4) +
+        annotate("text", 
+                 x = (x1 + x2) / 2, y = text_height,
+                 label = row$p_label, size = 2.8, hjust = 0.5, vjust = 0)
+    }
+  }
+  
+  # Return plot and optionally statistical results
+  result <- list(plot = p)
+  
+  if(add_stats && !is.null(stat_results)) {
+    result$statistics <- stat_results
+    result$summary_stats <- summary_stats
+  }
+  
+  # If only plot requested, return just the plot
+  if(!add_stats) {
+    return(p)
+  } else {
+    return(result)
+  }
+}
+
+#' Updated MFI heatmap functions using standardized factors
+create_mfi_heatmaps_enhanced <- function(mfi_data,
+                                         tissue_col = "tissue_factor",
+                                         selected_congenics = NULL,
+                                         selected_markers = NULL,
+                                         grouping_option = list(type = "separate"),
+                                         scale_method = "none",
+                                         aggregation_method = "mean",
+                                         cluster_rows = TRUE, 
+                                         cluster_cols = TRUE,
+                                         show_row_names = TRUE,
+                                         show_column_names = TRUE,
+                                         show_cell_values = FALSE,
+                                         log_base = 2,
+                                         percentile_range = c(0.05, 0.95),
+                                         stats_config = NULL) {
+  
+  # Updated required columns to use tissue_factor instead of tissue_factor
+  required_cols <- c("marker", "MFI", tissue_col, "congenics", "NodeShort")
+  missing_cols <- setdiff(required_cols, names(mfi_data))
+  if(length(missing_cols) > 0) {
+    stop(paste("Missing required columns:", paste(missing_cols, collapse = ', ')))
+  }
+  
+  # Rest of the function remains the same, but replace tissue_factor with tissue_col
+  mfi_clean <- mfi_data %>%
+    filter(!is.na(congenics))
+  
+  if(!is.null(selected_congenics)) {
+    mfi_clean <- mfi_clean %>%
+      filter(congenics %in% selected_congenics)
+    cat("Filtered to selected congenics:", paste(selected_congenics, collapse = ", "), "\n")
+  }
+  
+  if(!is.null(selected_markers)) {
+    mfi_clean <- mfi_clean %>%
+      filter(marker %in% selected_markers)
+    cat("Filtered to selected markers:", paste(selected_markers, collapse = ", "), "\n")
+  }
+  
+  if(nrow(mfi_clean) == 0) {
+    stop("No data remaining after filtering")
+  }
+  
+  # Update references to use tissue_col
+  if(grouping_option$type == "separate") {
+    group_names <- unique(mfi_clean[[tissue_col]])
+    cat("Creating separate heatmaps for", length(group_names), "tissue(s):", paste(group_names, collapse = ", "), "\n")
+    
+    heatmap_list <- list()
+    
+    for(group in group_names) {
+      cat("Processing tissue:", group, "\n")
+      
+      group_data <- mfi_clean %>%
+        filter(.data[[tissue_col]] == group)
+      
+      if(nrow(group_data) == 0) {
+        warning(paste("No data found for tissue:", group))
+        next
+      }
+      
+      heatmap_matrix <- group_data %>%
+        group_by(marker, congenics) %>%
+        summarise(agg_MFI = mean(MFI, na.rm = TRUE), .groups = "drop") %>%
+        pivot_wider(names_from = congenics, values_from = agg_MFI) %>%
+        column_to_rownames("marker") %>%
+        as.matrix()
+      
+      if(nrow(heatmap_matrix) == 0 || ncol(heatmap_matrix) == 0) {
+        warning(paste("Empty matrix for tissue:", group))
+        next
+      }
+      
+      # Create individual heatmap (simplified version)
+      scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, "Mean MFI", 
+                                            log_base, percentile_range)
+      
+      ht <- Heatmap(
+        scaled_result$matrix,
+        name = scaled_result$legend_title,
+        col = scaled_result$color_function,
+        cluster_rows = cluster_rows,
+        cluster_columns = cluster_cols,
+        show_row_names = show_row_names,
+        show_column_names = show_column_names,
+        column_title = group,
+        column_title_gp = gpar(fontsize = 14, fontface = "bold"),
+        row_title = "Markers",
+        row_title_gp = gpar(fontsize = 12)
+      )
+      
+      heatmap_list[[group]] <- ht
+      
+      cat(sprintf("  - Created heatmap with %d markers and %d congenics\n", 
+                  nrow(heatmap_matrix), ncol(heatmap_matrix)))
+    }
+    
+    return(heatmap_list)
+  } else {
+    # Combined heatmap logic would go here with similar tissue_col replacements
+    stop("Combined heatmap not implemented in this simplified version")
+  }
+}
+
+#' Updated data cleaning function using standardized factors
+data_clean_custom_enhanced <- function(data) {
+  
+  # Function to handle unstained sample detection and removal
+  handle_unstained_samples <- function(df) {
+    # Check if Sample column exists
+    if(!"Sample" %in% names(df)) {
+      return(df)
+    }
+    
+    # Define unstained patterns (case insensitive)
+    unstained_patterns <- c("unstained", "no stain", "no_stain")
+    
+    # Create regex pattern for case-insensitive matching
+    pattern <- paste(unstained_patterns, collapse = "|")
+    
+    # Find rows with unstained samples
+    unstained_rows <- df %>%
+      mutate(row_id = row_number()) %>%
+      filter(str_detect(tolower(Sample), pattern)) %>%
+      pull(row_id)
+    
+    # If no unstained samples found, return original dataframe
+    if(length(unstained_rows) == 0) {
+      cat("No unstained samples detected.\n")
+      return(df)
+    }
+    
+    # Display detected unstained samples
+    cat("\n=== Unstained Samples Detected ===\n")
+    cat(paste("Found", length(unstained_rows), "unstained sample(s):\n"))
+    
+    unstained_data <- df %>%
+      slice(unstained_rows)
+    
+    # Select relevant columns for display
+    if("NodeShort" %in% names(df)) {
+      unstained_data <- unstained_data %>%
+        select(Sample, NodeShort)
+    } else {
+      unstained_data <- unstained_data %>%
+        select(Sample)
+    }
+    
+    print(unstained_data)
+    
+    # Interactive prompt for user decision
+    cat("\n=== Action Required ===\n")
+    action_options <- c(
+      "Remove unstained samples from dataset",
+      "Keep unstained samples in dataset"
+    )
+    
+    user_choice <- menu(action_options, title = "What would you like to do with these unstained samples?")
+    
+    if(user_choice == 0) {
+      cat("Action cancelled. Keeping unstained samples in dataset.\n")
+      return(df)
+    } else if(user_choice == 1) {
+      # Remove unstained samples
+      df_cleaned <- df %>%
+        slice(-unstained_rows)
+      
+      cat(paste("Removed", length(unstained_rows), "unstained sample(s).\n"))
+      cat(paste("Dataset reduced from", nrow(df), "to", nrow(df_cleaned), "rows.\n"))
+      
+      return(df_cleaned)
+    } else {
+      # Keep unstained samples
+      cat("Keeping unstained samples in dataset.\n")
+      return(df)
+    }
+  }
+  
+  # Function to clean a single data frame
+  clean_single_df <- function(df) {
+    # Clean column names - remove "$" symbols
+    names(df) <- str_remove_all(names(df), "\\$")
+    
+    # Clean NodeShort column if it exists
+    if("NodeShort" %in% names(df)) {
+      df <- df %>%
+        mutate(
+          NodeShort = NodeShort %>%
+            str_remove(".*:") %>%        # Remove everything before and including ":"
+            str_remove_all(" ") %>%      # Remove all spaces
+            str_remove_all(",") %>%      # Remove all commas
+            str_remove_all(":")          # Remove any remaining colons
+        )
+    }
+    
+    # Handle unstained samples
+    df <- handle_unstained_samples(df)
+    
+    # Validate standardized factor columns
+    if("tissue_factor" %in% names(df)) {
+      cat("✅ Found tissue_factor column\n")
+      tissue_summary <- df %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
+      cat("Tissue groups:", nrow(tissue_summary), "\n")
+    } else {
+      cat("ℹ️  No tissue_factor column found\n")
+    }
+    
+    if("tissue_factor" %in% names(df)) {
+      cat("✅ Found tissue_factor column\n")
+      pairing_summary <- df %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
+      cat("Pairing groups:", nrow(pairing_summary), "\n")
+    } else {
+      cat("ℹ️  No tissue_factor column found\n")
+    }
+    
+    return(df)
+  }
+  
+  # Check if input is a list
+  if(is.list(data) && !is.data.frame(data)) {
+    # Apply cleaning function to each element in the list
+    cleaned_data <- map(data, ~ {
+      if(is.data.frame(.x)) {
+        clean_single_df(.x)
+      } else {
+        .x  # Return unchanged if not a data frame
+      }
+    })
+    return(cleaned_data)
+  } else if(is.data.frame(data)) {
+    # Apply cleaning function to single data frame
+    return(clean_single_df(data))
+  } else {
+    # Return unchanged if neither list nor data frame
+    warning("Input is neither a list nor a data frame. Returning unchanged.")
+    return(data)
   }
 }
 
@@ -5139,7 +7296,7 @@ get_population_event_counts <- function(gs, node, selected_samples = NULL) {
 
 extract_single_cell_data <- function(gs, node, selected_markers, 
                                      selected_samples = NULL,
-                                     keywords = c("$WELLID", "GROUPNAME"),
+                                     keywords = c("pairing_factor", "tissue_factor"),
                                      sample_limit = NULL, 
                                      max_cells_per_sample = 5000) {
   
@@ -6270,7 +8427,7 @@ import_external_metadata <- function(gs) {
 # MAIN ENHANCED FUNCTION WITH SAMPLE EXCLUSION
 # ============================================================================
 
-analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME")) {
+analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissue_factor")) {
   
   cat("=== Enhanced Interactive UMAP Analysis for Flow Cytometry ===\n")
   cat("Features:\n")
@@ -6662,7 +8819,7 @@ cat("- Fixed all numeric input handling to prevent NA errors\n")
 # restart_visualization_session(results)
 # 
 # # 4. Create additional plots from results
-# sample_plot <- create_quick_umap_plot(results, "GROUPNAME")
+# sample_plot <- create_quick_umap_plot(results, "tissue_factor")
 # print(sample_plot)
 # 
 # # 5. Export data and session
