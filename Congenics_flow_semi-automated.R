@@ -2161,9 +2161,9 @@ define_analysis_factors <- function(df) {
   # TISSUE FACTOR DEFINITION
   # ==========================================================================
   
-  tissue_factor <- NULL
+  tissue_factor_col <- NULL
   
-  while(is.null(tissue_factor)) {
+  while(is.null(tissue_factor_col)) {
     cat("\n", paste(rep("=", 70), collapse = ""), "\n")
     cat("TISSUE FACTOR DEFINITION\n")
     cat(paste(rep("=", 70), collapse = ""), "\n")
@@ -2223,7 +2223,7 @@ define_analysis_factors <- function(df) {
     
     confirm <- readline("Confirm this tissue factor? (y/n): ")
     if(tolower(confirm) == "y") {
-      tissue_factor <- selected_tissue_factor
+      tissue_factor_col <- selected_tissue_factor
     } else {
       cat("Selection cancelled. Choose again.\n")
     }
@@ -2233,9 +2233,9 @@ define_analysis_factors <- function(df) {
   # PAIRING FACTOR DEFINITION
   # ==========================================================================
   
-  tissue_factor <- NULL
+  pairing_factor_col <- NULL
   
-  while(is.null(tissue_factor)) {
+  while(is.null(pairing_factor_col)) {
     cat("\n", paste(rep("=", 70), collapse = ""), "\n")
     cat("PAIRING FACTOR DEFINITION\n")
     cat(paste(rep("=", 70), collapse = ""), "\n")
@@ -2286,10 +2286,10 @@ define_analysis_factors <- function(df) {
       if(grepl("^\\d+$", pair_choice)) {
         choice_num <- as.numeric(pair_choice)
         if(!is.na(choice_num) && choice_num >= 1 && choice_num <= length(pairing_candidates)) {
-          tissue_factor <- pairing_candidates[choice_num]
+          pairing_factor_col <- pairing_candidates[choice_num]
         }
       } else if(pair_choice %in% available_cols) {
-        tissue_factor <- pair_choice
+        pairing_factor_col <- pair_choice
       }
       
     } else if(pairing_option == "2") {
@@ -2298,11 +2298,11 @@ define_analysis_factors <- function(df) {
       cat("a. Row letter pairing (A1,A2,A3 = Mouse 1; B1,B2,B3 = Mouse 2)\n")
       cat("b. Custom pattern extraction\n")
       
-      # Look for pairing_factor columns
-      wellid_cols <- available_cols[grepl("pairing_factor|wellid|WellID|Well_ID", available_cols, ignore.case = TRUE)]
+      # Look for well ID columns
+      wellid_cols <- available_cols[grepl("well|WellID|Well_ID|pairing_factor", available_cols, ignore.case = TRUE)]
       
       if(length(wellid_cols) > 0) {
-        cat("\nFound potential pairing_factor columns:\n")
+        cat("\nFound potential well ID columns:\n")
         iwalk(wellid_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
         
         # Show examples
@@ -2311,9 +2311,9 @@ define_analysis_factors <- function(df) {
           cat(sprintf("  %s examples: %s\n", col, paste(sample_vals, collapse = ", ")))
         }
         
-        wellid_choice <- readline("Enter pairing_factor column number or name: ")
+        wellid_choice <- readline("Enter well ID column number or name: ")
         
-        # Parse pairing_factor choice
+        # Parse well ID choice
         selected_wellid <- NULL
         if(grepl("^\\d+$", wellid_choice)) {
           choice_num <- as.numeric(wellid_choice)
@@ -2333,14 +2333,14 @@ define_analysis_factors <- function(df) {
           
           if(tolower(method_choice) == "a") {
             # Create row letter pairing
-            tissue_factor <- "tissue_factor"  # We'll create this column
+            pairing_factor_col <- "pairing_factor_created"  # Signal that we'll create this
             df <- df %>%
-              mutate(tissue_factor = str_extract(.data[[selected_wellid]], "^[A-H]"))
+              mutate(pairing_factor_created = str_extract(.data[[selected_wellid]], "^[A-H]"))
             
             # Show pairing preview
             pairing_preview <- df %>%
-              count(tissue_factor, name = "n_samples") %>%
-              arrange(tissue_factor)
+              count(pairing_factor_created, name = "n_samples") %>%
+              arrange(pairing_factor_created)
             
             cat("\nPairing groups created from row letters:\n")
             print(pairing_preview)
@@ -2348,14 +2348,14 @@ define_analysis_factors <- function(df) {
           } else if(tolower(method_choice) == "b") {
             pattern <- readline("Enter regex pattern to extract pairing ID: ")
             if(pattern != "") {
-              tissue_factor <- "tissue_factor"
+              pairing_factor_col <- "pairing_factor_created"
               df <- df %>%
-                mutate(tissue_factor = str_extract(.data[[selected_wellid]], pattern))
+                mutate(pairing_factor_created = str_extract(.data[[selected_wellid]], pattern))
               
               # Show results
               pairing_preview <- df %>%
-                count(tissue_factor, name = "n_samples") %>%
-                arrange(tissue_factor)
+                count(pairing_factor_created, name = "n_samples") %>%
+                arrange(pairing_factor_created)
               
               cat("\nPairing groups created from pattern:\n")
               print(pairing_preview)
@@ -2364,7 +2364,7 @@ define_analysis_factors <- function(df) {
         }
         
       } else {
-        cat("No pairing_factor columns found. Please choose option 1 or 3.\n")
+        cat("No well ID columns found. Please choose option 1 or 3.\n")
         next
       }
       
@@ -2405,9 +2405,9 @@ define_analysis_factors <- function(df) {
         if(transform_choice == "1") {
           pattern <- readline("Enter regex pattern to extract: ")
           if(pattern != "") {
-            tissue_factor <- "tissue_factor"
+            pairing_factor_col <- "pairing_factor_created"
             df <- df %>%
-              mutate(tissue_factor = str_extract(.data[[base_col]], pattern))
+              mutate(pairing_factor_created = str_extract(.data[[base_col]], pattern))
           }
         } else if(transform_choice == "2") {
           cat("Remove:\n1. Prefix\n2. Suffix\n")
@@ -2415,32 +2415,32 @@ define_analysis_factors <- function(df) {
           pattern_to_remove <- readline("Enter pattern to remove: ")
           
           if(pattern_to_remove != "") {
-            tissue_factor <- "tissue_factor"
+            pairing_factor_col <- "pairing_factor_created"
             if(remove_choice == "1") {
               df <- df %>%
-                mutate(tissue_factor = str_remove(.data[[base_col]], paste0("^", pattern_to_remove)))
+                mutate(pairing_factor_created = str_remove(.data[[base_col]], paste0("^", pattern_to_remove)))
             } else {
               df <- df %>%
-                mutate(tissue_factor = str_remove(.data[[base_col]], paste0(pattern_to_remove, "$")))
+                mutate(pairing_factor_created = str_remove(.data[[base_col]], paste0(pattern_to_remove, "$")))
             }
           }
         } else if(transform_choice == "3") {
           n_chars <- readline("Enter number of characters to keep: ")
           if(grepl("^\\d+$", n_chars)) {
             n <- as.numeric(n_chars)
-            tissue_factor <- "tissue_factor"
+            pairing_factor_col <- "pairing_factor_created"
             df <- df %>%
-              mutate(tissue_factor = str_sub(.data[[base_col]], 1, n))
+              mutate(pairing_factor_created = str_sub(.data[[base_col]], 1, n))
           }
         } else if(transform_choice == "4") {
-          tissue_factor <- base_col
+          pairing_factor_col <- base_col
         }
         
         # Show results if we created a new column
-        if(tissue_factor == "tissue_factor") {
+        if(pairing_factor_col == "pairing_factor_created") {
           pairing_preview <- df %>%
-            count(tissue_factor, name = "n_samples") %>%
-            arrange(tissue_factor)
+            count(pairing_factor_created, name = "n_samples") %>%
+            arrange(pairing_factor_created)
           
           cat("\nPairing groups created:\n")
           print(pairing_preview)
@@ -2449,24 +2449,24 @@ define_analysis_factors <- function(df) {
       
     } else if(pairing_option == "4") {
       # No pairing
-      tissue_factor <- "none"
+      pairing_factor_col <- "none"
       cat("✅ No pairing selected. Only unpaired analyses will be available.\n")
     }
     
-    if(is.null(tissue_factor)) {
+    if(is.null(pairing_factor_col)) {
       cat("❌ Invalid selection. Please try again.\n")
       next
     }
     
     # Confirm pairing factor (unless "none")
-    if(tissue_factor != "none") {
+    if(pairing_factor_col != "none") {
       # Show pairing summary
-      if(tissue_factor %in% names(df)) {
+      if(pairing_factor_col %in% names(df)) {
         pairing_summary <- df %>%
-          count(.data[[tissue_factor]], name = "n_samples") %>%
+          count(.data[[pairing_factor_col]], name = "n_samples") %>%
           arrange(desc(n_samples))
         
-        cat(sprintf("\n✅ Selected pairing factor: %s\n", tissue_factor))
+        cat(sprintf("\n✅ Selected pairing factor: %s\n", pairing_factor_col))
         cat("Pairing groups:\n")
         print(head(pairing_summary, 10))
         if(nrow(pairing_summary) > 10) {
@@ -2476,7 +2476,7 @@ define_analysis_factors <- function(df) {
       
       confirm <- readline("Confirm this pairing factor? (y/n): ")
       if(tolower(confirm) != "y") {
-        tissue_factor <- NULL
+        pairing_factor_col <- NULL
         cat("Selection cancelled. Choose again.\n")
       }
     }
@@ -2492,21 +2492,19 @@ define_analysis_factors <- function(df) {
   
   # Create tissue_factor column (duplicate and rename for clarity)
   df <- df %>%
-    mutate(tissue_factor = .data[[tissue_factor]])
+    mutate(tissue_factor = .data[[tissue_factor_col]])
   
-  cat("✅ Created 'tissue_factor' column based on:", tissue_factor, "\n")
+  cat("✅ Created 'tissue_factor' column based on:", tissue_factor_col, "\n")
   
-  # Create tissue_factor column if not "none"
-  if(tissue_factor != "none") {
-    if(tissue_factor != "tissue_factor") {  # If not already created above
-      df <- df %>%
-        mutate(tissue_factor = .data[[tissue_factor]])
-    }
-    cat("✅ Created 'tissue_factor' column based on:", tissue_factor, "\n")
+  # Create pairing_factor column if not "none"
+  if(pairing_factor_col != "none") {
+    df <- df %>%
+      mutate(pairing_factor = .data[[pairing_factor_col]])
+    cat("✅ Created 'pairing_factor' column based on:", pairing_factor_col, "\n")
   } else {
     df <- df %>%
-      mutate(tissue_factor = "no_pairing")
-    cat("✅ Created 'tissue_factor' column with value: no_pairing\n")
+      mutate(pairing_factor = "no_pairing")
+    cat("✅ Created 'pairing_factor' column with value: no_pairing\n")
   }
   
   # Final summary
@@ -2517,8 +2515,8 @@ define_analysis_factors <- function(df) {
   cat("\nTissue Factor Groups:\n")
   print(tissue_final)
   
-  if(tissue_factor != "none") {
-    pairing_final <- df %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
+  if(pairing_factor_col != "none") {
+    pairing_final <- df %>% count(pairing_factor, name = "n") %>% arrange(desc(n))
     cat("\nPairing Factor Groups:\n")
     print(head(pairing_final, 15))
     if(nrow(pairing_final) > 15) {
@@ -2531,10 +2529,10 @@ define_analysis_factors <- function(df) {
   return(list(
     data = df,
     tissue_factor = "tissue_factor",
-    tissue_factor = "tissue_factor",
-    original_tissue_col = tissue_factor,
-    original_pairing_col = if(tissue_factor != "none") tissue_factor else NULL,
-    pairing_enabled = tissue_factor != "none"
+    pairing_factor = "pairing_factor",
+    original_tissue_col = tissue_factor_col,
+    original_pairing_col = if(pairing_factor_col != "none") pairing_factor_col else NULL,
+    pairing_enabled = pairing_factor_col != "none"
   ))
 }
 
