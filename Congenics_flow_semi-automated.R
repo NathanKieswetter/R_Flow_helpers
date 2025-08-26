@@ -191,12 +191,7 @@ interactive_save_dataframe <- function(df, suggested_name = "data", data_type = 
 }
 
 # ============================================================================
-# SECTION 1: CORE SETUP AND DATA LOADING (test123)
-# ============================================================================
-
-
-# ============================================================================
-# SECTION 2: INTERACTIVE KEYWORD SELECTION FOR FLOWJO WORKSPACE SETUP
+# SECTION 1: CORE SETUP AND DATA LOADING
 # ============================================================================
 
 # Function to extract and preview keywords from FCS files
@@ -922,9 +917,7 @@ preview_keywords_only <- function(fcs_path, sample_limit = 5) {
   return(keyword_data)
 }
 
-# ============================================================================
-# CORRECTED WORKFLOW - FACTOR DEFINITION BEFORE DATA EXTRACTION
-# ============================================================================
+#Extract data/counts
 extract_counts_freqs_base <- function(gs, nodes, parent_mapping = NULL, keywords = NULL) {
   
   # Helper to safely get counts for a node in a sample
@@ -1091,7 +1084,7 @@ analyze_flow_data_corrected <- function(gs,
                                         channels = NULL,
                                         summary_fun = median) {
   
-  cat("=== Flow Cytometry Analysis Pipeline (Corrected) ===\n")
+  cat("=== Flow Cytometry Analysis Pipeline ===\n")
   
   # Get nodes and parents first
   nodes <- if(node_selection == "interactive") {
@@ -1139,8 +1132,6 @@ analyze_flow_data_auto_enhanced <- function(gs,
                                             define_factors = TRUE,
                                             auto_save = FALSE,
                                             ...) {
-  
-  cat("=== Enhanced Flow Analysis - Corrected Workflow ===\n")
   
   # Step 1: Extract raw data (no standardized columns assumed)
   results <- analyze_flow_data_corrected(gs, ...)
@@ -5813,27 +5804,38 @@ gh_pop_get_data <- function(gh, node) {
 # ============================================================================
 
 interactive_sample_exclusion <- function(gs) {
+  cat("=== Interactive Sample Exclusion ===\n")
+  
   all_samples <- sampleNames(gs)
-  cat("\n=== Sample Exclusion Menu ===\n")
-  cat("Total samples available:", length(all_samples), "\n")
+  excluded_samples <- c()
   
-  # Get sample metadata for informed decisions
-  if(exists("pData") && is.function(pData)) {
-    tryCatch({
-      pd <- pData(gs) %>% 
-        rownames_to_column("Sample")
-      
-      cat("\nSample preview with metadata:\n")
-      print(head(pd %>% select(1:min(4, ncol(pd))), 10))
-    }, error = function(e) {
-      cat("Could not load sample metadata\n")
-      pd <- tibble(Sample = all_samples)
-    })
-  } else {
-    pd <- tibble(Sample = all_samples)
-  }
-  
-  while(TRUE) {
+  repeat {
+    cat("\n--- Current Sample List ---\n")
+    current_samples <- setdiff(all_samples, excluded_samples)
+    
+    if(length(current_samples) == 0) {
+      cat("Warning: All samples have been excluded!\n")
+      reset_choice <- readline("Reset exclusions? (y/n): ")
+      if(tolower(reset_choice) == "y") {
+        excluded_samples <- c()
+        current_samples <- all_samples
+      } else {
+        return(character(0))  # Return empty if no samples selected
+      }
+    }
+    
+    cat("Samples to be included (", length(current_samples), " total):\n", sep = "")
+    for(i in seq_along(current_samples)) {
+      cat(i, " ", current_samples[i], "\n", sep = "")
+    }
+    
+    if(length(excluded_samples) > 0) {
+      cat("\nExcluded samples (", length(excluded_samples), " total):\n", sep = "")
+      for(i in seq_along(excluded_samples)) {
+        cat("X ", excluded_samples[i], "\n", sep = "")
+      }
+    }
+    
     cat("\n--- Exclusion Options ---\n")
     cat("1. Exclude samples by pattern (recommended for unstained, controls)\n")
     cat("2. Exclude specific samples (interactive selection)\n")
@@ -5845,189 +5847,133 @@ interactive_sample_exclusion <- function(gs) {
     choice <- readline("Choose option (1-6): ")
     
     if(choice == "1") {
-      return(exclude_samples_by_pattern(all_samples))
-    } else if(choice == "2") {
-      return(exclude_samples_interactive(all_samples))
-    } else if(choice == "3") {
-      return(exclude_samples_by_metadata(gs, pd))
-    } else if(choice == "4") {
-      cat("\nCurrent samples:\n")
-      iwalk(all_samples, ~cat(sprintf("%d. %s\n", .y, .x)))
-      cat("\nPress Enter to continue...")
-      readline()
-    } else if(choice == "5") {
-      cat("Proceeding with all", length(all_samples), "samples\n")
-      return(all_samples)
-    } else if(choice == "6") {
-      # Multi-marker heatmap
-      cat("\n=== Multi-Marker Heatmap Creation ===\n")
-      cat("Available markers:", length(marker_names), "\n")
+      # Exclude by pattern
+      cat("\nCommon patterns to exclude:\n")
+      cat("Examples: 'unstained', 'control', 'blank', 'compensation'\n")
+      pattern <- readline("Enter pattern to exclude (case-insensitive): ")
       
-      if(length(marker_names) == 0) {
-        cat("No markers available for heatmap\n")
+      if(pattern != "") {
+        matching_samples <- grep(pattern, current_samples, ignore.case = TRUE, value = TRUE)
+        
+        if(length(matching_samples) > 0) {
+          cat("Samples matching pattern '", pattern, "':\n", sep = "")
+          for(sample in matching_samples) {
+            cat("- ", sample, "\n", sep = "")
+          }
+          
+          confirm <- readline(paste0("Exclude these ", length(matching_samples), " samples? (y/n): "))
+          if(tolower(confirm) == "y") {
+            excluded_samples <- c(excluded_samples, matching_samples)
+            cat("Excluded ", length(matching_samples), " samples\n", sep = "")
+          }
+        } else {
+          cat("No samples found matching pattern: ", pattern, "\n")
+        }
+      }
+      
+    } else if(choice == "2") {
+      # Exclude specific samples
+      if(length(current_samples) == 0) {
+        cat("No samples available for exclusion.\n")
         next
       }
       
-      cat("Options:\n")
-      cat("1. Select specific markers\n")
-      cat("2. Use first 9 markers (3x3 grid)\n")
-      cat("3. Use all markers (may be crowded)\n")
-      cat("4. Show marker list first\n")
+      cat("\nSelect samples to exclude:\n")
+      for(i in seq_along(current_samples)) {
+        cat(i, ". ", current_samples[i], "\n", sep = "")
+      }
       
-      heatmap_choice <- readline("Choose option (1-4): ")
+      selection <- readline("Enter sample numbers to exclude (comma-separated, or Enter to cancel): ")
       
-      selected_markers <- NULL
-      
-      if(heatmap_choice == "1") {
-        cat("\nAvailable markers:\n")
-        iwalk(marker_names, ~cat(sprintf("%d. %s\n", .y, .x)))
+      if(selection != "") {
+        sample_indices <- as.numeric(strsplit(selection, ",")[[1]])
+        sample_indices <- sample_indices[!is.na(sample_indices)]
+        sample_indices <- sample_indices[sample_indices >= 1 & sample_indices <= length(current_samples)]
         
-        cat("\nEnter marker numbers (space-separated, max 12 recommended): ")
-        marker_selection <- readline()
+        if(length(sample_indices) > 0) {
+          samples_to_exclude <- current_samples[sample_indices]
+          excluded_samples <- c(excluded_samples, samples_to_exclude)
+          cat("Excluded ", length(samples_to_exclude), " samples\n", sep = "")
+        } else {
+          cat("No valid sample indices provided.\n")
+        }
+      }
+      
+    } else if(choice == "3") {
+      # Exclude by metadata criteria
+      cat("\nExcluding by metadata criteria...\n")
+      
+      # Get available metadata from pData
+      tryCatch({
+        sample_metadata <- pData(gs)
         
-        if(marker_selection == "") {
-          cat("No markers selected\n")
+        if(ncol(sample_metadata) == 0) {
+          cat("No metadata available for filtering.\n")
           next
         }
         
-        # Parse space-separated marker numbers
-        tryCatch({
-          selections <- str_trim(str_split(marker_selection, "\\s+")[[1]])
-          marker_indices <- numeric(0)
-          
-          for(sel in selections) {
-            if(grepl("^\\d+$", sel)) {
-              marker_num <- as.numeric(sel)
-              if(!is.na(marker_num) && marker_num >= 1 && marker_num <= length(marker_names)) {
-                marker_indices <- c(marker_indices, marker_num)
+        cat("Available metadata columns:\n")
+        meta_cols <- names(sample_metadata)
+        for(i in seq_along(meta_cols)) {
+          cat(i, ". ", meta_cols[i], "\n", sep = "")
+        }
+        
+        col_choice <- readline(paste0("Choose metadata column (1-", length(meta_cols), ", or Enter to cancel): "))
+        
+        if(col_choice != "") {
+          col_idx <- as.numeric(col_choice)
+          if(!is.na(col_idx) && col_idx >= 1 && col_idx <= length(meta_cols)) {
+            selected_col <- meta_cols[col_idx]
+            unique_values <- unique(sample_metadata[[selected_col]])
+            
+            cat("Unique values in '", selected_col, "':\n", sep = "")
+            for(i in seq_along(unique_values)) {
+              cat(i, ". ", unique_values[i], "\n", sep = "")
+            }
+            
+            value_choice <- readline("Enter value numbers to exclude (comma-separated): ")
+            
+            if(value_choice != "") {
+              value_indices <- as.numeric(strsplit(value_choice, ",")[[1]])
+              value_indices <- value_indices[!is.na(value_indices)]
+              value_indices <- value_indices[value_indices >= 1 & value_indices <= length(unique_values)]
+              
+              if(length(value_indices) > 0) {
+                values_to_exclude <- unique_values[value_indices]
+                samples_to_exclude <- rownames(sample_metadata)[sample_metadata[[selected_col]] %in% values_to_exclude]
+                samples_to_exclude <- intersect(samples_to_exclude, current_samples)  # Only exclude from current samples
+                
+                if(length(samples_to_exclude) > 0) {
+                  excluded_samples <- c(excluded_samples, samples_to_exclude)
+                  cat("Excluded ", length(samples_to_exclude), " samples based on metadata\n", sep = "")
+                } else {
+                  cat("No matching samples found to exclude.\n")
+                }
               }
             }
           }
-          
-          if(length(marker_indices) == 0) {
-            cat("No valid markers selected\n")
-            next
-          }
-          
-          selected_markers <- marker_names[marker_indices]
-          
-        }, error = function(e) {
-          cat("Invalid input format\n")
-          next
-        })
-        
-      } else if(heatmap_choice == "2") {
-        n_markers <- min(9, length(marker_names))
-        selected_markers <- marker_names[1:n_markers]
-        cat("Using first", n_markers, "markers\n")
-        
-      } else if(heatmap_choice == "3") {
-        if(length(marker_names) > 16) {
-          cat("Warning: Using all", length(marker_names), "markers may create a crowded plot\n")
-          confirm <- readline("Continue? (y/n): ")
-          if(tolower(confirm) != "y") next
         }
-        selected_markers <- marker_names
-        
-      } else if(heatmap_choice == "4") {
-        cat("\nAll available markers:\n")
-        iwalk(marker_names, ~cat(sprintf("%d. %s\n", .y, .x)))
-        readline("Press Enter to continue...")
-        next
-        
-      } else {
-        cat("Invalid choice\n")
-        next
-      }
-      
-      if(length(selected_markers) == 0) {
-        cat("No markers selected\n")
-        next
-      }
-      
-      cat("Creating heatmap with", length(selected_markers), "markers:", 
-          paste(head(selected_markers, 5), collapse = ", "))
-      if(length(selected_markers) > 5) cat("...")
-      cat("\n")
-      
-      # Create individual plots for each marker
-      marker_plots <- map(selected_markers, function(marker) {
-        ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = .data[[marker]])) +
-          geom_point(size = 0.1, alpha = 0.5) +
-          scale_color_viridis_c(name = "", option = "plasma") +
-          labs(title = marker) +
-          theme_void() +
-          theme(
-            plot.title = element_text(size = 10, hjust = 0.5),
-            legend.key.size = unit(0.3, "cm"),
-            legend.text = element_text(size = 6)
-          )
+      }, error = function(e) {
+        cat("Error accessing metadata:", e$message, "\n")
       })
       
-      # Determine grid layout
-      n_markers <- length(selected_markers)
-      if(n_markers <= 4) {
-        ncol_grid <- 2
-      } else if(n_markers <= 9) {
-        ncol_grid <- 3
-      } else if(n_markers <= 16) {
-        ncol_grid <- 4
-      } else {
-        ncol_grid <- ceiling(sqrt(n_markers))
-      }
+    } else if(choice == "4") {
+      # Preview - just continue the loop to show current list
+      next
       
-      # Arrange in grid
-      combined_plot <- wrap_plots(marker_plots, ncol = ncol_grid)
-      
-      # Store and display
-      .umap_session_plots$plot_counter <<- .umap_session_plots$plot_counter + 1
-      plot_id <- paste0("plot_", .umap_session_plots$plot_counter)
-      
-      plot_title <- paste("Multi-marker heatmap (", length(selected_markers), "markers )")
-      
-      plot_info <- list(
-        plot = combined_plot,
-        color_by = "multiple_markers",
-        facet_by = NULL,
-        plot_type = "heatmap",
-        title = plot_title,
-        markers_used = selected_markers,
-        timestamp = Sys.time()
-      )
-      
-      .umap_session_plots$plots[[plot_id]] <<- plot_info
-      
-      print(combined_plot)
-      
-      # Option to save
-      save_choice <- readline("Save this heatmap? (y/n): ")
-      if(tolower(save_choice) == "y") {
-        filename <- readline("Enter filename: ")
-        if(filename != "") {
-          if(!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
-            filename <- paste0(filename, ".png")
-          }
-          
-          # Adjust size based on number of markers
-          width <- max(8, ceiling(ncol_grid * 2.5))
-          height <- max(6, ceiling((length(marker_plots) / ncol_grid) * 2))
-          
-          tryCatch({
-            ggsave(filename, plot = combined_plot, width = width, height = height, dpi = 300)
-            cat("Heatmap saved as:", filename, "\n")
-          }, error = function(e) {
-            cat("Error saving plot:", e$message, "\n")
-          })
-        }
-      }
-      
-      cat("Plot created and stored as:", plot_id, "\n")
-      cat("Session now contains", length(.umap_session_plots$plots), "plots\n")
-      
-    } else if(choice == "11") {
-      # This would be used if we had current exclusions
-      cat("Proceeding with current sample list\n")
+    } else if(choice == "5") {
+      # Continue with all samples
       return(all_samples)
+      
+    } else if(choice == "6") {
+      # Continue with current exclusions
+      final_samples <- setdiff(all_samples, excluded_samples)
+      if(length(final_samples) == 0) {
+        cat("Warning: No samples selected!\n")
+        next
+      }
+      return(final_samples)
+      
     } else {
       cat("Invalid choice. Please select 1-6.\n")
     }
@@ -7682,10 +7628,1877 @@ import_external_metadata <- function(gs) {
 }
 
 # ============================================================================
-# UMAP Enhanced Interactive function with Save
+# ENHANCED INTERACTIVE UMAP ANALYSIS FOR FLOW CYTOMETRY DATA
+# Fixed version with sample exclusion and streamlined workflow
 # ============================================================================
 
-analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissue_factor"), auto_save = FALSE) {
+library(tidyverse)
+library(umap)
+library(ggplot2)
+library(patchwork)
+library(viridis)
+library(RColorBrewer)
+library(scales)
+
+# ============================================================================
+# MISSING DEPENDENCY FUNCTIONS - REPLACE WITH YOUR ACTUAL IMPLEMENTATIONS
+# ============================================================================
+
+get_all_populations <- function(gs) {
+  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
+    return(flowWorkspace::gs_get_pop_paths(gs))
+  } else {
+    stop("flowWorkspace package required. Please load flowWorkspace.")
+  }
+}
+
+get_marker_lookup <- function(gs) {
+  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
+    # Get channel info from first sample
+    first_sample <- flowWorkspace::gs_cyto_data(gs)[[1]]
+    markers <- flowCore::markernames(first_sample)
+    channels <- names(markers)
+    
+    return(tibble(
+      colname = channels,
+      marker = ifelse(is.na(markers), channels, markers)
+    ))
+  } else {
+    stop("flowWorkspace package required. Please load flowWorkspace.")
+  }
+}
+
+resolve_nodes_by_leaf <- function(gs, leaf_name) {
+  all_pops <- get_all_populations(gs)
+  matches <- all_pops[grepl(paste0("\\b", leaf_name, "\\b"), basename(all_pops), ignore.case = TRUE)]
+  return(matches)
+}
+
+gh_get_pop_paths <- function(gh) {
+  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
+    return(flowWorkspace::gs_get_pop_paths(gh))
+  } else {
+    stop("flowWorkspace package required")
+  }
+}
+
+gh_pop_get_data <- function(gh, node) {
+  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
+    return(flowWorkspace::gh_pop_get_data(gh, node))
+  } else {
+    stop("flowWorkspace package required")
+  }
+}
+
+# ============================================================================
+# ENHANCED SAMPLE EXCLUSION FUNCTIONALITY
+# ============================================================================
+
+interactive_sample_exclusion <- function(gs) {
+  all_samples <- sampleNames(gs)
+  cat("\n=== Sample Exclusion Menu ===\n")
+  cat("Total samples available:", length(all_samples), "\n")
+  
+  # Get sample metadata for informed decisions
+  if(exists("pData") && is.function(pData)) {
+    tryCatch({
+      pd <- pData(gs) %>% 
+        rownames_to_column("Sample")
+      
+      cat("\nSample preview with metadata:\n")
+      print(head(pd %>% select(1:min(4, ncol(pd))), 10))
+    }, error = function(e) {
+      cat("Could not load sample metadata\n")
+      pd <- tibble(Sample = all_samples)
+    })
+  } else {
+    pd <- tibble(Sample = all_samples)
+  }
+  
+  while(TRUE) {
+    cat("\n--- Exclusion Options ---\n")
+    cat("1. Exclude samples by pattern (recommended for unstained, controls)\n")
+    cat("2. Exclude specific samples (interactive selection)\n")
+    cat("3. Exclude samples by metadata criteria\n")
+    cat("4. Preview current sample list\n")
+    cat("5. Continue with all samples\n")
+    cat("6. Continue with current exclusions\n")
+    
+    choice <- readline("Choose option (1-6): ")
+    
+    if(choice == "1") {
+      return(exclude_samples_by_pattern(all_samples, gs))
+    } else if(choice == "2") {
+      return(exclude_samples_interactive(all_samples))
+    } else if(choice == "3") {
+      return(exclude_samples_by_metadata(gs, pd))
+    } else if(choice == "4") {
+      cat("\nCurrent samples:\n")
+      iwalk(all_samples, ~cat(sprintf("%d. %s\n", .y, .x)))
+      cat("\nPress Enter to continue...")
+      readline()
+    } else if(choice == "5") {
+      cat("Proceeding with all", length(all_samples), "samples\n")
+      return(all_samples)
+    } else if(choice == "6") {
+      cat("Proceeding with current sample list\n")
+      return(all_samples)
+    } else {
+      cat("Invalid choice. Please select 1-6.\n")
+    }
+  }
+}
+
+exclude_samples_by_pattern <- function(all_samples, gs) {
+  cat("\n=== Pattern-Based Sample Exclusion ===\n")
+  cat("This is useful for removing unstained controls, compensation controls, etc.\n")
+  
+  excluded_samples <- character(0)
+  
+  while(TRUE) {
+    cat("\nCurrent samples:", length(all_samples), "\n")
+    cat("Currently excluded:", length(excluded_samples), "\n")
+    
+    if(length(excluded_samples) > 0) {
+      cat("Excluded samples:", paste(head(excluded_samples, 5), collapse = ", "))
+      if(length(excluded_samples) > 5) cat("...")
+      cat("\n")
+    }
+    
+    cat("\nPattern exclusion options:\n")
+    cat("1. Add exclusion pattern\n")
+    cat("2. Remove exclusion pattern\n")
+    cat("3. Preview samples matching pattern\n")
+    cat("4. Common patterns (unstained, compensation, etc.)\n")
+    cat("5. Clear all exclusions\n")
+    cat("6. Finish exclusions\n")
+    
+    choice <- readline("Choose (1-6): ")
+    
+    if(choice == "1") {
+      pattern <- readline("Enter pattern to exclude (case-insensitive regex): ")
+      if(pattern == "") {
+        cat("Empty pattern, skipping\n")
+        next
+      }
+      
+      matches <- grep(pattern, all_samples, ignore.case = TRUE, value = TRUE)
+      if(length(matches) == 0) {
+        cat("No samples match pattern:", pattern, "\n")
+      } else {
+        cat("Pattern '", pattern, "' matches", length(matches), "samples:\n")
+        iwalk(matches, ~cat(sprintf("  %d. %s\n", .y, .x)))
+        
+        confirm <- readline("Exclude these samples? (y/n): ")
+        if(tolower(confirm) == "y") {
+          excluded_samples <- unique(c(excluded_samples, matches))
+          all_samples <- setdiff(all_samples, matches)
+          cat("Excluded", length(matches), "samples\n")
+        }
+      }
+      
+    } else if(choice == "4") {
+      # Common patterns
+      common_patterns <- list(
+        "Unstained" = "unstained|blank|negative",
+        "Compensation" = "comp|compensation",
+        "Controls" = "control|ctrl",
+        "Single stain" = "single|ss[_-]",
+        "FMO" = "fmo|minus.one"
+      )
+      
+      cat("\nCommon exclusion patterns:\n")
+      iwalk(names(common_patterns), ~cat(sprintf("%d. %s (%s)\n", .y, .x, common_patterns[[.x]])))
+      
+      pattern_choice <- readline("Select pattern number or enter custom: ")
+      
+      selected_pattern <- NULL
+      
+      if(grepl("^\\d+$", pattern_choice)) {
+        pattern_num <- as.numeric(pattern_choice)
+        if(!is.na(pattern_num) && pattern_num >= 1 && pattern_num <= length(common_patterns)) {
+          selected_pattern <- common_patterns[[pattern_num]]
+        }
+      } else if(pattern_choice != "") {
+        selected_pattern <- pattern_choice
+      }
+      
+      if(!is.null(selected_pattern)) {
+        matches <- grep(selected_pattern, all_samples, ignore.case = TRUE, value = TRUE)
+        if(length(matches) > 0) {
+          cat("Pattern matches", length(matches), "samples:\n")
+          iwalk(matches, ~cat(sprintf("  %d. %s\n", .y, .x)))
+          
+          confirm <- readline("Exclude these samples? (y/n): ")
+          if(tolower(confirm) == "y") {
+            excluded_samples <- unique(c(excluded_samples, matches))
+            all_samples <- setdiff(all_samples, matches)
+            cat("Excluded", length(matches), "samples\n")
+          }
+        } else {
+          cat("No samples match this pattern\n")
+        }
+      } else {
+        cat("Invalid selection\n")
+      }
+      
+    } else if(choice == "6") {
+      break
+    } else {
+      cat("Option not yet implemented or invalid choice\n")
+    }
+  }
+  
+  remaining_samples <- setdiff(sampleNames(gs), excluded_samples)
+  cat("\nFinal sample count:", length(remaining_samples), "(excluded", length(excluded_samples), ")\n")
+  
+  return(remaining_samples)
+}
+
+exclude_samples_interactive <- function(all_samples) {
+  cat("\n=== Interactive Sample Selection for Exclusion ===\n")
+  cat("Select samples to EXCLUDE from analysis\n")
+  
+  selected_for_exclusion <- select.list(
+    all_samples, 
+    multiple = TRUE, 
+    title = "Select samples to EXCLUDE (Cancel to skip exclusions)"
+  )
+  
+  if(length(selected_for_exclusion) == 0) {
+    cat("No samples selected for exclusion\n")
+    return(all_samples)
+  }
+  
+  cat("\nSamples selected for exclusion:\n")
+  iwalk(selected_for_exclusion, ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  confirm <- readline(paste0("Exclude these ", length(selected_for_exclusion), " samples? (y/n): "))
+  
+  if(tolower(confirm) == "y") {
+    remaining_samples <- setdiff(all_samples, selected_for_exclusion)
+    cat("Excluded", length(selected_for_exclusion), "samples\n")
+    cat("Remaining samples:", length(remaining_samples), "\n")
+    return(remaining_samples)
+  } else {
+    cat("Exclusion cancelled, keeping all samples\n")
+    return(all_samples)
+  }
+}
+
+exclude_samples_by_metadata <- function(gs, pd) {
+  cat("\n=== Metadata-Based Sample Exclusion ===\n")
+  
+  if(ncol(pd) <= 1) {
+    cat("No metadata columns available for filtering\n")
+    return(sampleNames(gs))
+  }
+  
+  metadata_cols <- setdiff(names(pd), "Sample")
+  cat("Available metadata columns:\n")
+  iwalk(metadata_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  col_choice <- readline("Enter column number or name: ")
+  
+  selected_col <- NULL
+  if(grepl("^\\d+$", col_choice)) {
+    col_num <- as.numeric(col_choice)
+    if(!is.na(col_num) && col_num >= 1 && col_num <= length(metadata_cols)) {
+      selected_col <- metadata_cols[col_num]
+    }
+  } else if(col_choice %in% metadata_cols) {
+    selected_col <- col_choice
+  }
+  
+  if(is.null(selected_col)) {
+    cat("Invalid selection\n")
+    return(sampleNames(gs))
+  }
+  
+  unique_values <- unique(pd[[selected_col]])
+  cat("\nUnique values in", selected_col, ":\n")
+  iwalk(unique_values, ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  values_to_exclude <- select.list(
+    as.character(unique_values), 
+    multiple = TRUE,
+    title = paste("Select", selected_col, "values to EXCLUDE")
+  )
+  
+  if(length(values_to_exclude) == 0) {
+    cat("No values selected for exclusion\n")
+    return(sampleNames(gs))
+  }
+  
+  excluded_samples <- pd %>%
+    filter(.data[[selected_col]] %in% values_to_exclude) %>%
+    pull(Sample)
+  
+  cat("Samples to exclude based on", selected_col, ":\n")
+  iwalk(excluded_samples, ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  confirm <- readline(paste0("Exclude these ", length(excluded_samples), " samples? (y/n): "))
+  
+  if(tolower(confirm) == "y") {
+    remaining_samples <- setdiff(sampleNames(gs), excluded_samples)
+    cat("Excluded", length(excluded_samples), "samples\n")
+    cat("Remaining samples:", length(remaining_samples), "\n")
+    return(remaining_samples)
+  } else {
+    return(sampleNames(gs))
+  }
+}
+
+# ============================================================================
+# INTERACTIVE NODE SELECTION (STREAMLINED)
+# ============================================================================
+
+select_single_node_for_umap <- function(gs) {
+  pops <- get_all_populations(gs)
+  
+  while(TRUE) {
+    cat("\n=== Node Selection for UMAP Analysis ===\n")
+    cat("1. Select from list (interactive)\n")
+    cat("2. Use regex pattern\n") 
+    cat("3. Use leaf names\n")
+    cat("4. Exit/Cancel\n")
+    
+    choice <- readline("Choose method (1-4): ")
+    
+    if(choice == "4") {
+      stop("Node selection cancelled by user.")
+    }
+    
+    result <- switch(choice,
+                     "1" = {
+                       cat("\nAvailable populations:\n")
+                       sel <- select.list(pops, multiple = FALSE, title = "Select ONE population for UMAP")
+                       if(length(sel) == 0) {
+                         cat("No population selected. Going back...\n")
+                         next
+                       }
+                       sel
+                     },
+                     
+                     "2" = {
+                       while(TRUE) {
+                         pattern <- readline("Enter regex pattern or 'back': ")
+                         
+                         if(tolower(pattern) == "back") break
+                         if(pattern == "") {
+                           cat("Empty pattern. Please try again.\n")
+                           next
+                         }
+                         
+                         matches <- grep(pattern, pops, value = TRUE, ignore.case = TRUE)
+                         if(length(matches) == 0) {
+                           cat("No matches found. Try a different pattern.\n")
+                           retry <- readline("Try again? (y/n): ")
+                           if(tolower(retry) != "y") break
+                           next
+                         }
+                         
+                         cat(sprintf("Found %d matches:\n", length(matches)))
+                         iwalk(matches, ~cat(sprintf("%d. %s\n", .y, .x)))
+                         
+                         while(TRUE) {
+                           index <- readline("Enter number of population to select, or 'back': ")
+                           if(tolower(index) == "back") break
+                           
+                           if(grepl("^\\d+$", index)) {
+                             selected_idx <- as.numeric(index)
+                             if(!is.na(selected_idx) && selected_idx >= 1 && selected_idx <= length(matches)) {
+                               return(matches[selected_idx])
+                             }
+                           }
+                           cat("Invalid selection. Please try again.\n")
+                         }
+                       }
+                       NULL
+                     },
+                     
+                     "3" = {
+                       while(TRUE) {
+                         input <- readline("Enter leaf name or 'back': ")
+                         if(tolower(input) == "back") break
+                         if(input == "") {
+                           cat("No leaf name provided. Please try again.\n")
+                           next
+                         }
+                         
+                         matches <- resolve_nodes_by_leaf(gs, input)
+                         
+                         if(length(matches) == 0) {
+                           cat("No matches found for that leaf name.\n")
+                           retry <- readline("Try again? (y/n): ")
+                           if(tolower(retry) != "y") break
+                           next
+                         }
+                         
+                         if(length(matches) == 1) {
+                           return(matches[1])
+                         } else {
+                           cat(sprintf("Found %d matches:\n", length(matches)))
+                           iwalk(matches, ~cat(sprintf("%d. %s\n", .y, .x)))
+                           
+                           while(TRUE) {
+                             index <- readline("Enter number to select, or 'back': ")
+                             if(tolower(index) == "back") break
+                             
+                             if(grepl("^\\d+$", index)) {
+                               selected_idx <- as.numeric(index)
+                               if(!is.na(selected_idx) && selected_idx >= 1 && selected_idx <= length(matches)) {
+                                 return(matches[selected_idx])
+                               }
+                             }
+                             cat("Invalid selection. Please try again.\n")
+                           }
+                         }
+                       }
+                       NULL
+                     },
+                     
+                     {
+                       cat("Invalid choice. Please select 1-4.\n")
+                       NULL
+                     }
+    )
+    
+    if(!is.null(result)) return(result)
+  }
+}
+
+# ============================================================================
+# INTERACTIVE MARKER/CHANNEL SELECTION (STREAMLINED)
+# ============================================================================
+
+select_markers_for_umap <- function(gs) {
+  lookup <- get_marker_lookup(gs)
+  
+  exclude_patterns <- c("FSC", "SSC", "Time", "Event", "Original", "Width", "Height")
+  exclude_regex <- paste0("(?i)", paste(exclude_patterns, collapse = "|"))
+  
+  potential_markers <- lookup %>%
+    filter(!str_detect(colname, exclude_regex)) %>%
+    filter(!str_detect(marker, exclude_regex))
+  
+  comp_channels <- potential_markers %>%
+    filter(str_detect(colname, "(?i)comp")) %>%
+    pull(colname)
+  
+  while(TRUE) {
+    cat("\n=== Marker Selection for UMAP Analysis ===\n")
+    cat("Available markers:", nrow(potential_markers), "\n")
+    if(length(comp_channels) > 0) {
+      cat("Compensated channels found:", length(comp_channels), "\n")
+    }
+    
+    cat("\nRecommendation: Use compensated channels for best results\n")
+    
+    cat("\nOptions:\n")
+    cat("1. Select specific markers/channels\n")
+    cat("2. Use all compensated channels (recommended)\n")
+    cat("3. Use all available channels\n")
+    cat("4. Preview marker distributions\n")
+    cat("5. Back\n")
+    
+    choice <- readline("Choose (1-5): ")
+    
+    switch(choice,
+           "1" = {
+             choices <- paste0(potential_markers$colname, " :: ", potential_markers$marker)
+             sel <- select.list(choices, multiple = TRUE, 
+                                title = "Select markers for UMAP (Cancel to go back)")
+             
+             if(length(sel) == 0) {
+               cat("No markers selected.\n")
+               retry <- readline("Try again? (y/n): ")
+               if(tolower(retry) != "y") next
+               next
+             }
+             
+             if(length(sel) < 2) {
+               cat("UMAP requires at least 2 dimensions. Please select more markers.\n")
+               retry <- readline("Try again? (y/n): ")
+               if(tolower(retry) != "y") next
+               next
+             }
+             
+             selected_channels <- map_chr(sel, ~str_split(.x, " :: ")[[1]][1])
+             selected_markers <- map_chr(sel, ~str_split(.x, " :: ")[[1]][2])
+             
+             cat(sprintf("Selected %d markers:\n", length(selected_channels)))
+             iwalk(selected_channels, ~cat(sprintf("  %d. %s (%s)\n", .y, 
+                                                   selected_markers[.y], .x)))
+             
+             confirm <- readline("Confirm selection? (y/n): ")
+             if(tolower(confirm) == "y") {
+               return(list(
+                 channels = selected_channels,
+                 markers = selected_markers,
+                 lookup = potential_markers %>% filter(colname %in% selected_channels)
+               ))
+             }
+           },
+           
+           "2" = {
+             if(length(comp_channels) == 0) {
+               cat("No compensated channels found. Try option 1 or 3.\n")
+               next
+             }
+             
+             selected_lookup <- potential_markers %>% filter(colname %in% comp_channels)
+             
+             cat(sprintf("Using %d compensated channels:\n", nrow(selected_lookup)))
+             iwalk(selected_lookup$colname, ~cat(sprintf("  %d. %s (%s)\n", .y, 
+                                                         selected_lookup$marker[.y], .x)))
+             
+             confirm <- readline("Confirm compensated channels? (y/n): ")
+             if(tolower(confirm) == "y") {
+               return(list(
+                 channels = selected_lookup$colname,
+                 markers = selected_lookup$marker,
+                 lookup = selected_lookup
+               ))
+             }
+           },
+           
+           "3" = {
+             cat(sprintf("Using all %d available channels:\n", nrow(potential_markers)))
+             cat("First 10 markers:\n")
+             iwalk(head(potential_markers$marker, 10), 
+                   ~cat(sprintf("  %d. %s\n", .y, .x)))
+             if(nrow(potential_markers) > 10) {
+               cat(sprintf("  ... and %d more\n", nrow(potential_markers) - 10))
+             }
+             
+             confirm <- readline("Confirm all channels? (y/n): ")
+             if(tolower(confirm) == "y") {
+               return(list(
+                 channels = potential_markers$colname,
+                 markers = potential_markers$marker,
+                 lookup = potential_markers
+               ))
+             }
+           },
+           
+           "4" = {
+             cat("\n--- Marker Distribution ---\n")
+             cat("Total potential markers:", nrow(potential_markers), "\n")
+             cat("Compensated channels:", length(comp_channels), "\n")
+             
+             cat("\nSample of available markers:\n")
+             sample_markers <- potential_markers %>% 
+               slice_sample(n = min(20, nrow(potential_markers)))
+             iwalk(sample_markers$marker, 
+                   ~cat(sprintf("  %s (%s)\n", .x, sample_markers$colname[.y])))
+             
+             cat("\nPress Enter to continue...")
+             readline()
+             next
+           },
+           
+           "5" = {
+             return("BACK")
+           },
+           
+           {
+             cat("Invalid choice. Please select 1-5.\n")
+           }
+    )
+  }
+}
+
+# ============================================================================
+# ENHANCED SINGLE-CELL DATA EXTRACTION WITH SAMPLE FILTERING
+# ============================================================================
+
+get_population_event_counts <- function(gs, node, selected_samples = NULL) {
+  if(is.null(selected_samples)) {
+    selected_samples <- sampleNames(gs)
+  }
+  
+  cat("Analyzing event counts for node:", basename(node), "\n")
+  cat("Analyzing", length(selected_samples), "samples\n")
+  
+  event_counts <- map_dfr(selected_samples, function(sample_name) {
+    gh <- gs[[sample_name]]
+    
+    if(!node %in% gh_get_pop_paths(gh)) {
+      return(tibble(Sample = sample_name, EventCount = 0))
+    }
+    
+    tryCatch({
+      ff <- gh_pop_get_data(gh, node)
+      if(is.null(ff)) {
+        event_count <- 0
+      } else {
+        event_count <- nrow(if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff))
+      }
+      
+      tibble(Sample = sample_name, EventCount = event_count)
+    }, error = function(e) {
+      tibble(Sample = sample_name, EventCount = 0)
+    })
+  })
+  
+  event_summary <- list(
+    counts = event_counts,
+    total_events = sum(event_counts$EventCount),
+    mean_events = mean(event_counts$EventCount),
+    median_events = median(event_counts$EventCount),
+    min_sample = event_counts[which.min(event_counts$EventCount), ],
+    max_sample = event_counts[which.max(event_counts$EventCount), ],
+    samples_with_zero = sum(event_counts$EventCount == 0)
+  )
+  
+  return(event_summary)
+}
+
+extract_single_cell_data <- function(gs, node, selected_markers, 
+                                     selected_samples = NULL,
+                                     keywords = c("$WELLID", "GROUPNAME"),
+                                     sample_limit = NULL, 
+                                     max_cells_per_sample = 5000) {
+  
+  if(is.null(selected_samples)) {
+    selected_samples <- sampleNames(gs)
+  }
+  
+  cat("Extracting single-cell data from node:", basename(node), "\n")
+  cat("Using", length(selected_samples), "samples\n")
+  
+  tryCatch({
+    if(exists("pData") && is.function(pData)) {
+      pd <- pData(gs) %>% 
+        rownames_to_column("Sample") %>%
+        select(Sample, any_of(keywords))
+    } else {
+      pd <- tibble(Sample = selected_samples)
+    }
+  }, error = function(e) {
+    cat("Warning: Could not load sample metadata, using sample names only\n")
+    pd <- tibble(Sample = selected_samples)
+  })
+  
+  samples_to_process <- selected_samples
+  if(!is.null(sample_limit) && sample_limit < length(samples_to_process)) {
+    samples_to_process <- sample(samples_to_process, sample_limit)
+    cat("Randomly selected", sample_limit, "samples for analysis\n")
+  }
+  
+  all_data <- map_dfr(samples_to_process, function(sample_name) {
+    cat("Processing sample:", sample_name, "\n")
+    
+    gh <- gs[[sample_name]]
+    
+    if(!node %in% gh_get_pop_paths(gh)) {
+      cat("  Node not found in sample, skipping\n")
+      return(tibble())
+    }
+    
+    tryCatch({
+      ff <- gh_pop_get_data(gh, node)
+      
+      if(is.null(ff)) {
+        cat("  No data found, skipping\n")
+        return(tibble())
+      }
+      
+      expr_data <- if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
+      
+      available_channels <- intersect(selected_markers$channels, colnames(expr_data))
+      
+      if(length(available_channels) == 0) {
+        cat("  No selected channels found, skipping\n")
+        return(tibble())
+      }
+      
+      cell_data <- as_tibble(expr_data[, available_channels, drop = FALSE])
+      
+      if(nrow(cell_data) > max_cells_per_sample) {
+        cell_data <- slice_sample(cell_data, n = max_cells_per_sample)
+        cat("  Subsampled to", max_cells_per_sample, "cells\n")
+      }
+      
+      cell_data <- cell_data %>%
+        mutate(
+          Sample = sample_name,
+          CellID = paste0(sample_name, "_", row_number()),
+          .before = 1
+        )
+      
+      cat("  Extracted", nrow(cell_data), "cells\n")
+      return(cell_data)
+      
+    }, error = function(e) {
+      cat("  Error processing sample:", e$message, "\n")
+      return(tibble())
+    })
+  })
+  
+  if(nrow(all_data) == 0) {
+    stop("No single-cell data extracted. Check node selection and markers.")
+  }
+  
+  marker_lookup <- selected_markers$lookup %>%
+    select(colname, marker) %>%
+    deframe()
+  
+  for(channel in names(marker_lookup)) {
+    if(channel %in% names(all_data)) {
+      names(all_data)[names(all_data) == channel] <- marker_lookup[channel]
+    }
+  }
+  
+  all_data <- all_data %>%
+    left_join(pd, by = "Sample")
+  
+  cat("Final dataset:", nrow(all_data), "cells from", 
+      n_distinct(all_data$Sample), "samples\n")
+  cat("Markers for UMAP:", paste(marker_lookup, collapse = ", "), "\n")
+  
+  return(list(
+    data = all_data,
+    marker_names = unname(marker_lookup),
+    sample_metadata = pd
+  ))
+}
+
+# ============================================================================
+# ENHANCED UMAP COMPUTATION (ROBUST ERROR HANDLING)
+# ============================================================================
+
+compute_umap_embedding <- function(single_cell_data, 
+                                   n_neighbors = 15, 
+                                   min_dist = 0.1, 
+                                   n_components = 2,
+                                   transform_data = "asinh") {
+  
+  cat("Computing UMAP embedding...\n")
+  
+  metadata_cols <- c("Sample", "CellID")
+  if(!is.null(single_cell_data$sample_metadata)) {
+    metadata_cols <- c(metadata_cols, names(single_cell_data$sample_metadata))
+  }
+  
+  all_cols <- names(single_cell_data$data)
+  numeric_cols <- all_cols[map_lgl(all_cols, ~is.numeric(single_cell_data$data[[.x]]))]
+  marker_cols <- setdiff(numeric_cols, metadata_cols)
+  
+  cat("Using", length(marker_cols), "markers:", paste(marker_cols, collapse = ", "), "\n")
+  
+  umap_matrix <- single_cell_data$data %>%
+    select(all_of(marker_cols)) %>%
+    as.matrix()
+  
+  cat("Data range before transformation: [", min(umap_matrix, na.rm = TRUE), ", ", 
+      max(umap_matrix, na.rm = TRUE), "]\n")
+  
+  if(any(is.na(umap_matrix))) {
+    n_na <- sum(is.na(umap_matrix))
+    cat("Warning:", n_na, "NA values found in data. These will be handled.\n")
+  }
+  
+  if(transform_data == "asinh") {
+    umap_matrix <- asinh(umap_matrix / 5)
+    cat("Applied asinh transformation (cofactor = 5)\n")
+    
+  } else if(transform_data == "log10") {
+    min_val <- min(umap_matrix, na.rm = TRUE)
+    
+    if(min_val <= 0) {
+      shift_amount <- abs(min_val) + 1
+      cat("Shifting data by", shift_amount, "to handle negative/zero values\n")
+      umap_matrix <- umap_matrix + shift_amount
+    } else {
+      umap_matrix <- umap_matrix + 1
+    }
+    
+    umap_matrix <- log10(umap_matrix)
+    cat("Applied log10 transformation\n")
+    
+  } else if(transform_data == "sqrt") {
+    if(any(umap_matrix < 0, na.rm = TRUE)) {
+      min_val <- min(umap_matrix, na.rm = TRUE)
+      shift_amount <- abs(min_val)
+      cat("Shifting data by", shift_amount, "to handle negative values for sqrt\n")
+      umap_matrix <- umap_matrix + shift_amount
+    }
+    
+    umap_matrix <- sqrt(umap_matrix)
+    cat("Applied square root transformation\n")
+    
+  } else {
+    cat("No transformation applied\n")
+  }
+  
+  # Check for NaN/Inf values after transformation
+  if(any(is.nan(umap_matrix)) || any(is.infinite(umap_matrix))) {
+    n_nan <- sum(is.nan(umap_matrix))
+    n_inf <- sum(is.infinite(umap_matrix))
+    
+    if(n_nan > 0) cat("Error: Found", n_nan, "NaN values after transformation\n")
+    if(n_inf > 0) cat("Error: Found", n_inf, "infinite values after transformation\n")
+    
+    # Replace NaN and Inf with median values
+    for(i in 1:ncol(umap_matrix)) {
+      col_data <- umap_matrix[, i]
+      if(any(is.nan(col_data) | is.infinite(col_data))) {
+        median_val <- median(col_data[is.finite(col_data)], na.rm = TRUE)
+        if(is.na(median_val)) median_val <- 0
+        
+        umap_matrix[is.nan(col_data) | is.infinite(col_data), i] <- median_val
+        cat("Replaced problematic values in", marker_cols[i], "with median:", median_val, "\n")
+      }
+    }
+  }
+  
+  # Final check for remaining NA values
+  if(any(is.na(umap_matrix))) {
+    for(i in 1:ncol(umap_matrix)) {
+      col_data <- umap_matrix[, i]
+      if(any(is.na(col_data))) {
+        median_val <- median(col_data, na.rm = TRUE)
+        if(is.na(median_val)) median_val <- 0
+        
+        umap_matrix[is.na(col_data), i] <- median_val
+        cat("Replaced NA values in", marker_cols[i], "with median:", median_val, "\n")
+      }
+    }
+  }
+  
+  cat("Data range after transformation: [", min(umap_matrix), ", ", max(umap_matrix), "]\n")
+  
+  # UMAP configuration
+  umap_config <- umap.defaults
+  umap_config$n_neighbors <- n_neighbors
+  umap_config$min_dist <- min_dist
+  umap_config$n_components <- n_components
+  umap_config$random_state <- 42
+  
+  # Compute UMAP
+  cat("Running UMAP with", n_neighbors, "neighbors and", min_dist, "min_dist...\n")
+  
+  tryCatch({
+    umap_result <- umap(umap_matrix, config = umap_config)
+  }, error = function(e) {
+    cat("UMAP failed with error:", e$message, "\n")
+    cat("This might be due to data scaling issues. Trying with scaled data...\n")
+    
+    # Try with scaled data as fallback
+    umap_matrix_scaled <- scale(umap_matrix)
+    
+    # Replace any NaN values from scaling
+    if(any(is.nan(umap_matrix_scaled))) {
+      umap_matrix_scaled[is.nan(umap_matrix_scaled)] <- 0
+    }
+    
+    umap_result <- umap(umap_matrix_scaled, config = umap_config)
+    cat("UMAP successful with scaled data\n")
+    return(umap_result)
+  }) -> umap_result
+  
+  # Add UMAP coordinates to original data
+  umap_data <- single_cell_data$data %>%
+    mutate(
+      UMAP1 = umap_result$layout[,1],
+      UMAP2 = umap_result$layout[,2]
+    )
+  
+  if(n_components > 2) {
+    for(i in 3:n_components) {
+      umap_data[[paste0("UMAP", i)]] <- umap_result$layout[,i]
+    }
+  }
+  
+  cat("UMAP computation complete!\n")
+  
+  return(list(
+    data = umap_data,
+    embedding = umap_result,
+    marker_names = marker_cols,
+    config = umap_config,
+    transformation = transform_data
+  ))
+}
+
+# ============================================================================
+# GLOBAL SESSION ENVIRONMENT
+# ============================================================================
+
+.umap_session_plots <- new.env()
+
+# ============================================================================
+# SESSION INITIALIZATION
+# ============================================================================
+
+initialize_visualization_session <- function(umap_result) {
+  cat("Setting up visualization session...\n")
+  
+  .umap_session_plots$umap_data <- umap_result$data
+  .umap_session_plots$plots <- list()
+  .umap_session_plots$plot_counter <- 0
+  
+  marker_cols <- umap_result$marker_names
+  coord_cols <- c("UMAP1", "UMAP2", "CellID")
+  
+  available_metadata <- setdiff(names(umap_result$data), c(marker_cols, coord_cols))
+  .umap_session_plots$metadata_cols <- available_metadata
+  .umap_session_plots$marker_names <- marker_cols
+  
+  cat("Session initialized with:\n")
+  cat("- Cells:", scales::comma(nrow(umap_result$data)), "\n")
+  cat("- Markers:", length(marker_cols), "\n")
+  cat("- Metadata columns:", length(available_metadata), "\n")
+  cat("- Available metadata:", paste(available_metadata, collapse = ", "), "\n\n")
+  
+  invisible(TRUE)
+}
+
+# ============================================================================
+# ENHANCED INTERACTIVE VISUALIZATION WITH CONSISTENT CHOICE MENUS
+# ============================================================================
+
+# Helper function for consistent menu selection
+select_from_menu <- function(options, title, allow_multiple = FALSE, show_preview = TRUE) {
+  if (length(options) == 0) {
+    cat("No options available\n")
+    return(NULL)
+  }
+  
+  cat("\n", title, "\n")
+  cat(strrep("=", nchar(title)), "\n")
+  
+  # Show preview if requested and many options
+  if (show_preview && length(options) > 20) {
+    cat("Showing first 20 options (", length(options), "total):\n")
+    display_options <- head(options, 20)
+    cat("...\n")
+  } else {
+    display_options <- options
+  }
+  
+  iwalk(display_options, ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  if (length(options) > 20) {
+    cat(sprintf("... and %d more options\n", length(options) - 20))
+    cat("Enter 'all' to see all options\n")
+  }
+  
+  while (TRUE) {
+    prompt <- if (allow_multiple) {
+      "Enter choice(s) (numbers/ranges like 1,3,5-8 or 'all'): "
+    } else {
+      "Enter choice number: "
+    }
+    
+    choice <- readline(prompt)
+    
+    if (choice == "") {
+      cat("No selection made\n")
+      return(NULL)
+    }
+    
+    if (tolower(choice) == "all") {
+      if (length(options) > 20) {
+        cat("\nAll available options:\n")
+        iwalk(options, ~cat(sprintf("%d. %s\n", .y, .x)))
+        next
+      } else {
+        return(if (allow_multiple) options else options[1])
+      }
+    }
+    
+    # Parse selection
+    selected_indices <- parse_selection(choice, length(options))
+    
+    if (length(selected_indices) == 0) {
+      cat("Invalid selection. Please try again.\n")
+      next
+    }
+    
+    if (!allow_multiple && length(selected_indices) > 1) {
+      cat("Multiple selections not allowed. Using first selection.\n")
+      selected_indices <- selected_indices[1]
+    }
+    
+    return(options[selected_indices])
+  }
+}
+
+# Parse selection input (handles ranges, comma-separated values)
+parse_selection <- function(input, max_value) {
+  tryCatch({
+    parts <- str_trim(str_split(input, ",")[[1]])
+    indices <- numeric(0)
+    
+    for (part in parts) {
+      if (str_detect(part, "-")) {
+        range_parts <- as.numeric(str_split(part, "-")[[1]])
+        if (length(range_parts) == 2 && all(!is.na(range_parts))) {
+          start_idx <- range_parts[1]
+          end_idx <- range_parts[2]
+          if (start_idx >= 1 && end_idx <= max_value && start_idx <= end_idx) {
+            indices <- c(indices, start_idx:end_idx)
+          }
+        }
+      } else if (str_detect(part, "^\\d+$")) {
+        idx <- as.numeric(part)
+        if (!is.na(idx) && idx >= 1 && idx <= max_value) {
+          indices <- c(indices, idx)
+        }
+      }
+    }
+    
+    return(unique(indices))
+  }, error = function(e) {
+    return(numeric(0))
+  })
+}
+
+# Enhanced variable selection with consistent menus
+select_visualization_variable <- function(marker_names, metadata_cols, 
+                                          purpose = "coloring", allow_multiple = FALSE) {
+  
+  cat("\n=== Variable Selection for", str_to_title(purpose), "===\n")
+  
+  all_options <- c()
+  option_labels <- c()
+  
+  if (length(metadata_cols) > 0) {
+    metadata_labels <- paste0(metadata_cols, " (metadata)")
+    all_options <- c(all_options, metadata_cols)
+    option_labels <- c(option_labels, metadata_labels)
+  }
+  
+  if (length(marker_names) > 0) {
+    marker_labels <- paste0(marker_names, " (marker)")
+    all_options <- c(all_options, marker_names)
+    option_labels <- c(option_labels, marker_labels)
+  }
+  
+  if (length(all_options) == 0) {
+    cat("No variables available for", purpose, "\n")
+    return(NULL)
+  }
+  
+  # Show categorized menu
+  cat("Available variables:\n")
+  
+  counter <- 1
+  if (length(metadata_cols) > 0) {
+    cat("\nMETADATA VARIABLES:\n")
+    for (i in seq_along(metadata_cols)) {
+      cat(sprintf("%d. %s\n", counter, metadata_cols[i]))
+      counter <- counter + 1
+    }
+  }
+  
+  if (length(marker_names) > 0) {
+    cat("\nMARKER VARIABLES:\n")
+    for (i in seq_along(marker_names)) {
+      cat(sprintf("%d. %s\n", counter, marker_names[i]))
+      counter <- counter + 1
+    }
+  }
+  
+  selected <- select_from_menu(
+    all_options, 
+    paste("Select variable(s) for", purpose),
+    allow_multiple = allow_multiple,
+    show_preview = FALSE
+  )
+  
+  return(selected)
+}
+
+# Create and save UMAP plot function
+create_and_save_umap_plot <- function(color_by = NULL, facet_by = NULL, 
+                                      title = NULL, filename = NULL, 
+                                      plot_type = "scatter") {
+  
+  umap_data <- .umap_session_plots$umap_data
+  
+  if (is.null(title)) {
+    title_parts <- c("UMAP")
+    if (!is.null(color_by)) title_parts <- c(title_parts, paste("colored by", color_by))
+    if (!is.null(facet_by)) title_parts <- c(title_parts, paste("faceted by", facet_by))
+    title <- paste(title_parts, collapse = " ")
+  }
+  
+  p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2))
+  
+  if (plot_type == "density") {
+    p <- p + 
+      stat_density_2d_filled(alpha = 0.7) +
+      scale_fill_viridis_d(option = "plasma") +
+      theme_void() +
+      theme(legend.position = "none")
+    
+  } else {
+    # Regular scatter plot
+    if (is.null(color_by)) {
+      p <- p + geom_point(color = "steelblue", alpha = 0.6, size = 0.3)
+    } else {
+      if (color_by %in% .umap_session_plots$marker_names) {
+        # Marker expression - continuous scale
+        p <- p + 
+          geom_point(aes_string(color = color_by), alpha = 0.6, size = 0.3) +
+          scale_color_viridis_c(option = "plasma") +
+          guides(color = guide_colorbar())
+      } else {
+        # Metadata - discrete scale
+        p <- p + 
+          geom_point(aes_string(color = color_by), alpha = 0.6, size = 0.3) +
+          guides(color = guide_legend(override.aes = list(size = 2, alpha = 1)))
+      }
+    }
+  }
+  
+  # Add faceting if specified
+  if (!is.null(facet_by)) {
+    # For marker faceting, create discrete bins
+    if (facet_by %in% .umap_session_plots$marker_names) {
+      marker_values <- umap_data[[facet_by]]
+      breaks <- quantile(marker_values, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE)
+      umap_data[[paste0(facet_by, "_level")]] <- cut(marker_values, 
+                                                     breaks = breaks,
+                                                     labels = c("Low", "Medium", "High"),
+                                                     include.lowest = TRUE)
+      p <- p + facet_wrap(as.formula(paste("~", paste0(facet_by, "_level"))), scales = "free")
+    } else {
+      p <- p + facet_wrap(as.formula(paste("~", facet_by)), scales = "free")
+    }
+  }
+  
+  # Apply theme
+  p <- p +
+    labs(title = title) +
+    theme_minimal() +
+    theme(
+      legend.position = "right",
+      panel.grid = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    )
+  
+  if (!is.null(facet_by)) {
+    p <- p + theme(
+      strip.background = element_rect(fill = "lightgray", color = "black"),
+      strip.text = element_text(face = "bold")
+    )
+  }
+  
+  print(p)
+  
+  # Store plot
+  .umap_session_plots$plot_counter <<- .umap_session_plots$plot_counter + 1
+  plot_id <- paste0("plot_", .umap_session_plots$plot_counter)
+  
+  plot_info <- list(
+    plot = p,
+    color_by = color_by,
+    facet_by = facet_by,
+    plot_type = plot_type,
+    title = title,
+    timestamp = Sys.time()
+  )
+  
+  .umap_session_plots$plots[[plot_id]] <<- plot_info
+  
+  # Save if filename provided
+  if (!is.null(filename) && filename != "") {
+    if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
+      filename <- paste0(filename, ".png")
+    }
+    
+    tryCatch({
+      ggsave(filename, plot = p, width = 10, height = 8, dpi = 300)
+      cat("Plot saved as:", filename, "\n")
+    }, error = function(e) {
+      cat("Error saving plot:", e$message, "\n")
+    })
+  }
+  
+  cat("Plot created and stored as:", plot_id, "\n")
+  return(plot_id)
+}
+
+# Enhanced multi-marker heatmap with consistent selection
+create_multi_marker_heatmap <- function() {
+  umap_data <- .umap_session_plots$umap_data
+  marker_names <- .umap_session_plots$marker_names
+  
+  if (length(marker_names) == 0) {
+    cat("No markers available for heatmap\n")
+    return(NULL)
+  }
+  
+  cat("\n=== Multi-Marker Heatmap Creation ===\n")
+  cat("Available markers:", length(marker_names), "\n")
+  
+  # Menu for marker selection strategy
+  selection_options <- c(
+    "Select specific markers",
+    "Use first 9 markers (3x3 grid)",
+    "Use all markers",
+    "Show marker list and return"
+  )
+  
+  strategy <- select_from_menu(
+    selection_options,
+    "Choose marker selection strategy"
+  )
+  
+  if (is.null(strategy)) return(NULL)
+  
+  selected_markers <- switch(
+    strategy,
+    "Select specific markers" = {
+      select_from_menu(
+        marker_names,
+        "Select markers for heatmap (max 16 recommended)",
+        allow_multiple = TRUE
+      )
+    },
+    "Use first 9 markers (3x3 grid)" = {
+      n_markers <- min(9, length(marker_names))
+      head(marker_names, n_markers)
+    },
+    "Use all markers" = {
+      if (length(marker_names) > 16) {
+        cat("Warning: Using all", length(marker_names), "markers may create a crowded plot\n")
+        confirm_options <- c("Yes, continue", "No, go back")
+        confirm <- select_from_menu(confirm_options, "Continue with all markers?")
+        if (is.null(confirm) || confirm == "No, go back") return(NULL)
+      }
+      marker_names
+    },
+    "Show marker list and return" = {
+      cat("\nAll available markers:\n")
+      iwalk(marker_names, ~cat(sprintf("%d. %s\n", .y, .x)))
+      readline("Press Enter to continue...")
+      return(NULL)
+    }
+  )
+  
+  if (is.null(selected_markers) || length(selected_markers) == 0) {
+    cat("No markers selected\n")
+    return(NULL)
+  }
+  
+  cat("Creating heatmap with", length(selected_markers), "markers\n")
+  
+  # Create individual plots for each marker
+  marker_plots <- map(selected_markers, function(marker) {
+    ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = .data[[marker]])) +
+      geom_point(size = 0.1, alpha = 0.5) +
+      scale_color_viridis_c(name = "", option = "plasma") +
+      labs(title = marker) +
+      theme_void() +
+      theme(
+        plot.title = element_text(size = 10, hjust = 0.5),
+        legend.key.size = unit(0.3, "cm"),
+        legend.text = element_text(size = 6)
+      )
+  })
+  
+  # Determine optimal grid layout
+  n_markers <- length(selected_markers)
+  ncol_grid <- case_when(
+    n_markers <= 4 ~ 2,
+    n_markers <= 9 ~ 3,
+    n_markers <= 16 ~ 4,
+    TRUE ~ ceiling(sqrt(n_markers))
+  )
+  
+  # Arrange in grid
+  combined_plot <- wrap_plots(marker_plots, ncol = ncol_grid)
+  
+  # Store and display
+  .umap_session_plots$plot_counter <<- .umap_session_plots$plot_counter + 1
+  plot_id <- paste0("plot_", .umap_session_plots$plot_counter)
+  
+  plot_title <- paste("Multi-marker heatmap (", length(selected_markers), "markers)")
+  
+  plot_info <- list(
+    plot = combined_plot,
+    color_by = "multiple_markers",
+    facet_by = NULL,
+    plot_type = "heatmap",
+    title = plot_title,
+    markers_used = selected_markers,
+    timestamp = Sys.time()
+  )
+  
+  .umap_session_plots$plots[[plot_id]] <<- plot_info
+  print(combined_plot)
+  
+  # Save option
+  save_options <- c("Yes, save plot", "No, continue without saving")
+  save_choice <- select_from_menu(save_options, "Save this heatmap?")
+  
+  if (!is.null(save_choice) && save_choice == "Yes, save plot") {
+    filename <- readline("Enter filename: ")
+    if (filename != "") {
+      if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
+        filename <- paste0(filename, ".png")
+      }
+      
+      # Adjust size based on number of markers
+      width <- max(8, ceiling(ncol_grid * 2.5))
+      height <- max(6, ceiling((length(marker_plots) / ncol_grid) * 2))
+      
+      tryCatch({
+        ggsave(filename, plot = combined_plot, width = width, height = height, dpi = 300)
+        cat("Heatmap saved as:", filename, "\n")
+      }, error = function(e) {
+        cat("Error saving plot:", e$message, "\n")
+      })
+    }
+  }
+  
+  cat("Plot created and stored as:", plot_id, "\n")
+  return(plot_id)
+}
+
+# Enhanced density plot creation
+create_density_plot <- function() {
+  umap_data <- .umap_session_plots$umap_data
+  metadata_cols <- .umap_session_plots$metadata_cols
+  marker_names <- .umap_session_plots$marker_names
+  all_options <- c(metadata_cols, marker_names)
+  
+  cat("\n=== Density Plot Creation ===\n")
+  
+  density_options <- c(
+    "Overall density (no grouping)",
+    "Density faceted by variable"
+  )
+  
+  density_type <- select_from_menu(density_options, "Choose density plot type")
+  
+  if (is.null(density_type)) return(NULL)
+  
+  facet_var <- NULL
+  if (density_type == "Density faceted by variable") {
+    # Filter to categorical variables
+    categorical_vars <- all_options[map_lgl(all_options, ~!is.numeric(umap_data[[.x]]))]
+    
+    if (length(categorical_vars) == 0) {
+      cat("No categorical variables available for faceting\n")
+      return(NULL)
+    }
+    
+    facet_var <- select_from_menu(
+      categorical_vars,
+      "Select variable for faceting"
+    )
+    
+    if (is.null(facet_var)) return(NULL)
+  }
+  
+  # Save option
+  save_options <- c("Yes, save plot", "No, continue without saving")
+  save_choice <- select_from_menu(save_options, "Save this plot?")
+  
+  filename <- NULL
+  if (!is.null(save_choice) && save_choice == "Yes, save plot") {
+    filename <- readline("Enter filename: ")
+    if (filename == "") filename <- NULL
+  }
+  
+  create_and_save_umap_plot(
+    facet_by = facet_var,
+    plot_type = "density",
+    filename = filename
+  )
+}
+
+# Enhanced plot management
+manage_stored_plots <- function() {
+  if (length(.umap_session_plots$plots) == 0) {
+    cat("No plots stored in current session\n")
+    return(NULL)
+  }
+  
+  while (TRUE) {
+    cat("\n=== Stored Plot Management ===\n")
+    cat("Total plots:", length(.umap_session_plots$plots), "\n\n")
+    
+    # Show plot list
+    plot_info <- map_chr(names(.umap_session_plots$plots), function(plot_id) {
+      plot_data <- .umap_session_plots$plots[[plot_id]]
+      info_parts <- c(plot_data$title)
+      if (!is.null(plot_data$color_by)) {
+        info_parts <- c(info_parts, paste("color:", plot_data$color_by))
+      }
+      if (!is.null(plot_data$facet_by)) {
+        info_parts <- c(info_parts, paste("facet:", plot_data$facet_by))
+      }
+      info_parts <- c(info_parts, format(plot_data$timestamp, "%H:%M:%S"))
+      paste(info_parts, collapse = " | ")
+    })
+    
+    management_options <- c(
+      "Display a plot",
+      "Save a plot to file", 
+      "Export all plots",
+      "Delete a plot",
+      "Clear all plots",
+      "Return to main menu"
+    )
+    
+    action <- select_from_menu(management_options, "Choose action")
+    
+    if (is.null(action) || action == "Return to main menu") {
+      break
+    }
+    
+    if (action %in% c("Display a plot", "Save a plot to file", "Delete a plot")) {
+      selected_plot_id <- select_from_menu(
+        names(.umap_session_plots$plots),
+        paste("Select plot to", tolower(str_remove(action, " a plot| to file")))
+      )
+      
+      if (is.null(selected_plot_id)) next
+      
+      if (action == "Display a plot") {
+        print(.umap_session_plots$plots[[selected_plot_id]]$plot)
+        
+      } else if (action == "Save a plot to file") {
+        filename <- readline("Enter filename: ")
+        if (filename != "") {
+          if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
+            filename <- paste0(filename, ".png")
+          }
+          tryCatch({
+            ggsave(filename, plot = .umap_session_plots$plots[[selected_plot_id]]$plot)
+            cat("Plot saved as:", filename, "\n")
+          }, error = function(e) {
+            cat("Error saving plot:", e$message, "\n")
+          })
+        }
+        
+      } else if (action == "Delete a plot") {
+        confirm_options <- c("Yes, delete", "No, cancel")
+        confirm <- select_from_menu(confirm_options, "Confirm deletion")
+        if (!is.null(confirm) && confirm == "Yes, delete") {
+          .umap_session_plots$plots[[selected_plot_id]] <<- NULL
+          cat("Plot", selected_plot_id, "deleted\n")
+        }
+      }
+      
+    } else if (action == "Export all plots") {
+      directory <- readline("Export directory (default: umap_plots): ")
+      if (directory == "") directory <- "umap_plots"
+      export_all_session_plots(directory)
+      
+    } else if (action == "Clear all plots") {
+      confirm_options <- c("Yes, clear all", "No, cancel")
+      confirm <- select_from_menu(confirm_options, "Clear all plots?")
+      if (!is.null(confirm) && confirm == "Yes, clear all") {
+        .umap_session_plots$plots <<- list()
+        .umap_session_plots$plot_counter <<- 0
+        cat("All plots cleared\n")
+      }
+    }
+  }
+}
+
+# Main enhanced interactive visualization menu
+interactive_visualization_menu <- function() {
+  if (length(.umap_session_plots) == 0) {
+    cat("No active visualization session. Please run analyze_flow_umap_enhanced() first.\n")
+    return(NULL)
+  }
+  
+  umap_data <- .umap_session_plots$umap_data
+  marker_names <- .umap_session_plots$marker_names
+  metadata_cols <- .umap_session_plots$metadata_cols
+  
+  while (TRUE) {
+    cat("\n=== Interactive UMAP Visualization Menu ===\n")
+    cat("Current session:", scales::comma(nrow(umap_data)), "cells\n")
+    cat("Stored plots:", length(.umap_session_plots$plots), "\n")
+    cat("Available variables:", length(c(metadata_cols, marker_names)), 
+        "(", length(metadata_cols), "metadata,", length(marker_names), "markers)\n\n")
+    
+    main_options <- c(
+      "Create basic UMAP plot",
+      "Color by variable", 
+      "Facet by variable",
+      "Color AND facet",
+      "Create density plot",
+      "Multi-marker heatmap overlay",
+      "Manage stored plots",
+      "Session summary",
+      "Exit visualization"
+    )
+    
+    choice <- select_from_menu(main_options, "Choose visualization option")
+    
+    if (is.null(choice) || choice == "Exit visualization") {
+      cat("Exiting visualization menu\n")
+      break
+    }
+    
+    # Execute selected action
+    if (choice == "Create basic UMAP plot") {
+      save_options <- c("Yes, save plot", "No, continue without saving")
+      save_choice <- select_from_menu(save_options, "Save this plot?")
+      
+      filename <- NULL
+      if (!is.null(save_choice) && save_choice == "Yes, save plot") {
+        filename <- readline("Enter filename: ")
+        if (filename == "") filename <- NULL
+      }
+      
+      create_and_save_umap_plot(title = "Basic UMAP", filename = filename)
+      
+    } else if (choice == "Color by variable") {
+      color_var <- select_visualization_variable(
+        marker_names, metadata_cols, "coloring"
+      )
+      
+      if (!is.null(color_var)) {
+        var_type <- if (color_var %in% marker_names) "marker" else "metadata"
+        plot_title <- paste("UMAP colored by", color_var, "(", var_type, ")")
+        
+        save_options <- c("Yes, save plot", "No, continue without saving")
+        save_choice <- select_from_menu(save_options, "Save this plot?")
+        
+        filename <- NULL
+        if (!is.null(save_choice) && save_choice == "Yes, save plot") {
+          filename <- readline("Enter filename: ")
+          if (filename == "") filename <- NULL
+        }
+        
+        create_and_save_umap_plot(
+          color_by = color_var,
+          title = plot_title,
+          filename = filename
+        )
+      }
+      
+    } else if (choice == "Facet by variable") {
+      all_options <- c(metadata_cols, marker_names)
+      # Include both categorical variables AND markers (markers will be binned automatically)
+      categorical_vars <- all_options[map_lgl(all_options, ~!is.numeric(umap_data[[.x]]))]
+      
+      # Combine categorical metadata with all markers
+      facet_options <- c(categorical_vars, marker_names)
+      
+      if (length(facet_options) == 0) {
+        cat("No variables available for faceting\n")
+        next
+      }
+      
+      facet_var <- select_from_menu(
+        facet_options,
+        "Select variable for faceting (markers will be auto-binned)"
+      )
+      
+      if (!is.null(facet_var)) {
+        save_options <- c("Yes, save plot", "No, continue without saving")
+        save_choice <- select_from_menu(save_options, "Save this plot?")
+        
+        filename <- NULL
+        if (!is.null(save_choice) && save_choice == "Yes, save plot") {
+          filename <- readline("Enter filename: ")
+          if (filename == "") filename <- NULL
+        }
+        
+        create_and_save_umap_plot(facet_by = facet_var, filename = filename)
+      }
+      
+    } else if (choice == "Color AND facet") {
+      all_options <- c(metadata_cols, marker_names)
+      
+      # Step 1: Color variable
+      color_var <- select_visualization_variable(
+        marker_names, metadata_cols, "coloring"
+      )
+      
+      if (is.null(color_var)) next
+      
+      # Step 2: Facet variable (exclude color variable and include both categorical and markers)
+      categorical_vars <- all_options[map_lgl(all_options, ~!is.numeric(umap_data[[.x]]))]
+      remaining_markers <- setdiff(marker_names, color_var)
+      
+      # Combine remaining categorical metadata with remaining markers
+      available_facet_vars <- c(setdiff(categorical_vars, color_var), remaining_markers)
+      
+      if (length(available_facet_vars) == 0) {
+        cat("No additional variables available for faceting\n")
+        next
+      }
+      
+      facet_var <- select_from_menu(
+        available_facet_vars,
+        "Select variable for faceting (markers will be auto-binned)"
+      )
+      
+      if (!is.null(facet_var)) {
+        save_options <- c("Yes, save plot", "No, continue without saving")
+        save_choice <- select_from_menu(save_options, "Save this plot?")
+        
+        filename <- NULL
+        if (!is.null(save_choice) && save_choice == "Yes, save plot") {
+          filename <- readline("Enter filename: ")
+          if (filename == "") filename <- NULL
+        }
+        
+        create_and_save_umap_plot(
+          color_by = color_var,
+          facet_by = facet_var,
+          filename = filename
+        )
+      }
+      
+    } else if (choice == "Create density plot") {
+      create_density_plot()
+      
+    } else if (choice == "Multi-marker heatmap overlay") {
+      create_multi_marker_heatmap()
+      
+    } else if (choice == "Manage stored plots") {
+      manage_stored_plots()
+      
+    } else if (choice == "Session summary") {
+      cat("\n=== Session Summary ===\n")
+      cat("Cells:", scales::comma(nrow(umap_data)), "\n")
+      cat("Markers:", length(marker_names), "\n")
+      cat("Metadata columns:", length(metadata_cols), "\n")
+      cat("Stored plots:", length(.umap_session_plots$plots), "\n\n")
+      
+      if (length(marker_names) > 0) {
+        cat("Markers:", paste(marker_names, collapse = ", "), "\n")
+      }
+      if (length(metadata_cols) > 0) {
+        cat("Metadata:", paste(metadata_cols, collapse = ", "), "\n")
+      }
+      
+      if (length(.umap_session_plots$plots) > 0) {
+        cat("\nPlot history:\n")
+        iwalk(.umap_session_plots$plots, function(plot_info, plot_id) {
+          cat(sprintf("- %s: %s\n", plot_id, plot_info$title))
+        })
+      }
+      
+      readline("Press Enter to continue...")
+    }
+  }
+  
+  return(invisible(.umap_session_plots))
+}
+
+# ============================================================================
+# ROBUST EXTERNAL METADATA IMPORT (OPTIONAL)
+# ============================================================================
+
+import_external_metadata <- function(gs) {
+  cat("\n=== External Metadata Import ===\n")
+  cat("This function will help you import and merge external metadata\n")
+  cat("with your flow cytometry samples.\n\n")
+  
+  current_samples <- sampleNames(gs)
+  cat("Current samples in gating set:", length(current_samples), "\n")
+  cat("Sample preview:", paste(head(current_samples, 3), collapse = ", "), "...\n\n")
+  
+  while(TRUE) {
+    cat("Metadata Import Options:\n")
+    cat("1. Load from CSV file\n")
+    cat("2. Load from R object in environment\n")
+    cat("3. Skip metadata import\n")
+    
+    choice <- readline("Choose option (1-3): ")
+    
+    metadata <- NULL
+    
+    if(choice == "1") {
+      file_path <- readline("Enter CSV file path: ")
+      if(file.exists(file_path)) {
+        tryCatch({
+          metadata <- read_csv(file_path, show_col_types = FALSE)
+          cat("Successfully loaded CSV with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
+        }, error = function(e) {
+          cat("Error loading CSV:", e$message, "\n")
+          next
+        })
+      } else {
+        cat("File not found:", file_path, "\n")
+        next
+      }
+      
+    } else if(choice == "2") {
+      cat("\n=== R Object Metadata Import ===\n")
+      cat("Available objects in environment:\n")
+      objects_list <- ls(envir = .GlobalEnv)
+      data_objects <- objects_list[sapply(objects_list, function(x) {
+        obj <- get(x, envir = .GlobalEnv)
+        is.data.frame(obj) || is_tibble(obj)
+      })]
+      
+      if(length(data_objects) == 0) {
+        cat("No data frame objects found in global environment\n")
+        next
+      }
+      
+      cat("Data frame objects:\n")
+      iwalk(data_objects, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      obj_choice <- readline("Enter object name or number: ")
+      
+      selected_obj <- NULL
+      if(grepl("^\\d+$", obj_choice)) {
+        obj_num <- as.numeric(obj_choice)
+        if(!is.na(obj_num) && obj_num >= 1 && obj_num <= length(data_objects)) {
+          selected_obj <- data_objects[obj_num]
+        }
+      } else if(obj_choice %in% data_objects) {
+        selected_obj <- obj_choice
+      }
+      
+      if(is.null(selected_obj)) {
+        cat("Invalid selection\n")
+        next
+      }
+      
+      metadata <- get(selected_obj, envir = .GlobalEnv)
+      cat("Using object '", selected_obj, "' with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
+      
+    } else if(choice == "3") {
+      cat("Skipping metadata import\n")
+      return(NULL)
+    } else {
+      cat("Invalid choice\n")
+      next
+    }
+    
+    if(!is.null(metadata)) {
+      cat("\nMetadata preview:\n")
+      print(head(metadata, 5))
+      cat("Column names:", paste(names(metadata), collapse = ", "), "\n\n")
+      
+      cat("Sample ID Column Selection:\n")
+      cat("Available columns:\n")
+      iwalk(names(metadata), ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      sample_col_choice <- readline("Enter column number/name for Sample ID: ")
+      
+      sample_col <- NULL
+      if(grepl("^\\d+$", sample_col_choice)) {
+        col_num <- as.numeric(sample_col_choice)
+        if(!is.na(col_num) && col_num >= 1 && col_num <= ncol(metadata)) {
+          sample_col <- names(metadata)[col_num]
+        }
+      } else if(sample_col_choice %in% names(metadata)) {
+        sample_col <- sample_col_choice
+      }
+      
+      if(is.null(sample_col)) {
+        cat("Invalid selection\n")
+        next
+      }
+      
+      metadata_samples <- metadata[[sample_col]]
+      matched_samples <- intersect(current_samples, metadata_samples)
+      unmatched_gs <- setdiff(current_samples, metadata_samples)
+      unmatched_meta <- setdiff(metadata_samples, current_samples)
+      
+      cat("\nSample Matching Results:\n")
+      cat("Samples in both datasets:", length(matched_samples), "\n")
+      cat("Samples in GatingSet only:", length(unmatched_gs), "\n")
+      cat("Samples in metadata only:", length(unmatched_meta), "\n")
+      
+      if(length(matched_samples) == 0) {
+        cat("No matching samples found! Check sample naming.\n")
+        cat("GatingSet samples preview:", paste(head(current_samples, 3), collapse = ", "), "\n")
+        cat("Metadata samples preview:", paste(head(metadata_samples, 3), collapse = ", "), "\n")
+        next
+      }
+      
+      if(length(unmatched_gs) > 0) {
+        cat("Unmatched GatingSet samples:", paste(head(unmatched_gs, 5), collapse = ", "))
+        if(length(unmatched_gs) > 5) cat("...")
+        cat("\n")
+      }
+      
+      other_cols <- setdiff(names(metadata), sample_col)
+      cat("\nAvailable metadata columns to include:\n")
+      iwalk(other_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      col_selection <- readline("Enter column numbers (space-separated) or 'all' or 'none': ")
+      
+      selected_cols <- NULL
+      if(tolower(col_selection) == "all") {
+        selected_cols <- other_cols
+      } else if(tolower(col_selection) == "none") {
+        cat("No additional metadata columns selected\n")
+        next
+      } else if(col_selection == "") {
+        selected_cols <- other_cols
+        cat("No input provided, using all columns\n")
+      } else {
+        tryCatch({
+          selections <- str_trim(str_split(col_selection, "\\s+")[[1]])
+          selected_cols <- character(0)
+          
+          for(sel in selections) {
+            if(grepl("^\\d+$", sel)) {
+              col_num <- as.numeric(sel)
+              if(!is.na(col_num) && col_num >= 1 && col_num <= length(other_cols)) {
+                selected_cols <- c(selected_cols, other_cols[col_num])
+              }
+            } else if(sel %in% other_cols) {
+              selected_cols <- c(selected_cols, sel)
+            }
+          }
+          
+          selected_cols <- unique(selected_cols)
+          
+          if(length(selected_cols) == 0) {
+            cat("No valid columns selected\n")
+            next
+          }
+          
+        }, error = function(e) {
+          cat("Invalid input format. Using all columns\n")
+          selected_cols <- other_cols
+        })
+      }
+      
+      cat("\nSelected metadata columns:\n")
+      iwalk(selected_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
+      
+      confirm <- readline("Confirm metadata column selection? (y/n): ")
+      if(tolower(confirm) != "y") {
+        cat("Column selection cancelled\n")
+        next
+      }
+      
+      final_metadata <- metadata %>%
+        select(all_of(c(sample_col, selected_cols))) %>%
+        rename(Sample = all_of(sample_col)) %>%
+        filter(Sample %in% current_samples)
+      
+      cat("Final metadata prepared with", nrow(final_metadata), 
+          "samples and", ncol(final_metadata)-1, "metadata columns\n")
+      cat("Final columns:", paste(names(final_metadata), collapse = ", "), "\n")
+      
+      return(final_metadata)
+    }
+  }
+}
+
+# ============================================================================
+# MAIN ENHANCED FUNCTION WITH SAMPLE EXCLUSION
+# ============================================================================
+
+analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME")) {
   
   cat("=== Enhanced Interactive UMAP Analysis for Flow Cytometry ===\n")
   cat("Features:\n")
@@ -7718,7 +9531,6 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
   cat("Mean events per sample:", round(event_summary$mean_events), "\n")
   cat("Samples with zero events:", event_summary$samples_with_zero, "\n")
   
-  # Safe numeric input handling
   sample_limit_input <- readline("Max samples to analyze (Enter for all): ")
   sample_limit <- NULL
   if(sample_limit_input != "" && grepl("^\\d+$", sample_limit_input)) {
@@ -7750,14 +9562,11 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
     external_metadata <- import_external_metadata(gs)
     
     if(!is.null(external_metadata)) {
-      # Merge with existing data
       cat("Merging external metadata with single-cell data...\n")
       
-      # Get current metadata columns to avoid conflicts
       current_meta_cols <- setdiff(names(single_cell_data$data), 
                                    c("CellID", single_cell_data$marker_names))
       
-      # Handle column name conflicts
       ext_meta_cols <- setdiff(names(external_metadata), "Sample")
       conflicting_cols <- intersect(current_meta_cols, ext_meta_cols)
       
@@ -7770,10 +9579,8 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
         }
       }
       
-      # Merge data with many-to-many relationship handling
       original_nrow <- nrow(single_cell_data$data)
       
-      # Check for duplicates before merging
       duplicate_samples_ext <- external_metadata %>%
         count(Sample) %>%
         filter(n > 1)
@@ -7794,6 +9601,7 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
       
       if(nrow(single_cell_data$data) != original_nrow) {
         cat("Warning: Row count changed during merge (", original_nrow, "->", nrow(single_cell_data$data), ")\n")
+        cat("This suggests duplicate Sample IDs. Please check your data.\n")
       } else {
         cat("Merge successful: row count maintained\n")
       }
@@ -7806,7 +9614,6 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
   # Step 6: UMAP parameters
   cat("\n=== UMAP Parameters ===\n")
   
-  # Safe numeric input handling for UMAP parameters
   n_neighbors_input <- readline("Number of neighbors (default 15): ")
   n_neighbors <- 15
   if(n_neighbors_input != "" && grepl("^\\d+$", n_neighbors_input)) {
@@ -7832,7 +9639,7 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
     "2" = "log10", 
     "3" = "sqrt",
     "4" = "none",
-    "asinh"  # default
+    "asinh"
   )
   
   # Step 7: Compute UMAP
@@ -7852,86 +9659,6 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
   cat("You can now create, save, and manage multiple plots in this session.\n")
   
   visualization_results <- interactive_visualization_menu()
-  
-  # Interactive save options
-  if(!auto_save) {
-    cat("\n=== Save UMAP Results ===\n")
-    
-    # Save UMAP data
-    if(!is.null(umap_result$data)) {
-      data_save_choice <- menu(c("Save UMAP data", "Don't save UMAP data"), 
-                               title = "Save UMAP embedding data?")
-      if(data_save_choice == 1) {
-        interactive_save_dataframe(umap_result$data, "umap_embedding_data", "umap")
-      }
-    }
-    
-    # Save session plots
-    if(exists(".umap_session_plots") && length(.umap_session_plots$plots) > 0) {
-      plots_save_choice <- menu(c("Export all session plots", "Export selected plots", "Don't export plots"), 
-                                title = "Export UMAP session plots?")
-      
-      if(plots_save_choice == 1) {
-        timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-        export_dir <- file.path(here::here("out/plots/umap"), paste0("umap_session_", timestamp))
-        dir.create(export_dir, recursive = TRUE)
-        export_all_session_plots(export_dir)
-        
-      } else if(plots_save_choice == 2) {
-        # Use existing manage_stored_plots() function for selected saves
-        cat("Use the visualization menu to save selected plots\n")
-        manage_stored_plots()
-      }
-    }
-    
-    # Save analysis summary
-    summary_save_choice <- menu(c("Save analysis summary", "Don't save summary"), 
-                                title = "Save analysis summary?")
-    if(summary_save_choice == 1) {
-      # Create analysis summary
-      summary_data <- tibble(
-        analysis_date = Sys.time(),
-        node_analyzed = basename(selected_node),
-        markers_used = length(selected_markers$markers),
-        samples_included = length(selected_samples),
-        samples_excluded = length(setdiff(sampleNames(gs), selected_samples)),
-        total_cells = nrow(umap_result$data),
-        plots_created = if(exists(".umap_session_plots")) length(.umap_session_plots$plots) else 0,
-        n_neighbors = n_neighbors,
-        min_dist = min_dist,
-        transformation = transform_data
-      )
-      
-      interactive_save_dataframe(summary_data, "umap_analysis_summary", "processed")
-    }
-    
-    # Save session data for later restart
-    session_save_choice <- menu(c("Save session data", "Don't save session"), 
-                                title = "Save session for later restart?")
-    if(session_save_choice == 1) {
-      timestamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
-      session_filename <- paste0("umap_session_", timestamp, ".rds")
-      session_filepath <- file.path(here::here("out/sessions"), session_filename)
-      
-      session_data <- list(
-        umap_result = umap_result,
-        selected_node = selected_node,
-        selected_markers = selected_markers,
-        selected_samples = selected_samples,
-        external_metadata = external_metadata,
-        single_cell_data = single_cell_data,
-        parameters = list(
-          n_neighbors = n_neighbors,
-          min_dist = min_dist,
-          transform_data = transform_data
-        )
-      )
-      
-      saveRDS(session_data, session_filepath)
-      cat("Session saved to:", session_filepath, "\n")
-      cat("Use readRDS() and restart_visualization_session() to reload\n")
-    }
-  }
   
   # Return comprehensive results
   results <- list(
@@ -7955,87 +9682,177 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
   cat("- Samples excluded:", length(results$excluded_samples), "\n")
   cat("- Cells analyzed:", scales::comma(nrow(results$final_data)), "\n")
   cat("- External metadata:", !is.null(external_metadata), "\n")
-  cat("- Plots created:", if(exists(".umap_session_plots")) length(.umap_session_plots$plots) else 0, "\n")
+  cat("- Plots created:", length(visualization_results$plots), "\n")
   cat("- Session plots stored in global variable for continued access\n")
   
   return(results)
 }
 
 # ============================================================================
-# HELPER FUNCTION: Load and restart UMAP session
+# UTILITY FUNCTIONS FOR ENHANCED FEATURES
 # ============================================================================
 
-restart_umap_session <- function(session_file_path) {
-  cat("Loading UMAP session from:", session_file_path, "\n")
+export_all_session_plots <- function(directory = "umap_plots", 
+                                     width = 8, 
+                                     height = 6, 
+                                     dpi = 300,
+                                     format = "png") {
   
-  if(!file.exists(session_file_path)) {
-    stop("Session file not found: ", session_file_path)
+  if(length(.umap_session_plots$plots) == 0) {
+    cat("No plots to export\n")
+    return(invisible(NULL))
   }
   
-  session_data <- readRDS(session_file_path)
+  if(!dir.exists(directory)) {
+    dir.create(directory, recursive = TRUE)
+    cat("Created directory:", directory, "\n")
+  }
   
-  # Initialize visualization session with loaded data
-  initialize_visualization_session(session_data$umap_result)
+  exported_files <- map_chr(names(.umap_session_plots$plots), function(plot_id) {
+    plot_info <- .umap_session_plots$plots[[plot_id]]
+    
+    clean_title <- str_replace_all(plot_info$title, "[^A-Za-z0-9_-]", "_")
+    clean_title <- str_replace_all(clean_title, "_+", "_")
+    clean_title <- str_trim(clean_title, side = "both")
+    
+    filename <- paste0(plot_id, "_", clean_title, ".", format)
+    filepath <- file.path(directory, filename)
+    
+    tryCatch({
+      ggsave(filepath, plot = plot_info$plot, 
+             width = width, height = height, dpi = dpi)
+      cat("Exported:", filename, "\n")
+      return(filepath)
+    }, error = function(e) {
+      cat("Error exporting", filename, ":", e$message, "\n")
+      return(NA_character_)
+    })
+  })
   
-  cat("Session loaded successfully!\n")
-  cat("- Node:", basename(session_data$selected_node), "\n")
-  cat("- Markers:", length(session_data$selected_markers$markers), "\n")
-  cat("- Cells:", scales::comma(nrow(session_data$umap_result$data)), "\n")
-  cat("- Parameters: neighbors =", session_data$parameters$n_neighbors, 
-      ", min_dist =", session_data$parameters$min_dist, "\n")
+  successful_exports <- sum(!is.na(exported_files))
+  cat("\nExport complete:", successful_exports, "plots exported to", directory, "\n")
   
-  # Start interactive visualization
-  cat("\nStarting visualization menu...\n")
-  interactive_visualization_menu()
-  
-  return(session_data)
+  return(invisible(exported_files[!is.na(exported_files)]))
 }
 
-cat("Complete enhanced heatmap and UMAP functions loaded!\n")
-cat("Functions with save capabilities:\n")
-cat("- create_mfi_heatmaps_interactive_enhanced(mfi_data, auto_save=FALSE)\n")
-cat("- analyze_flow_umap_enhanced(gs, auto_save=FALSE)\n")
-cat("- restart_umap_session(session_file_path) # Load saved sessions\n")
+restart_visualization_session <- function(umap_results) {
+  cat("Restarting visualization session with existing UMAP results...\n")
+  
+  if(is.null(umap_results$umap_result)) {
+    stop("Invalid UMAP results object")
+  }
+  
+  initialize_visualization_session(umap_results$umap_result)
+  interactive_visualization_menu()
+  
+  return(invisible(.umap_session_plots))
+}
 
-# Example workflow:
-# 
-# # 1. Setup your gating set (using your existing function)
-# gs <- setup_flowjo_workspace(
-#   xml_path = here("data/your_workspace.wsp"),
-#   fcs_path = here("data/fcs_files/")
-# )
-# 
-# # 2. Run enhanced interactive UMAP analysis
-#results <- analyze_flow_umap_enhanced(gs)
-# 
-# # 3. Continue visualization session later (plots persist)
-# restart_visualization_session(results)
-# 
-# # 4. Create additional plots from results
-# sample_plot <- create_quick_umap_plot(results, "tissue_factor")
-# print(sample_plot)
-# 
-# # 5. Export data and session
-# export_umap_data(results, "my_analysis.csv")
-# export_all_session_plots("plots", format = "png")
+create_quick_umap_plot <- function(umap_results, color_by, plot_title = NULL) {
+  
+  umap_data <- umap_results$final_data
+  
+  if(!color_by %in% names(umap_data)) {
+    stop("Column '", color_by, "' not found in UMAP data")
+  }
+  
+  if(is.null(plot_title)) {
+    plot_title <- paste("UMAP colored by", color_by)
+  }
+  
+  p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = .data[[color_by]])) +
+    geom_point(size = 0.3, alpha = 0.6) +
+    labs(
+      title = plot_title,
+      subtitle = paste("Total cells:", scales::comma(nrow(umap_data))),
+      color = color_by
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      panel.grid = element_blank(),
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5)
+    )
+  
+  if(is.numeric(umap_data[[color_by]])) {
+    p <- p + scale_color_viridis_c(option = "plasma")
+  } else {
+    n_levels <- n_distinct(umap_data[[color_by]], na.rm = TRUE)
+    if(n_levels <= 12) {
+      p <- p + scale_color_brewer(type = "qual", palette = "Set3")
+    } else {
+      p <- p + scale_color_viridis_d()
+    }
+  }
+  
+  return(p)
+}
 
-#=============================================================================
-# EXAMPLE USAGE
+export_umap_data <- function(umap_results, filename = "umap_data.csv") {
+  
+  export_data <- umap_results$final_data %>%
+    select(-CellID)
+  
+  write_csv(export_data, filename)
+  cat("UMAP data exported to:", filename, "\n")
+  cat("Columns exported:", paste(names(export_data), collapse = ", "), "\n")
+  
+  return(invisible(export_data))
+}
+
+summarize_umap_by_group <- function(umap_results, group_column) {
+  
+  umap_data <- umap_results$final_data
+  marker_names <- umap_results$umap_result$marker_names
+  
+  if(!group_column %in% names(umap_data)) {
+    stop("Column '", group_column, "' not found in UMAP data")
+  }
+  
+  marker_summary <- umap_data %>%
+    select(all_of(c(group_column, marker_names))) %>%
+    pivot_longer(cols = all_of(marker_names), names_to = "Marker", values_to = "Expression") %>%
+    group_by(.data[[group_column]], Marker) %>%
+    summarise(
+      n_cells = n(),
+      mean_expr = mean(Expression, na.rm = TRUE),
+      median_expr = median(Expression, na.rm = TRUE),
+      sd_expr = sd(Expression, na.rm = TRUE),
+      q25 = quantile(Expression, 0.25, na.rm = TRUE),
+      q75 = quantile(Expression, 0.75, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  coord_summary <- umap_data %>%
+    group_by(.data[[group_column]]) %>%
+    summarise(
+      n_cells = n(),
+      mean_umap1 = mean(UMAP1),
+      mean_umap2 = mean(UMAP2),
+      sd_umap1 = sd(UMAP1),
+      sd_umap2 = sd(UMAP2),
+      .groups = "drop"
+    )
+  
+  return(list(
+    marker_summary = marker_summary,
+    coordinate_summary = coord_summary
+  ))
+}
+
 # ============================================================================
-# 
-# # # Setup
-# gs <- setup_flowjo_workspace(
-#   xml_path = here("data/20-Jun-2025.wsp"),
-#   fcs_path = here("data/fcs_files/")
-#  )
-# # 
-# # # Run interactive analysis to get subpop-specifc DFs
-# congenics_results <-analyze_flow_data_auto(gs)
-# 
-# #Clean-Up Data Node naming data 
-# congenics_results <- data_clean_custom(congenics_results)
-# 
-# # Add genotype information (Only works if the code can detect congenic markers)
-# congenics_results_with_genotype <- assign_genotypes_menu(congenics_results1$counts)
+# EXAMPLE USAGE AND DOCUMENTATION
+# ============================================================================
 
-#===============================================================================
+cat("Enhanced Interactive UMAP Flow Cytometry Analysis Functions Loaded!\n")
+cat("Main function: analyze_flow_umap_enhanced(gs)\n")
+cat("\nNew features:\n")
+cat("- Interactive sample exclusion (remove unstained, controls, etc.)\n")
+cat("- Event counting with population assessment\n")
+cat("- Optional external metadata import from CSV\n")
+cat("- Persistent plot session with save/reload capability\n")
+cat("- Interactive visualization menu with multiple plot types\n")
+cat("- Session management and export utilities\n")
+cat("- Fixed all numeric input handling to prevent NA errors\n")
