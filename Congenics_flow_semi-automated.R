@@ -13,7 +13,7 @@ library(RColorBrewer)
 library(umap)
 
 # ============================================================================
-# CORE SETUP AND DATA LOADING
+# SECTION 1: CORE SETUP AND DATA LOADING (test123)
 # ============================================================================
 
 setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("pairing_factor", "tissue_factor")) {
@@ -29,7 +29,7 @@ setup_flowjo_workspace <- function(xml_path, fcs_path, keywords = c("pairing_fac
 }
 
 # ============================================================================
-# IMPROVED INTERACTIVE KEYWORD SELECTION FOR FLOWJO WORKSPACE SETUP
+# SECTION 2: INTERACTIVE KEYWORD SELECTION FOR FLOWJO WORKSPACE SETUP
 # ============================================================================
 
 # Function to extract and preview keywords from FCS files
@@ -145,7 +145,7 @@ preview_fcs_keywords <- function(fcs_path, sample_limit = 5) {
     non_empty_values <- values[values != "(empty)" & values != "(missing)"]
     unique_values <- unique(non_empty_values)
     
-    # Create proper example values string - FIXED!
+    # Create proper example values string
     example_values_str <- if(length(unique_values) > 0) {
       if(length(unique_values) <= 3) {
         paste(unique_values, collapse = ", ")
@@ -162,9 +162,9 @@ preview_fcs_keywords <- function(fcs_path, sample_limit = 5) {
       total_files = length(values),
       non_empty_values = length(non_empty_values),
       unique_values = length(unique_values),
-      example_values = example_values_str,  # This is now the actual examples, not count!
+      example_values = example_values_str,
       all_values = list(values),
-      all_unique_values = list(unique_values)  # Store unique values for detailed view
+      all_unique_values = list(unique_values)
     )
   }) %>%
     arrange(desc(present_in_files), desc(non_empty_values), keyword)
@@ -425,7 +425,7 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
     cat("1. Show keyword overview\n")
     cat("2. Show all keywords (detailed)\n")
     cat("3. Select keywords from complete list\n")
-    cat("4. Select from recommended keywords (Best for 1st pass\n")
+    cat("4. Select from recommended keywords (Best for 1st pass)\n")
     cat("5. Search keywords by pattern\n")
     cat("6. View detailed examples for a keyword\n")
     cat("7. Remove selected keywords\n")
@@ -681,9 +681,9 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
   }
   
   # Final summary
-  cat("\n", paste(rep("=", 60), collapse = ""), "\n")
+  cat("\n", paste(rep("=", 60), collapse=""), "\n")
   cat("FINAL KEYWORD SELECTION\n")
-  cat(paste(rep("=", 60), collapse = ""), "\n")
+  cat(paste(rep("=", 60), collapse=""), "\n")
   
   if(length(selected_keywords) == 0) {
     cat("No keywords selected. Using default keywords: pairing_factor, tissue_factor\n")
@@ -739,218 +739,298 @@ preview_keywords_only <- function(fcs_path, sample_limit = 5) {
   return(keyword_data)
 }
 
-#===============================================================================
-# Enhanced setup function with interactive keyword selection
-setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
+# ============================================================================
+# CORRECTED WORKFLOW - FACTOR DEFINITION BEFORE DATA EXTRACTION
+# ============================================================================
+
+# First, fix the extract functions to not assume standardized columns exist
+extract_counts_freqs_base <- function(gs, nodes, parent_mapping = NULL, keywords = NULL) {
   
-  cat("=== Enhanced FlowJo Workspace Setup ===\n")
-  
-  # Interactive keyword selection if not provided
-  if(is.null(keywords)) {
-    cat("No keywords specified. Starting interactive keyword selection...\n")
-    keywords <- select_keywords_interactive(fcs_path, sample_limit)
-  } else {
-    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  # Helper to safely get counts for a node in a sample
+  safe_get_count <- function(gh, node) {
+    tryCatch({
+      if(node %in% gh_get_pop_paths(gh)) {
+        list(
+          count = gh_pop_get_count(gh, node),
+          parent_count = gh_pop_get_count(gh, gh_pop_get_parent(gh, node)),
+          success = TRUE
+        )
+      } else {
+        list(success = FALSE)
+      }
+    }, error = function(e) list(success = FALSE))
   }
   
-  cat("\nSetting up FlowJo workspace...\n")
+  # Extract counts for all node-sample combinations
+  results <- map_dfr(nodes, function(node) {
+    map_dfr(seq_along(gs), function(i) {
+      sample_name <- sampleNames(gs)[i]
+      gh <- gs[[i]]
+      
+      result <- safe_get_count(gh, node)
+      if(!result$success) return(tibble())
+      
+      tibble(
+        Sample = sample_name,
+        Node = node,
+        Count = result$count,
+        ParentCount = result$parent_count
+      )
+    })
+  })
   
-  # Setup workspace with selected keywords
-  ws <- open_flowjo_xml(xml_path)
-  gs <- flowjo_to_gatingset(
-    ws, 
-    keywords = keywords,
-    keywords.source = "FCS", 
-    path = fcs_path, 
-    extend_val = -10000
-  )
-  
-  cat("Workspace setup complete!\n")
-  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
-  cat("Samples loaded:", length(sampleNames(gs)), "\n")
-  
-  return(gs)
-}
-
-# Convenience function for just previewing keywords without selection
-preview_keywords_only <- function(fcs_path, sample_limit = 5) {
-  cat("=== FCS Keyword Preview ===\n")
-  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
-  display_keyword_info(keyword_data, show_all = FALSE)
-  
-  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
-  
-  return(keyword_data)
-}
-# Enhanced setup function with interactive keyword selection
-setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
-  
-  cat("=== Enhanced FlowJo Workspace Setup ===\n")
-  
-  # Interactive keyword selection if not provided
-  if(is.null(keywords)) {
-    cat("No keywords specified. Starting interactive keyword selection...\n")
-    keywords <- select_keywords_interactive(fcs_path, sample_limit)
-  } else {
-    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  if(nrow(results) == 0) {
+    stop("No counts extracted. Check that nodes exist in the gating set.")
   }
   
-  cat("\nSetting up FlowJo workspace...\n")
+  # Get ALL available sample metadata - don't filter by keywords yet
+  pd <- pData(gs) %>% 
+    rownames_to_column("Sample")
   
-  # Setup workspace with selected keywords
-  ws <- open_flowjo_xml(xml_path)
-  gs <- flowjo_to_gatingset(
-    ws, 
-    keywords = keywords,
-    keywords.source = "FCS", 
-    path = fcs_path, 
-    extend_val = -10000
-  )
+  # Join with all available metadata
+  results <- results %>%
+    left_join(pd, by = "Sample") %>%
+    rename(Subpop = Count)
   
-  cat("Workspace setup complete!\n")
-  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
-  cat("Samples loaded:", length(sampleNames(gs)), "\n")
-  
-  return(gs)
-}
-
-# Convenience function for just previewing keywords without selection
-preview_keywords_only <- function(fcs_path, sample_limit = 5) {
-  cat("=== FCS Keyword Preview ===\n")
-  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
-  display_keyword_info(keyword_data, show_all = FALSE)
-  
-  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
-  
-  return(keyword_data)
-}
-
-# Enhanced setup function with interactive keyword selection
-setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
-  
-  cat("=== Enhanced FlowJo Workspace Setup ===\n")
-  
-  # Interactive keyword selection if not provided
-  if(is.null(keywords)) {
-    cat("No keywords specified. Starting interactive keyword selection...\n")
-    keywords <- select_keywords_interactive(fcs_path, sample_limit)
+  # Calculate frequencies with custom parents if provided
+  if(!is.null(parent_mapping)) {
+    parent_results <- map_dfr(names(parent_mapping), function(node) {
+      parent_node <- parent_mapping[node]
+      
+      map_dfr(seq_along(gs), function(i) {
+        sample_name <- sampleNames(gs)[i]
+        gh <- gs[[i]]
+        
+        result <- safe_get_count(gh, parent_node)
+        if(!result$success) return(tibble())
+        
+        tibble(
+          Sample = sample_name,
+          Node = node,
+          CustomParentCount = result$count
+        )
+      })
+    })
+    
+    results <- results %>%
+      left_join(parent_results, by = c("Sample", "Node")) %>%
+      mutate(
+        Freq = case_when(
+          !is.na(CustomParentCount) & CustomParentCount > 0 ~ (Subpop / CustomParentCount) * 100,
+          ParentCount > 0 ~ (Subpop / ParentCount) * 100,
+          TRUE ~ 0
+        )
+      )
   } else {
-    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+    results <- results %>%
+      mutate(Freq = if_else(ParentCount > 0, (Subpop / ParentCount) * 100, 0))
   }
   
-  cat("\nSetting up FlowJo workspace...\n")
-  
-  # Setup workspace with selected keywords
-  ws <- open_flowjo_xml(xml_path)
-  gs <- flowjo_to_gatingset(
-    ws, 
-    keywords = keywords,
-    keywords.source = "FCS", 
-    path = fcs_path, 
-    extend_val = -10000
-  )
-  
-  cat("Workspace setup complete!\n")
-  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
-  cat("Samples loaded:", length(sampleNames(gs)), "\n")
-  
-  return(gs)
+  results %>% mutate(NodeShort = basename(Node))
 }
 
-# Convenience function for just previewing keywords without selection
-preview_keywords_only <- function(fcs_path, sample_limit = 5) {
-  cat("=== FCS Keyword Preview ===\n")
-  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
-  display_keyword_info(keyword_data, show_all = FALSE)
-  
-  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
-  
-  return(keyword_data)
-}
-
-# Enhanced setup function with interactive keyword selection
-setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
-  
-  cat("=== Enhanced FlowJo Workspace Setup ===\n")
-  
-  # Interactive keyword selection if not provided
-  if(is.null(keywords)) {
-    cat("No keywords specified. Starting interactive keyword selection...\n")
-    keywords <- select_keywords_interactive(fcs_path, sample_limit)
-  } else {
-    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+# Similarly, fix MFI extraction to not assume standardized columns
+extract_mfi_base <- function(gs, nodes, channels = NULL, summary_fun = median, keywords = NULL) {
+  if(is.null(channels)) {
+    channels <- select_channels_interactive(gs)
+    if(length(channels) == 0) return(tibble())
+  } else if(length(channels) == 1 && tolower(channels) == "all") {
+    channels <- get_marker_lookup(gs)$colname
+  } else if(length(channels) == 1 && tolower(channels) == "compensated") {
+    lookup <- get_marker_lookup(gs)
+    channels <- lookup %>%
+      filter(str_detect(colname, "(?i)comp")) %>%
+      pull(colname)
+    
+    if(length(channels) == 0) {
+      warning("No compensated channels found. Skipping MFI analysis.")
+      return(tibble())
+    }
   }
   
-  cat("\nSetting up FlowJo workspace...\n")
-  
-  # Setup workspace with selected keywords
-  ws <- open_flowjo_xml(xml_path)
-  gs <- flowjo_to_gatingset(
-    ws, 
-    keywords = keywords,
-    keywords.source = "FCS", 
-    path = fcs_path, 
-    extend_val = -10000
-  )
-  
-  cat("Workspace setup complete!\n")
-  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
-  cat("Samples loaded:", length(sampleNames(gs)), "\n")
-  
-  return(gs)
-}
-
-# Convenience function for just previewing keywords without selection
-preview_keywords_only <- function(fcs_path, sample_limit = 5) {
-  cat("=== FCS Keyword Preview ===\n")
-  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
-  display_keyword_info(keyword_data, show_all = FALSE)
-  
-  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
-  
-  return(keyword_data)
-}
-# Enhanced setup function with interactive keyword selection
-setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
-  
-  cat("=== Enhanced FlowJo Workspace Setup ===\n")
-  
-  # Interactive keyword selection if not provided
-  if(is.null(keywords)) {
-    cat("No keywords specified. Starting interactive keyword selection...\n")
-    keywords <- select_keywords_interactive(fcs_path, sample_limit)
-  } else {
-    cat("Using provided keywords:", paste(keywords, collapse = ", "), "\n")
+  # Validate channels
+  lookup <- get_marker_lookup(gs)
+  missing_channels <- setdiff(channels, lookup$colname)
+  if(length(missing_channels) > 0) {
+    stop("Channels not found: ", paste(missing_channels, collapse = ", "))
   }
   
-  cat("\nSetting up FlowJo workspace...\n")
+  # Extract MFI for all node-sample-channel combinations
+  results <- map_dfr(nodes, function(node) {
+    map_dfr(seq_along(gs), function(i) {
+      sample_name <- sampleNames(gs)[i]
+      gh <- gs[[i]]
+      
+      if(!node %in% gh_get_pop_paths(gh)) return(tibble())
+      
+      ff <- tryCatch({
+        gh_pop_get_data(gh, node)
+      }, error = function(e) return(NULL))
+      
+      if(is.null(ff)) return(tibble())
+      
+      expr_data <- if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
+      df <- as.data.frame(expr_data)
+      
+      available_channels <- intersect(channels, colnames(df))
+      if(length(available_channels) == 0) return(tibble())
+      
+      map_dfr(available_channels, function(ch) {
+        tibble(
+          Sample = sample_name,
+          Node = node,
+          colname = ch,
+          MFI = summary_fun(df[[ch]], na.rm = TRUE)
+        )
+      })
+    })
+  })
   
-  # Setup workspace with selected keywords
-  ws <- open_flowjo_xml(xml_path)
-  gs <- flowjo_to_gatingset(
-    ws, 
-    keywords = keywords,
-    keywords.source = "FCS", 
-    path = fcs_path, 
-    extend_val = -10000
-  )
+  if(nrow(results) == 0) return(tibble())
   
-  cat("Workspace setup complete!\n")
-  cat("Keywords imported:", paste(keywords, collapse = ", "), "\n")
-  cat("Samples loaded:", length(sampleNames(gs)), "\n")
+  results <- results %>%
+    left_join(lookup, by = "colname") %>%
+    select(Sample, Node, colname, marker, MFI)
   
-  return(gs)
+  # Join with ALL sample metadata (don't assume specific columns exist)
+  pd <- pData(gs) %>% 
+    rownames_to_column("Sample")
+  
+  results <- results %>%
+    left_join(pd, by = "Sample") %>%
+    mutate(NodeShort = basename(Node))
+  
+  return(results)
 }
 
-# Convenience function for just previewing keywords without selection
-preview_keywords_only <- function(fcs_path, sample_limit = 5) {
-  cat("=== FCS Keyword Preview ===\n")
-  keyword_data <- preview_fcs_keywords(fcs_path, sample_limit)
-  display_keyword_info(keyword_data, show_all = FALSE)
+# Now create the corrected main analysis function
+analyze_flow_data_corrected <- function(gs, 
+                                        node_selection = "interactive", 
+                                        parent_selection = "interactive",
+                                        channels = NULL,
+                                        summary_fun = median) {
   
-  cat("\nFor detailed exploration, use: select_keywords_interactive(fcs_path)\n")
+  cat("=== Flow Cytometry Analysis Pipeline (Corrected) ===\n")
   
-  return(keyword_data)
+  # Get nodes and parents first
+  nodes <- if(node_selection == "interactive") {
+    select_nodes_interactive(gs)
+  } else {
+    node_selection
+  }
+  
+  if(is.null(nodes) || length(nodes) == 0) {
+    cat("No nodes selected. Exiting.\n")
+    return(NULL)
+  }
+  
+  parent_mapping <- if(parent_selection == "interactive") {
+    parent_result <- select_parents_interactive(nodes, gs)
+    if(is.character(parent_result) && length(parent_result) == 1 && parent_result == "BACK") {
+      cat("Going back to node selection...\n")
+      return(NULL)
+    }
+    parent_result
+  } else {
+    parent_selection
+  }
+  
+  # Extract data using base functions (no standardized columns assumed)
+  cat("Extracting counts and frequencies...\n")
+  counts <- extract_counts_freqs_base(gs, nodes, parent_mapping)
+  
+  cat("Extracting MFI data...\n")
+  mfi <- extract_mfi_base(gs, nodes, channels, summary_fun)
+  
+  return(list(
+    counts = counts, 
+    mfi = mfi, 
+    nodes = nodes, 
+    parent_mapping = parent_mapping,
+    channels = channels
+  ))
+}
+
+# Corrected enhanced analysis function with proper workflow order
+analyze_flow_data_auto_corrected <- function(gs, 
+                                             add_congenics = TRUE, 
+                                             congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
+                                             define_factors = TRUE,
+                                             ...) {
+  
+  cat("=== Enhanced Flow Analysis - Corrected Workflow ===\n")
+  
+  # Step 1: Extract raw data (no standardized columns assumed)
+  results <- analyze_flow_data_corrected(gs, ...)
+  
+  if(is.null(results)) return(NULL)
+  
+  # Step 2: Add congenics if requested
+  if(add_congenics) {
+    results <- add_congenics_column(results, candidates = congenic_candidates)
+  }
+  
+  # Step 3: Define analysis factors AFTER data extraction
+  if(define_factors) {
+    cat("\n=== DEFINING ANALYSIS FACTORS ===\n")
+    cat("Setting up standardized factor columns for downstream analyses.\n\n")
+    
+    # Define factors using the counts data
+    if(!is.null(results$counts) && nrow(results$counts) > 0) {
+      cat("Defining factors using counts data...\n")
+      counts_factors <- define_analysis_factors(results$counts)
+      results$counts <- counts_factors$data
+      
+      # Store the factor mapping info
+      factor_info <- list(
+        tissue_factor = "tissue_factor",
+        pairing_factor = "pairing_factor", 
+        original_tissue_col = counts_factors$original_tissue_col,
+        original_pairing_col = counts_factors$original_pairing_col,
+        pairing_enabled = counts_factors$pairing_enabled
+      )
+    }
+    
+    # Apply the SAME factor definitions to MFI data
+    if(!is.null(results$mfi) && nrow(results$mfi) > 0 && exists("factor_info")) {
+      cat("Applying same factor definitions to MFI data...\n")
+      
+      # Apply the same transformations that were applied to counts data
+      if(factor_info$original_tissue_col %in% names(results$mfi)) {
+        results$mfi <- results$mfi %>%
+          mutate(tissue_factor = .data[[factor_info$original_tissue_col]])
+      }
+      
+      if(factor_info$pairing_enabled && factor_info$original_pairing_col %in% names(results$mfi)) {
+        # Handle the pairing factor creation logic
+        if(factor_info$original_pairing_col == "pairing_factor") {
+          # This means pairing factor was created from well ID
+          if("pairing_factor" %in% names(results$mfi)) {
+            results$mfi <- results$mfi %>%
+              mutate(pairing_factor = str_extract(pairing_factor, "^[A-H]"))
+          }
+        } else {
+          results$mfi <- results$mfi %>%
+            mutate(pairing_factor = .data[[factor_info$original_pairing_col]])
+        }
+      } else {
+        results$mfi <- results$mfi %>%
+          mutate(pairing_factor = "no_pairing")
+      }
+      
+      cat("✅ Applied factor definitions to MFI data\n")
+    }
+    
+    # Store factor information in results
+    results$factor_info <- factor_info
+    
+    cat("\n✅ Factor definition complete!\n")
+    cat("All subsequent analyses will use:\n")
+    cat("• tissue_factor for grouping\n")
+    cat("• pairing_factor for paired analyses\n")
+  }
+  
+  return(results)
 }
 
 # ============================================================================
@@ -1613,7 +1693,6 @@ extract_counts_freqs <- function(gs, nodes, parent_mapping = NULL, keywords = c(
 }
 
 # Extract MFI data
-# Extract MFI data
 extract_mfi <- function(gs, nodes, channels = NULL, summary_fun = median, keywords = c("pairing_factor", "tissue_factor")) {
   if(is.null(channels)) {
     channels <- select_channels_interactive(gs)
@@ -1698,189 +1777,7 @@ extract_mfi <- function(gs, nodes, channels = NULL, summary_fun = median, keywor
 # MAIN ANALYSIS FUNCTION WITH FULL BACK NAVIGATION
 # ============================================================================
 
-analyze_flow_data <- function(gs, 
-                              node_selection = "interactive", 
-                              parent_selection = "interactive",
-                              channels = NULL,
-                              summary_fun = median,
-                              keywords = c("pairing_factor", "tissue_factor")) {
-  
-  cat("=== Flow Cytometry Analysis Pipeline ===\n")
-  cat("Navigate with 'back' options throughout the process.\n\n")
-  
-  # Main analysis loop with navigation
-  nodes <- NULL
-  parent_mapping <- NULL
-  selected_channels <- NULL
-  
-  # Step 1: Node Selection
-  repeat {
-    if(node_selection == "interactive") {
-      nodes <- select_nodes_interactive(gs)
-    } else {
-      nodes <- node_selection
-    }
-    
-    if(is.null(nodes) || length(nodes) == 0) {
-      cat("No nodes selected. Exiting.\n")
-      return(NULL)
-    }
-    
-    cat(sprintf("\nSelected %d nodes for analysis:\n", length(nodes)))
-    iwalk(nodes, ~cat(sprintf("  %d. %s\n", .y, basename(.x))))
-    
-    # Step 2: Parent Selection
-    repeat {
-      if(parent_selection == "interactive") {
-        parent_result <- select_parents_interactive(nodes, gs)
-        
-        # Fixed: Check if parent_result is specifically the string "BACK"
-        if(is.character(parent_result) && 
-           length(parent_result) == 1 && 
-           parent_result == "BACK") {
-          cat("Going back to node selection...\n")
-          break  # Break to node selection
-        }
-        
-        parent_mapping <- parent_result
-      } else if(!is.null(parent_selection)) {
-        parent_mapping <- parent_selection
-      }
-      
-      # Step 3: Preview and Confirm Parent Mapping
-      if(!is.null(parent_mapping)) {
-        preview_result <- preview_parent_mapping(nodes, parent_mapping, gs)
-        
-        if(preview_result == "BACK") {
-          cat("Going back to parent selection...\n")
-          next  # Continue parent selection loop
-        } else if(preview_result == "CANCEL") {
-          cat("Analysis cancelled by user.\n")
-          return(NULL)
-        } else if(preview_result == "ACCEPT") {
-          # Continue to channel selection
-          break
-        }
-      } else {
-        # No parent mapping needed, continue
-        break
-      }
-    }
-    
-    # Fixed: Check if we should go back to node selection
-    if(exists("parent_result") && 
-       is.character(parent_result) && 
-       length(parent_result) == 1 && 
-       parent_result == "BACK") {
-      next
-    }
-    
-    # Step 4: Channel Selection
-    repeat {
-      if(is.null(channels)) {
-        channel_result <- select_channels_interactive(gs)
-        
-        if(is.character(channel_result) && 
-           length(channel_result) == 1 && 
-           channel_result == "BACK") {
-          cat("Going back to parent selection...\n")
-          break  # Break to parent selection
-        }
-        
-        selected_channels <- channel_result
-      } else {
-        selected_channels <- channels
-      }
-      
-      # Step 5: Final Confirmation
-      cat("\n", paste(rep("=", 50), collapse=""), "\n")
-      cat("ANALYSIS SUMMARY\n")
-      cat(paste(rep("=", 50), collapse=""), "\n")
-      cat(sprintf("Nodes: %d selected\n", length(nodes)))
-      cat(sprintf("Parent mapping: %s\n", ifelse(is.null(parent_mapping), "None", "Custom")))
-      cat(sprintf("MFI channels: %s\n", 
-                  if(length(selected_channels) == 0) "None" 
-                  else if(length(selected_channels) == 1 && selected_channels == "all") "All available"
-                  else paste(length(selected_channels), "selected")))
-      
-      cat("\nOptions:\n")
-      cat("1. Start analysis\n")
-      cat("2. Back to channel selection\n")
-      cat("3. Back to parent selection\n") 
-      cat("4. Back to node selection\n")
-      cat("5. Cancel\n")
-      
-      final_choice <- readline("Choose (1-5): ")
-      
-      switch(final_choice,
-             "1" = {
-               # Proceed with analysis
-               cat("\n=== Starting Data Extraction ===\n")
-               
-               # Extract data
-               cat("Extracting counts and frequencies...\n")
-               counts <- extract_counts_freqs(gs, nodes, parent_mapping, keywords)
-               
-               cat("Extracting MFI data...\n")
-               mfi <- extract_mfi(gs, nodes, selected_channels, summary_fun)
-               
-               # Final summary
-               cat(sprintf("\n=== Analysis Complete! ===\n"))
-               cat(sprintf("✓ Processed %d nodes across %d samples\n", 
-                           length(unique(counts$Node)), length(unique(counts$Sample))))
-               cat(sprintf("✓ Count/frequency data: %d rows\n", nrow(counts)))
-               cat(sprintf("✓ MFI data: %d rows\n", nrow(mfi)))
-               
-               return(list(
-                 counts = counts, 
-                 mfi = mfi, 
-                 nodes = nodes, 
-                 parent_mapping = parent_mapping,
-                 channels = selected_channels
-               ))
-             },
-             
-             "2" = {
-               # Back to channel selection
-               selected_channels <- NULL
-               channels <- NULL
-               next
-             },
-             
-             "3" = {
-               # Back to parent selection  
-               parent_mapping <- NULL
-               break
-             },
-             
-             "4" = {
-               # Back to node selection
-               nodes <- NULL
-               parent_mapping <- NULL
-               selected_channels <- NULL
-               break  # Will break to outer repeat loop
-             },
-             
-             "5" = {
-               cat("Analysis cancelled by user.\n")
-               return(NULL)
-             },
-             
-             {
-               cat("Invalid choice. Please select 1-5.\n")
-             }
-      )
-    }
-    
-    # If we need to go back to parent or node selection from final confirmation
-    if(exists("final_choice") && final_choice == "3") next  # Continue to parent selection
-    if(exists("final_choice") && final_choice == "4") next  # Continue to node selection (outer loop)
-    if(exists("channel_result") && 
-       is.character(channel_result) && 
-       length(channel_result) == 1 && 
-       channel_result == "BACK") next  # Continue to parent selection
-  }
-}
+
 
 # ---------------------------------------------------------------------------
 # CONGENIC EXTRACTION HELPERS
@@ -1921,28 +1818,6 @@ add_congenics_column <- function(results, candidates = c("CD45.1", "CD45.2", "CD
 # Example: call this after running analyze_flow_data()
 # results <- analyze_flow_data(gs)
 # results <- add_congenics_column(results)
-
-# ---------------------------------------------------------------------------
-# WRAPPER: Run analysis and automatically add congenics column
-# ---------------------------------------------------------------------------
-# This wrapper calls your existing `analyze_flow_data()` function with any
-# provided arguments, then appends the `congenics` column to both counts and
-# mfi using `add_congenics_column()` before returning the results.
-# Use this in place of calling `analyze_flow_data()` directly when you want the
-# congenics column added automatically.
-
-analyze_flow_data_auto <- function(..., add_congenics = TRUE, congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2")) {
-  # Call the original analysis function
-  results <- analyze_flow_data(...)
-  
-  if(is.null(results)) return(NULL)
-  
-  if(add_congenics) {
-    results <- add_congenics_column(results, candidates = congenic_candidates)
-  }
-  
-  results
-}
 
 #==============================================================================
 # Additional data metadata annotation for downstream analysis
@@ -2534,98 +2409,6 @@ define_analysis_factors <- function(df) {
     original_pairing_col = if(pairing_factor_col != "none") pairing_factor_col else NULL,
     pairing_enabled = pairing_factor_col != "none"
   ))
-}
-
-#' Wrapper function that combines enhanced analysis with factor definition
-analyze_flow_data_auto_enhanced <- function(..., add_congenics = TRUE, 
-                                            congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
-                                            define_factors = TRUE) {
-  
-  # Call the original analysis function
-  results <- analyze_flow_data(...)
-  
-  if(is.null(results)) return(NULL)
-  
-  # Add congenics if requested
-  if(add_congenics) {
-    results <- add_congenics_column(results, candidates = congenic_candidates)
-  }
-  
-  # Define analysis factors if requested
-  if(define_factors) {
-    cat("\n=== DEFINING ANALYSIS FACTORS ===\n")
-    cat("Setting up standardized factor columns for downstream analyses.\n\n")
-    
-    # Define factors ONCE using the counts data, then apply to both datasets
-    factor_info <- NULL
-    
-    if(!is.null(results$counts) && nrow(results$counts) > 0) {
-      cat("Defining factors using counts data...\n")
-      counts_factors <- define_analysis_factors(results$counts)
-      results$counts <- counts_factors$data
-      factor_info <- counts_factors  # Store the factor mapping
-    }
-    
-    # Apply the SAME factor mapping to MFI data without asking again
-    if(!is.null(results$mfi) && nrow(results$mfi) > 0) {
-      cat("Applying same factor definitions to MFI data...\n")
-      
-      if(!is.null(factor_info)) {
-        # Determine the pairing_factor column outside of mutate
-        wellid_col <- if("pairing_factor" %in% names(results$mfi)) {
-          "pairing_factor"
-        } else if("pairing_factor" %in% names(results$mfi)) {
-          "pairing_factor"
-        } else {
-          NULL
-        }
-        
-        # Apply the same factor definitions without interactive prompts
-        results$mfi <- results$mfi %>%
-          mutate(
-            tissue_factor = .data[[factor_info$original_tissue_col]],
-            tissue_factor = if(factor_info$pairing_enabled) {
-              if(factor_info$original_pairing_col == "tissue_factor") {
-                # Already created tissue_factor in counts, apply same logic
-                if(!is.null(wellid_col)) {
-                  str_extract(.data[[wellid_col]], "^[A-H]")
-                } else {
-                  "no_pairing"
-                }
-              } else {
-                .data[[factor_info$original_pairing_col]]
-              }
-            } else {
-              "no_pairing"
-            }
-          )
-        
-        cat("✅ Applied factor definitions to MFI data\n")
-        
-        # Show summary for MFI data
-        cat("MFI tissue groups:", n_distinct(results$mfi$tissue_factor), "\n")
-        cat("MFI pairing groups:", n_distinct(results$mfi$tissue_factor), "\n")
-      } else {
-        cat("⚠️  No factor info available, MFI data unchanged\n")
-      }
-    }
-    
-    # Store factor information
-    results$factor_info <- list(
-      tissue_factor = "tissue_factor",
-      tissue_factor = "tissue_factor",
-      original_tissue_col = if(!is.null(factor_info)) factor_info$original_tissue_col else NULL,
-      original_pairing_col = if(!is.null(factor_info)) factor_info$original_pairing_col else NULL,
-      pairing_enabled = if(!is.null(factor_info)) factor_info$pairing_enabled else FALSE
-    )
-    
-    cat("\n✅ Factor definition complete!\n")
-    cat("All subsequent analyses will use:\n")
-    cat("• tissue_factor for grouping\n")
-    cat("• tissue_factor for paired analyses\n")
-  }
-  
-  return(results)
 }
 
 #' Enhanced metadata assignment with factor definition
