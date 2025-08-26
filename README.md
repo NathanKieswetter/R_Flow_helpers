@@ -1,4 +1,4 @@
-# Flow Cytometry Analysis Pipeline
+# Flow Cytometry Analysis Pipeline for Adoptive Transfer Experiment using Congenic Markers
 
 A comprehensive R package for automated flow cytometry analysis with interactive visualization tools, specifically designed for congenic marker analysis and engraftment studies.
 
