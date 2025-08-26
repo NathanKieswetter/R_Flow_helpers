@@ -326,11 +326,27 @@ detect_biological_relevance <- function(keyword_data) {
   # Define more specific biological patterns with word boundaries
   bio_patterns <- list(
     tissues = list(
-      pattern = "\\b(liver|spleen|kidney|lymph_node|LN|medLN|cLN|gut|fat|tumor|skin|blood|PBMC|SPL|cIEL|cLN|lymph node|cervical|intestine|colon|SI|SG)\\b",
+      pattern = "\\b(liver|spleen|kidney|lymph_node|LN|medLN|cLN|gut|fat|tumor|
+      skin|blood|PBMC|SPL|cIEL|cLN|lymph node|cervical|intestine|colon|SI|SG|
+      salivary gland|Spleen|SPL|Sp|Peripheralblood|PB|PBMCs|Bonemarrow|BM|Thymus|
+      Thy|Inguinallymphnode|iLN|Axillarylymphnode|aLN|Brachiallymphnode|
+      bLN|Cervicallymphnode|cLN|Mandibularlymphnode|mandLN|Superficialcervicallymphnode|sCLN
+      |Popliteallymphnode|pLN|Mesentericallymphnode|mLN|Mediastinallymphnode|medLN
+      |Para-aortic/lumbarlymphnode|paLN|Draininglymphnode|dLN|Skin-draininglymphnodes
+      |Peyer’spatches|PP|Smallintestine|SI|Smallintestinalintraepitheliallymphocytes
+      |siIEL|Intraepitheliallymphocytes|IEL|Largeintestinalintraepitheliallymphocytes
+      |liIEL|Intestinallaminapropria|siLP|cLP|Laminaproprialymphocytes|LPL
+      |Colon/largeintestine|LI|Nasal-associatedlymphoidtissue|NALT|Bronchus/bronchus-associatedlymphoidtissue
+      |BALT|Lung|Bronchoalveolarlavage|BAL|Liver|LIV|Peritonealcavity/peritonealexudatecells
+      |PerC|PEC|Skin|Earskin|Dorsalskin|Visceraladiposetissue|VAT|Epididymalwhiteadiposetissue
+      |eWAT|Subcutaneousadiposetissue|sWAT|Tumor|Tumor-infiltratinglymphocytes|TILs|Brain
+      |Centralnervoussystem|CNS|Spinalcord|SC|Meninges|Kidney|Heart|Salivarygland
+      |SG|Eye/oculartissues|Eye)\\b",
       description = "tissue types"
     ),
     treatments = list(
-      pattern = "\\b(stim|stimulated|control|unstained|KO|WT|wildtype|congenic)\\b",
+      pattern = "\\b(stim|stimulated|control|unstained|KO|WT|wildtype|congenic
+      |Tamoxifen|tamox|LPS|PMA|SEB|gp33|listeria|LCMV)\\b",
       description = "treatments"
     ),
     timepoints = list(
