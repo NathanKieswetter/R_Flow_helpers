@@ -968,7 +968,7 @@ analyze_flow_data_corrected <- function(gs,
 }
 
 # Corrected enhanced analysis function with proper workflow order
-analyze_flow_data_auto_corrected <- function(gs, 
+analyze_flow_data_auto_enhanced <- function(gs, 
                                              add_congenics = TRUE, 
                                              congenic_candidates = c("CD45.1", "CD45.2", "CD90.1", "CD90.2", "CD45.1.2"),
                                              define_factors = TRUE,
