@@ -429,14 +429,14 @@ display_keyword_info <- function(keyword_data, show_all = FALSE) {
   
   # Categorize keywords for better display
   useful_keywords <- summary_df %>% 
-    filter(non_empty_values == total_files, unique_values > 1) %>%
+    dplyr::filter(non_empty_values == total_files, unique_values > 1) %>%
     arrange(desc(unique_values))
   
   constant_keywords <- summary_df %>% 
-    filter(non_empty_values == total_files, unique_values == 1)
+    dplyr::filter(non_empty_values == total_files, unique_values == 1)
   
   mostly_empty <- summary_df %>% 
-    filter(non_empty_values < total_files)
+    dplyr::filter(non_empty_values < total_files)
   
   # Display useful keywords (varying values)
   if(nrow(useful_keywords) > 0) {
@@ -514,7 +514,7 @@ show_keyword_examples <- function(keyword_data, keyword_name) {
   }
   
   keyword_info <- keyword_data$keyword_summary %>% 
-    filter(keyword == keyword_name)
+    dplyr::filter(keyword == keyword_name)
   
   values <- keyword_info$all_values[[1]]
   unique_vals <- keyword_info$all_unique_values[[1]]
@@ -736,7 +736,7 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
       
       # Also get other useful keywords (varying values) as backup
       other_useful <- keyword_data$keyword_summary %>%
-        filter(
+        dplyr::filter(
           non_empty_values == total_files, 
           unique_values > 1,
           # Exclude those already in bio_relevant
@@ -946,7 +946,307 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
   return(selected_keywords)
 }
 
+# ============================================================================
+# FUNCTIONS TO ADD METADATA TO EXISTING GATING SET
+# ============================================================================
+
+# Function to add metadata to a GatingSet interactively
+add_metadata_to_gatingset <- function(gs) {
+  
+  cat("=== Add Metadata to GatingSet ===\n")
+  
+  # Get current phenoData
+  current_pd <- pData(gs)
+  
+  cat("Current sample information:\n")
+  cat("Samples:", nrow(current_pd), "\n")
+  cat("Current columns:", paste(names(current_pd), collapse = ", "), "\n\n")
+  
+  # Show first few samples
+  cat("Current data preview:\n")
+  print(head(current_pd, 3))
+  
+  # Get sample names for reference
+  sample_names <- rownames(current_pd)
+  
+  while(TRUE) {
+    cat("\n=== Metadata Addition Options ===\n")
+    cat("1. Add timepoint\n")
+    cat("2. Add batch information\n") 
+    cat("3. Add treatment/condition\n")
+    cat("4. Add custom column with single value (all samples)\n")
+    cat("5. Add custom column with individual values per sample\n")
+    cat("6. Import metadata from CSV file\n")
+    cat("7. Preview current metadata\n")
+    cat("8. Finish and return GatingSet\n")
+    
+    choice <- readline("Choose option (1-8): ")
+    
+    if(choice == "8") {
+      cat("Metadata addition complete!\n")
+      break
+    }
+    
+    if(choice == "1") {
+      # Add timepoint
+      timepoint_value <- readline("Enter timepoint (e.g., D0, Day7, 2weeks): ")
+      if(timepoint_value != "") {
+        current_pd$timepoint <- timepoint_value
+        cat("Added timepoint:", timepoint_value, "to all samples\n")
+      }
+      
+    } else if(choice == "2") {
+      # Add batch
+      batch_value <- readline("Enter batch identifier (e.g., Batch1, 20231201): ")
+      if(batch_value != "") {
+        current_pd$batch <- batch_value
+        cat("Added batch:", batch_value, "to all samples\n")
+      }
+      
+    } else if(choice == "3") {
+      # Add treatment/condition
+      treatment_value <- readline("Enter treatment/condition (e.g., Control, LPS, Vehicle): ")
+      if(treatment_value != "") {
+        current_pd$treatment <- treatment_value
+        cat("Added treatment:", treatment_value, "to all samples\n")
+      }
+      
+    } else if(choice == "4") {
+      # Add custom column with single value
+      col_name <- readline("Enter column name: ")
+      if(col_name != "" && !col_name %in% names(current_pd)) {
+        col_value <- readline(paste("Enter value for", col_name, ": "))
+        if(col_value != "") {
+          current_pd[[col_name]] <- col_value
+          cat("Added", col_name, ":", col_value, "to all samples\n")
+        }
+      } else if(col_name %in% names(current_pd)) {
+        cat("Column already exists. Choose a different name.\n")
+      }
+      
+    } else if(choice == "5") {
+      # Add custom column with individual values
+      col_name <- readline("Enter column name: ")
+      if(col_name != "" && !col_name %in% names(current_pd)) {
+        cat("Enter values for each sample:\n")
+        values <- character(length(sample_names))
+        
+        for(i in seq_along(sample_names)) {
+          sample <- sample_names[i]
+          value <- readline(paste0("Value for ", sample, " (", i, "/", length(sample_names), "): "))
+          values[i] <- if(value == "") NA_character_ else value
+        }
+        
+        current_pd[[col_name]] <- values
+        cat("Added individual values for", col_name, "\n")
+      } else if(col_name %in% names(current_pd)) {
+        cat("Column already exists. Choose a different name.\n")
+      }
+      
+    } else if(choice == "6") {
+      # Import from CSV
+      csv_path <- readline("Enter path to CSV file (must have 'Sample' column): ")
+      
+      if(file.exists(csv_path)) {
+        tryCatch({
+          metadata_df <- read_csv(csv_path, show_col_types = FALSE)
+          
+          if(!"Sample" %in% names(metadata_df)) {
+            cat("Error: CSV must contain 'Sample' column matching sample names\n")
+            next
+          }
+          
+          # Show preview
+          cat("CSV preview:\n")
+          print(head(metadata_df))
+          
+          # Check which samples match
+          matching_samples <- intersect(metadata_df$Sample, sample_names)
+          missing_samples <- setdiff(sample_names, metadata_df$Sample)
+          
+          cat("Matching samples:", length(matching_samples), "\n")
+          if(length(missing_samples) > 0) {
+            cat("Missing samples:", paste(head(missing_samples, 5), collapse = ", "))
+            if(length(missing_samples) > 5) cat("... and", length(missing_samples) - 5, "more")
+            cat("\n")
+          }
+          
+          confirm <- readline("Proceed with CSV import? (y/n): ")
+          if(tolower(confirm) == "y") {
+            # Prepare metadata for joining
+            metadata_df <- metadata_df %>%
+              column_to_rownames("Sample")
+            
+            # Only keep columns not already in current_pd
+            new_cols <- setdiff(names(metadata_df), names(current_pd))
+            if(length(new_cols) > 0) {
+              # Add new columns to current_pd
+              for(col in new_cols) {
+                current_pd[[col]] <- metadata_df[rownames(current_pd), col]
+              }
+              cat("Added columns from CSV:", paste(new_cols, collapse = ", "), "\n")
+            } else {
+              cat("No new columns to add (all columns already exist)\n")
+            }
+          }
+          
+        }, error = function(e) {
+          cat("Error reading CSV:", e$message, "\n")
+        })
+      } else {
+        cat("File not found:", csv_path, "\n")
+      }
+      
+    } else if(choice == "7") {
+      # Preview current metadata
+      cat("\nCurrent metadata:\n")
+      cat("Columns:", paste(names(current_pd), collapse = ", "), "\n")
+      print(head(current_pd))
+      readline("Press Enter to continue...")
+    }
+    
+    # Update the GatingSet with modified phenoData
+    pData(gs) <- current_pd
+  }
+  
+  # Show final summary
+  final_pd <- pData(gs)
+  cat("\n=== Final Metadata Summary ===\n")
+  cat("Total samples:", nrow(final_pd), "\n")
+  cat("Total columns:", ncol(final_pd), "\n")
+  cat("Column names:", paste(names(final_pd), collapse = ", "), "\n")
+  
+  return(gs)
+}
+
+# Function to add metadata from pattern matching (e.g., extract from sample names)
+add_metadata_from_patterns <- function(gs) {
+  
+  cat("=== Extract Metadata from Sample Names ===\n")
+  
+  current_pd <- pData(gs)
+  sample_names <- rownames(current_pd)
+  
+  cat("Current sample names:\n")
+  print(head(sample_names, 10))
+  if(length(sample_names) > 10) {
+    cat("... and", length(sample_names) - 10, "more samples\n")
+  }
+  
+  cat("\nCommon patterns to extract:\n")
+  cat("1. Extract timepoint (e.g., 'D0', 'Day7', 'Week2' from sample names)\n")
+  cat("2. Extract treatment (e.g., 'Ctrl', 'LPS', 'Vehicle' from sample names)\n")
+  cat("3. Extract mouse/subject ID (e.g., 'M1', 'Mouse01' from sample names)\n")
+  cat("4. Custom regex pattern\n")
+  cat("5. Back to main menu\n")
+  
+  pattern_choice <- readline("Choose option (1-5): ")
+  
+  if(pattern_choice == "5") return(gs)
+  
+  if(pattern_choice == "1") {
+    # Extract timepoint
+    cat("Common timepoint patterns:\n")
+    cat("a. D + number (D0, D7, D14)\n")
+    cat("b. Day + number (Day0, Day7)\n") 
+    cat("c. Week + number (Week1, Week2)\n")
+    cat("d. Custom pattern\n")
+    
+    tp_choice <- readline("Choose timepoint pattern (a-d): ")
+    
+    pattern <- switch(tp_choice,
+                      "a" = "D\\d+",
+                      "b" = "Day\\d+", 
+                      "c" = "Week\\d+",
+                      "d" = {
+                        custom_pattern <- readline("Enter regex pattern for timepoint: ")
+                        if(custom_pattern == "") NULL else custom_pattern
+                      },
+                      NULL)
+    
+    if(!is.null(pattern)) {
+      extracted_tp <- str_extract(sample_names, pattern)
+      
+      # Show preview
+      preview_df <- data.frame(
+        Sample = sample_names,
+        Extracted_Timepoint = extracted_tp
+      )
+      cat("Preview of extracted timepoints:\n")
+      print(head(preview_df, 10))
+      
+      # Show summary
+      tp_counts <- table(extracted_tp, useNA = "ifany")
+      cat("\nTimepoint counts:\n")
+      print(tp_counts)
+      
+      confirm <- readline("Add extracted timepoints? (y/n): ")
+      if(tolower(confirm) == "y") {
+        current_pd$timepoint <- extracted_tp
+        pData(gs) <- current_pd
+        cat("Timepoint column added successfully!\n")
+      }
+    }
+    
+  } else if(pattern_choice == "4") {
+    # Custom regex pattern
+    cat("Enter custom regex pattern and column name\n")
+    col_name <- readline("Column name for extracted data: ")
+    pattern <- readline("Regex pattern to extract: ")
+    
+    if(col_name != "" && pattern != "") {
+      extracted_data <- str_extract(sample_names, pattern)
+      
+      # Show preview
+      preview_df <- data.frame(
+        Sample = sample_names,
+        Extracted = extracted_data
+      )
+      names(preview_df)[2] <- col_name
+      
+      cat("Preview of extracted data:\n")
+      print(head(preview_df, 10))
+      
+      confirm <- readline("Add extracted data? (y/n): ")
+      if(tolower(confirm) == "y") {
+        current_pd[[col_name]] <- extracted_data
+        pData(gs) <- current_pd
+        cat("Column", col_name, "added successfully!\n")
+      }
+    }
+  }
+  
+  return(gs)
+}
+
+# Enhanced setup function that includes metadata addition
+setup_flowjo_workspace_with_metadata <- function(xml_path, fcs_path, keywords = NULL, 
+                                                 sample_limit = 5, add_metadata = TRUE) {
+  
+  # First, set up the basic workspace
+  gs <- setup_flowjo_workspace_interactive(xml_path, fcs_path, keywords, sample_limit)
+  
+  # Then add metadata if requested
+  if(add_metadata) {
+    cat("\n=== Would you like to add metadata to the GatingSet? ===\n")
+    add_meta <- menu(c("Yes, add metadata interactively", 
+                       "Yes, extract from sample name patterns",
+                       "No, skip metadata addition"), 
+                     title = "Add metadata?")
+    
+    if(add_meta == 1) {
+      gs <- add_metadata_to_gatingset(gs)
+    } else if(add_meta == 2) {
+      gs <- add_metadata_from_patterns(gs)
+    }
+  }
+  
+  return(gs)
+}
+
+
 # Enhanced setup function with interactive keyword selection
+
 setup_flowjo_workspace_interactive <- function(xml_path, fcs_path, keywords = NULL, sample_limit = 5) {
   
   cat("=== Enhanced FlowJo Workspace Setup ===\n")
@@ -1117,7 +1417,7 @@ extract_mfi_base <- function(gs, nodes, channels = NULL, summary_fun = median, k
   } else if(length(channels) == 1 && tolower(channels) == "compensated") {
     lookup <- get_marker_lookup(gs)
     channels <- lookup %>%
-      filter(str_detect(colname, "(?i)comp")) %>%
+      dplyr::filter(str_detect(colname, "(?i)comp")) %>%
       pull(colname)
     
     if(length(channels) == 0) {
@@ -1323,6 +1623,284 @@ analyze_flow_data_auto_enhanced <- function(gs,
   
   return(results)
 }
+
+# ============================================================================
+# FUNCTIONS TO MERGE TWO GATING SETS
+# ============================================================================
+
+# Function to merge two GatingSets
+merge_gating_sets <- function(gs1, gs2, conflict_resolution = "interactive") {
+  
+  cat("=== Merging GatingSets ===\n")
+  cat("GatingSet 1 - Samples:", length(sampleNames(gs1)), "\n")
+  cat("GatingSet 2 - Samples:", length(sampleNames(gs2)), "\n")
+  
+  # Check for sample name conflicts
+  samples1 <- sampleNames(gs1)
+  samples2 <- sampleNames(gs2)
+  overlapping_samples <- intersect(samples1, samples2)
+  
+  if(length(overlapping_samples) > 0) {
+    cat("\nWarning: Overlapping sample names found:\n")
+    cat(paste(head(overlapping_samples, 10), collapse = ", "))
+    if(length(overlapping_samples) > 10) {
+      cat("... and", length(overlapping_samples) - 10, "more")
+    }
+    cat("\n")
+    
+    if(conflict_resolution == "interactive") {
+      cat("\nConflict resolution options:\n")
+      cat("1. Rename samples in GS2 (add suffix)\n")
+      cat("2. Skip overlapping samples from GS2\n")
+      cat("3. Cancel merge\n")
+      
+      choice <- readline("Choose option (1-3): ")
+      
+      if(choice == "3") {
+        stop("Merge cancelled by user")
+      } else if(choice == "1") {
+        # Rename overlapping samples in gs2
+        suffix <- readline("Enter suffix for GS2 samples (default: '_GS2'): ")
+        if(suffix == "") suffix <- "_GS2"
+        
+        new_names2 <- samples2
+        new_names2[samples2 %in% overlapping_samples] <- paste0(samples2[samples2 %in% overlapping_samples], suffix)
+        sampleNames(gs2) <- new_names2
+        
+        cat("Renamed", length(overlapping_samples), "samples in GS2\n")
+        
+      } else if(choice == "2") {
+        # Remove overlapping samples from gs2
+        keep_indices <- !samples2 %in% overlapping_samples
+        gs2 <- gs2[keep_indices]
+        
+        cat("Removed", length(overlapping_samples), "overlapping samples from GS2\n")
+        cat("GS2 now has", length(sampleNames(gs2)), "samples\n")
+      }
+    }
+  }
+  
+  # Check gating tree compatibility
+  cat("\nChecking gating tree compatibility...\n")
+  
+  # Get population paths from both GatingSets
+  pops1 <- gh_get_pop_paths(gs1[[1]])
+  pops2 <- gh_get_pop_paths(gs2[[1]])
+  
+  common_pops <- intersect(pops1, pops2)
+  unique_to_gs1 <- setdiff(pops1, pops2)
+  unique_to_gs2 <- setdiff(pops2, pops1)
+  
+  cat("Common populations:", length(common_pops), "\n")
+  cat("Unique to GS1:", length(unique_to_gs1), "\n")
+  cat("Unique to GS2:", length(unique_to_gs2), "\n")
+  
+  if(length(unique_to_gs1) > 0 || length(unique_to_gs2) > 0) {
+    cat("\nWarning: Gating trees are not identical\n")
+    
+    if(length(unique_to_gs1) > 0) {
+      cat("Populations only in GS1:\n")
+      cat(paste(head(unique_to_gs1, 5), collapse = "\n"))
+      if(length(unique_to_gs1) > 5) cat("\n... and", length(unique_to_gs1) - 5, "more\n")
+    }
+    
+    if(length(unique_to_gs2) > 0) {
+      cat("Populations only in GS2:\n")
+      cat(paste(head(unique_to_gs2, 5), collapse = "\n"))
+      if(length(unique_to_gs2) > 5) cat("\n... and", length(unique_to_gs2) - 5, "more\n")
+    }
+    
+    cat("\nNote: Merged GatingSet will contain all populations, but some samples may not have all gates\n")
+  }
+  
+  # Check phenoData compatibility
+  cat("\nChecking metadata compatibility...\n")
+  pd1 <- pData(gs1)
+  pd2 <- pData(gs2)
+  
+  cols1 <- names(pd1)
+  cols2 <- names(pd2)
+  
+  common_cols <- intersect(cols1, cols2)
+  unique_to_pd1 <- setdiff(cols1, cols2)
+  unique_to_pd2 <- setdiff(cols2, cols1)
+  
+  cat("Common metadata columns:", length(common_cols), "\n")
+  cat("Unique to GS1 metadata:", length(unique_to_pd1), "\n")
+  cat("Unique to GS2 metadata:", length(unique_to_pd2), "\n")
+  
+  # Perform the merge using rbind2
+  cat("\nPerforming merge...\n")
+  
+  tryCatch({
+    merged_gs <- rbind2(gs1, gs2)
+    
+    cat("Merge successful!\n")
+    cat("Merged GatingSet contains:\n")
+    cat("- Samples:", length(sampleNames(merged_gs)), "\n")
+    cat("- Populations:", length(gh_get_pop_paths(merged_gs[[1]])), "\n")
+    cat("- Metadata columns:", ncol(pData(merged_gs)), "\n")
+    
+    return(merged_gs)
+    
+  }, error = function(e) {
+    cat("Error during merge:", e$message, "\n")
+    cat("This may be due to incompatible gating structures or channel differences\n")
+    return(NULL)
+  })
+}
+
+# Function to merge multiple GatingSets
+merge_multiple_gating_sets <- function(gs_list, conflict_resolution = "interactive") {
+  
+  if(length(gs_list) < 2) {
+    stop("Need at least 2 GatingSets to merge")
+  }
+  
+  cat("=== Merging Multiple GatingSets ===\n")
+  cat("Number of GatingSets:", length(gs_list), "\n")
+  
+  # Show summary of each GatingSet
+  for(i in seq_along(gs_list)) {
+    cat(sprintf("GS%d - Samples: %d\n", i, length(sampleNames(gs_list[[i]]))))
+  }
+  
+  # Start with first GatingSet and progressively merge others
+  merged_gs <- gs_list[[1]]
+  
+  for(i in 2:length(gs_list)) {
+    cat(sprintf("\nMerging GS%d...\n", i))
+    merged_gs <- merge_gating_sets(merged_gs, gs_list[[i]], conflict_resolution)
+    
+    if(is.null(merged_gs)) {
+      stop(sprintf("Failed to merge GS%d", i))
+    }
+  }
+  
+  cat("\nFinal merged GatingSet:\n")
+  cat("- Total samples:", length(sampleNames(merged_gs)), "\n")
+  cat("- Populations:", length(gh_get_pop_paths(merged_gs[[1]])), "\n")
+  
+  return(merged_gs)
+}
+
+# Function to add distinguishing metadata before merging
+add_source_metadata <- function(gs, source_name) {
+  
+  current_pd <- pData(gs)
+  current_pd$source_gs <- source_name
+  pData(gs) <- current_pd
+  
+  cat("Added source metadata:", source_name, "to", nrow(current_pd), "samples\n")
+  
+  return(gs)
+}
+
+# Enhanced merge with source tracking
+merge_gating_sets_with_tracking <- function(gs1, gs2, gs1_name = "GS1", gs2_name = "GS2", 
+                                            conflict_resolution = "interactive") {
+  
+  # Add source tracking metadata
+  gs1_tracked <- add_source_metadata(gs1, gs1_name)
+  gs2_tracked <- add_source_metadata(gs2, gs2_name) 
+  
+  # Perform merge
+  merged_gs <- merge_gating_sets(gs1_tracked, gs2_tracked, conflict_resolution)
+  
+  if(!is.null(merged_gs)) {
+    # Show source distribution
+    source_counts <- table(pData(merged_gs)$source_gs)
+    cat("\nSource distribution in merged GatingSet:\n")
+    print(source_counts)
+  }
+  
+  return(merged_gs)
+}
+
+# Function to check compatibility before attempting merge
+check_gating_set_compatibility <- function(gs1, gs2) {
+  
+  cat("=== GatingSet Compatibility Check ===\n")
+  
+  # Check sample overlap
+  samples1 <- sampleNames(gs1)
+  samples2 <- sampleNames(gs2)
+  overlapping <- intersect(samples1, samples2)
+  
+  cat("Sample name overlap:", length(overlapping), "samples\n")
+  
+  # Check channel compatibility
+  channels1 <- colnames(gh_pop_get_data(gs1[[1]]))
+  channels2 <- colnames(gh_pop_get_data(gs2[[1]]))
+  
+  common_channels <- intersect(channels1, channels2)
+  missing_in_gs2 <- setdiff(channels1, channels2)
+  missing_in_gs1 <- setdiff(channels2, channels1)
+  
+  cat("Common channels:", length(common_channels), "\n")
+  cat("Channels only in GS1:", length(missing_in_gs2), "\n")
+  cat("Channels only in GS2:", length(missing_in_gs1), "\n")
+  
+  # Check gating tree similarity
+  pops1 <- gh_get_pop_paths(gs1[[1]])
+  pops2 <- gh_get_pop_paths(gs2[[1]])
+  
+  common_pops <- intersect(pops1, pops2)
+  similarity <- length(common_pops) / max(length(pops1), length(pops2)) * 100
+  
+  cat("Gating tree similarity:", round(similarity, 1), "%\n")
+  
+  # Overall compatibility assessment
+  compatible <- TRUE
+  issues <- character(0)
+  
+  if(length(overlapping) > 0) {
+    issues <- c(issues, "Sample name conflicts")
+    compatible <- FALSE
+  }
+  
+  if(length(missing_in_gs1) > 0 || length(missing_in_gs2) > 0) {
+    issues <- c(issues, "Channel differences")
+  }
+  
+  if(similarity < 80) {
+    issues <- c(issues, "Major gating tree differences")
+  }
+  
+  if(compatible) {
+    cat("Status: Compatible for merging\n")
+  } else {
+    cat("Status: Issues detected\n")
+    cat("Issues:", paste(issues, collapse = ", "), "\n")
+  }
+  
+  return(list(
+    compatible = compatible,
+    issues = issues,
+    sample_overlap = length(overlapping),
+    channel_similarity = length(common_channels) / max(length(channels1), length(channels2)) * 100,
+    gating_similarity = similarity
+  ))
+}
+
+# Usage examples:
+
+# Example 1: Basic merge
+# merged_gs <- merge_gating_sets(gs1, gs2)
+
+# Example 2: Merge with source tracking
+# merged_gs <- merge_gating_sets_with_tracking(gs1, gs2, "Experiment1", "Experiment2")
+
+# Example 3: Check compatibility first
+# compatibility <- check_gating_set_compatibility(gs1, gs2)
+# if(compatibility$compatible) {
+#   merged_gs <- merge_gating_sets(gs1, gs2)
+# }
+
+# Example 4: Merge multiple GatingSets
+# gs_list <- list(gs1, gs2, gs3)
+# merged_gs <- merge_multiple_gating_sets(gs_list)
+
 # ============================================================================
 # NODE SELECTION AND RESOLUTION
 # ============================================================================
@@ -1774,7 +2352,7 @@ select_channels_interactive <- function(gs) {
   
   # Identify compensated channels
   comp_channels <- lookup %>%
-    filter(str_detect(colname, "(?i)comp")) %>%
+    dplyr::filter(str_detect(colname, "(?i)comp")) %>%
     pull(colname)
   
   while(TRUE) {
@@ -1828,7 +2406,7 @@ select_channels_interactive <- function(gs) {
              
              "3" = {
                cat(sprintf("Using %d compensated channels:\n", length(comp_channels)))
-               comp_lookup <- lookup %>% filter(colname %in% comp_channels)
+               comp_lookup <- lookup %>% dplyr::filter(colname %in% comp_channels)
                iwalk(comp_lookup$colname, ~cat(sprintf("  %d. %s :: %s\n", .y, .x, 
                                                        comp_lookup$marker[comp_lookup$colname == .x])))
                
@@ -1992,7 +2570,7 @@ extract_mfi <- function(gs, nodes, channels = NULL, summary_fun = median, keywor
     # Handle compensated channels selection
     lookup <- get_marker_lookup(gs)
     channels <- lookup %>%
-      filter(str_detect(colname, "(?i)comp")) %>%
+      dplyr::filter(str_detect(colname, "(?i)comp")) %>%
       pull(colname)
     
     if(length(channels) == 0) {
@@ -2749,7 +3327,7 @@ define_analysis_factors <- function(df) {
   
   tryCatch({
     tissue_final <- df %>% 
-      filter(!is.na(tissue_factor), tissue_factor != "") %>%
+      dplyr::filter(!is.na(tissue_factor), tissue_factor != "") %>%
       count(tissue_factor, name = "n") %>% 
       arrange(desc(n))
     cat("\nTissue Factor Groups:\n")
@@ -2757,7 +3335,7 @@ define_analysis_factors <- function(df) {
     
     if(pairing_factor_col != "none") {
       pairing_final <- df %>% 
-        filter(!is.na(pairing_factor), pairing_factor != "") %>%
+        dplyr::filter(!is.na(pairing_factor), pairing_factor != "") %>%
         count(pairing_factor, name = "n") %>% 
         arrange(desc(n))
       cat("\nPairing Factor Groups:\n")
@@ -3013,7 +3591,7 @@ data_clean_custom <- function(data, auto_save = FALSE) {
     
     unstained_rows <- df %>%
       mutate(row_id = row_number()) %>%
-      filter(str_detect(tolower(Sample), pattern)) %>%
+      dplyr::filter(str_detect(tolower(Sample), pattern)) %>%
       pull(row_id)
     
     if(length(unstained_rows) == 0) {
@@ -3157,7 +3735,7 @@ create_subgroup_plot <- function(df, test_type = "t_test", facet_var = "tissue_f
       # When faceting by NodeShort, group by NodeShort for stats
       stat_test_results <- df %>%
         group_by(NodeShort) %>%
-        filter(n_distinct(congenics) == 2) %>%
+        dplyr::filter(n_distinct(congenics) == 2) %>%
         {
           if (test_type == "t_test") {
             t_test(., Freq ~ congenics, paired = TRUE)
@@ -3171,7 +3749,7 @@ create_subgroup_plot <- function(df, test_type = "t_test", facet_var = "tissue_f
       # When faceting by tissue_factor or no faceting, group by tissue_factor
       stat_test_results <- df %>%
         group_by(tissue_factor) %>%
-        filter(n_distinct(congenics) == 2) %>%
+        dplyr::filter(n_distinct(congenics) == 2) %>%
         {
           if (test_type == "t_test") {
             t_test(., Freq ~ congenics, paired = TRUE)
@@ -3341,7 +3919,7 @@ create_paired_comparison_plots <- function(data, auto_save = FALSE) {
         # When faceting by NodeShort, group by NodeShort for stats
         stat_test_results <- df %>%
           group_by(NodeShort) %>%
-          filter(n_distinct(congenics) == 2) %>%
+          dplyr::filter(n_distinct(congenics) == 2) %>%
           {
             if(test_type == "t_test") {
               t_test(., Freq ~ congenics, paired = TRUE)
@@ -3355,7 +3933,7 @@ create_paired_comparison_plots <- function(data, auto_save = FALSE) {
         # When faceting by tissue_factor or no faceting, group by tissue_factor
         stat_test_results <- df %>%
           group_by(tissue_factor) %>%
-          filter(n_distinct(congenics) == 2) %>%
+          dplyr::filter(n_distinct(congenics) == 2) %>%
           {
             if(test_type == "t_test") {
               t_test(., Freq ~ congenics, paired = TRUE)
@@ -3557,7 +4135,7 @@ library(grid)
 
 select_congenics_interactive <- function(mfi_data) {
   available_congenics <- mfi_data %>%
-    filter(!is.na(congenics)) %>%
+    dplyr::filter(!is.na(congenics)) %>%
     pull(congenics) %>%
     unique() %>%
     sort()
@@ -3573,7 +4151,7 @@ select_congenics_interactive <- function(mfi_data) {
   cat("Available congenics in your data:\n")
   iwalk(available_congenics, function(congenic, idx) {
     sample_count <- mfi_data %>%
-      filter(congenics == congenic) %>%
+      dplyr::filter(congenics == congenic) %>%
       pull(Sample) %>%
       n_distinct()
     
@@ -3595,7 +4173,7 @@ select_congenics_interactive <- function(mfi_data) {
     if (choice == as.character(length(available_congenics) + 2)) {
       cat("\n--- Congenic Distribution by Tissue ---\n")
       distribution <- mfi_data %>%
-        filter(!is.na(congenics)) %>%
+        dplyr::filter(!is.na(congenics)) %>%
         count(tissue_factor, congenics) %>%
         pivot_wider(names_from = congenics, values_from = n, values_fill = 0)
       
@@ -3650,7 +4228,7 @@ select_grouping_option <- function(mfi_data) {
     } else if (choice == "3") {
       cat("\n--- Tissue Distribution ---\n")
       distribution <- mfi_data %>%
-        filter(!is.na(congenics)) %>%
+        dplyr::filter(!is.na(congenics)) %>%
         count(tissue_factor, congenics) %>%
         arrange(tissue_factor, congenics)
       
@@ -3658,7 +4236,7 @@ select_grouping_option <- function(mfi_data) {
       print(distribution)
       
       marker_dist <- mfi_data %>%
-        filter(!is.na(congenics)) %>%
+        dplyr::filter(!is.na(congenics)) %>%
         count(tissue_factor, marker) %>%
         group_by(tissue_factor) %>%
         summarise(
@@ -3681,7 +4259,7 @@ select_grouping_option <- function(mfi_data) {
 
 select_markers_interactive <- function(mfi_data) {
   available_markers <- mfi_data %>%
-    filter(!is.na(congenics)) %>%
+    dplyr::filter(!is.na(congenics)) %>%
     pull(marker) %>%
     unique() %>%
     sort()
@@ -3697,7 +4275,7 @@ select_markers_interactive <- function(mfi_data) {
   cat("Available markers in your data:\n")
   iwalk(available_markers, function(marker, idx) {
     measurement_count <- mfi_data %>%
-      filter(marker == .env$marker, !is.na(congenics)) %>%
+      dplyr::filter(marker == .env$marker, !is.na(congenics)) %>%
       nrow()
     
     cat(sprintf("%2d. %s (%d measurements)\n", idx, marker, measurement_count))
@@ -3719,7 +4297,7 @@ select_markers_interactive <- function(mfi_data) {
     if (choice == as.character(length(available_markers) + 2)) {
       cat("\n--- Marker Distribution by Tissue ---\n")
       distribution <- mfi_data %>%
-        filter(!is.na(congenics)) %>%
+        dplyr::filter(!is.na(congenics)) %>%
         count(tissue_factor, marker) %>%
         pivot_wider(names_from = tissue_factor, values_from = n, values_fill = 0)
       
@@ -4115,7 +4693,7 @@ diagnose_mfi_data <- function(mfi_data) {
   if (all(c("tissue_factor", "congenics") %in% names(mfi_data))) {
     cat("\n--- Sample Distribution ---\n")
     sample_dist <- mfi_data %>%
-      filter(!is.na(congenics), !is.na(tissue_factor)) %>%
+      dplyr::filter(!is.na(congenics), !is.na(tissue_factor)) %>%
       count(tissue_factor, congenics) %>%
       pivot_wider(names_from = congenics, values_from = n, values_fill = 0)
     
@@ -4127,7 +4705,7 @@ show_data_distribution <- function(mfi_data, selected_congenics, selected_marker
   cat("\n=== DATA DISTRIBUTION ANALYSIS ===\n")
   
   filtered_data <- mfi_data %>%
-    filter(congenics %in% selected_congenics,
+    dplyr::filter(congenics %in% selected_congenics,
            marker %in% selected_markers,
            !is.na(MFI))
   
@@ -4175,7 +4753,7 @@ show_data_distribution <- function(mfi_data, selected_congenics, selected_marker
   
   cat("\n--- RECOMMENDATIONS ---\n")
   n_groups <- length(selected_congenics)
-  normal_pct <- norm_summary %>% filter(normal_likely == "Yes") %>% pull(percentage)
+  normal_pct <- norm_summary %>% dplyr::filter(normal_likely == "Yes") %>% pull(percentage)
   if (length(normal_pct) == 0) normal_pct <- 0
   
   if (n_groups == 2) {
@@ -4201,7 +4779,7 @@ show_data_distribution <- function(mfi_data, selected_congenics, selected_marker
   cat("\n--- Example Distributions (first 3 markers) ---\n")
   example_markers <- head(selected_markers, 3)
   for (marker in example_markers) {
-    marker_data <- filtered_data %>% filter(marker == !!marker)
+    marker_data <- filtered_data %>% dplyr::filter(marker == !!marker)
     cat(sprintf("\n%s:\n", marker))
     marker_summary <- marker_data %>%
       group_by(congenics) %>%
@@ -4227,7 +4805,7 @@ perform_statistical_analysis <- function(mfi_data, selected_congenics, selected_
   cat("Test type:", stats_config$test_type, "\n")
   
   filtered_data <- mfi_data %>%
-    filter(congenics %in% selected_congenics,
+    dplyr::filter(congenics %in% selected_congenics,
            marker %in% selected_markers,
            !is.na(MFI))
   
@@ -4245,7 +4823,7 @@ perform_statistical_analysis <- function(mfi_data, selected_congenics, selected_
   for (current_tissue in unique_tissues) {
     cat(sprintf("\nProcessing tissue: %s\n", current_tissue))
     
-    tissue_data <- filtered_data %>% filter(tissue_factor == current_tissue)
+    tissue_data <- filtered_data %>% dplyr::filter(tissue_factor == current_tissue)
     
     if (nrow(tissue_data) == 0) {
       warning(paste("No data for tissue:", current_tissue))
@@ -4253,7 +4831,7 @@ perform_statistical_analysis <- function(mfi_data, selected_congenics, selected_
     }
     
     for (current_marker in selected_markers) {
-      marker_tissue_data <- tissue_data %>% filter(marker == current_marker)
+      marker_tissue_data <- tissue_data %>% dplyr::filter(marker == current_marker)
       
       if (nrow(marker_tissue_data) < 2) {
         warning(paste("Insufficient data for marker:", current_marker, "in tissue:", current_tissue))
@@ -4293,8 +4871,8 @@ perform_statistical_analysis <- function(mfi_data, selected_congenics, selected_
 # Individual test functions
 perform_t_test <- function(marker_data, stats_config) {
   groups <- stats_config$groups
-  group1_data <- marker_data %>% filter(congenics == groups[1]) %>% pull(MFI)
-  group2_data <- marker_data %>% filter(congenics == groups[2]) %>% pull(MFI)
+  group1_data <- marker_data %>% dplyr::filter(congenics == groups[1]) %>% pull(MFI)
+  group2_data <- marker_data %>% dplyr::filter(congenics == groups[2]) %>% pull(MFI)
   
   if (length(group1_data) == 0 || length(group2_data) == 0) {
     return(NULL)
@@ -4309,7 +4887,7 @@ perform_t_test <- function(marker_data, stats_config) {
     paired_data <- marker_data %>%
       select(all_of(c(stats_config$pairing_var, "congenics", "MFI"))) %>%
       pivot_wider(names_from = congenics, values_from = MFI) %>%
-      filter(!is.na(.data[[groups[1]]]), !is.na(.data[[groups[2]]]))
+      dplyr::filter(!is.na(.data[[groups[1]]]), !is.na(.data[[groups[2]]]))
     
     if (nrow(paired_data) < 2) {
       warning("Insufficient paired data for t-test")
@@ -4348,8 +4926,8 @@ perform_t_test <- function(marker_data, stats_config) {
 
 perform_mannwhitney_test <- function(marker_data, stats_config) {
   groups <- stats_config$groups
-  group1_data <- marker_data %>% filter(congenics == groups[1]) %>% pull(MFI)
-  group2_data <- marker_data %>% filter(congenics == groups[2]) %>% pull(MFI)
+  group1_data <- marker_data %>% dplyr::filter(congenics == groups[1]) %>% pull(MFI)
+  group2_data <- marker_data %>% dplyr::filter(congenics == groups[2]) %>% pull(MFI)
   
   if (length(group1_data) == 0 || length(group2_data) == 0) {
     return(NULL)
@@ -4379,7 +4957,7 @@ perform_wilcoxon_test <- function(marker_data, stats_config) {
   paired_data <- marker_data %>%
     select(all_of(c(stats_config$pairing_var, "congenics", "MFI"))) %>%
     pivot_wider(names_from = congenics, values_from = MFI) %>%
-    filter(!is.na(.data[[groups[1]]]), !is.na(.data[[groups[2]]]))
+    dplyr::filter(!is.na(.data[[groups[1]]]), !is.na(.data[[groups[2]]]))
   
   if (nrow(paired_data) < 2) {
     warning("Insufficient paired data for Wilcoxon test")
@@ -4401,7 +4979,7 @@ perform_wilcoxon_test <- function(marker_data, stats_config) {
 perform_anova_test <- function(marker_data, stats_config) {
   anova_data <- marker_data %>%
     select(congenics, MFI) %>%
-    filter(!is.na(MFI))
+    dplyr::filter(!is.na(MFI))
   
   if (nrow(anova_data) < 3) {
     warning("Insufficient data for ANOVA")
@@ -4436,7 +5014,7 @@ perform_anova_test <- function(marker_data, stats_config) {
 perform_kruskal_test <- function(marker_data, stats_config) {
   anova_data <- marker_data %>%
     select(congenics, MFI) %>%
-    filter(!is.na(MFI))
+    dplyr::filter(!is.na(MFI))
   
   if (nrow(anova_data) < 3) {
     warning("Insufficient data for Kruskal-Wallis test")
@@ -4479,9 +5057,9 @@ perform_rm_anova_test <- function(marker_data, stats_config) {
   
   rm_data <- marker_data %>%
     select(all_of(c(stats_config$pairing_var, "congenics", "MFI"))) %>%
-    filter(!is.na(MFI)) %>%
+    dplyr::filter(!is.na(MFI)) %>%
     group_by(.data[[stats_config$pairing_var]]) %>%
-    filter(n_distinct(congenics) == length(stats_config$groups)) %>%
+    dplyr::filter(n_distinct(congenics) == length(stats_config$groups)) %>%
     ungroup()
   
   if (nrow(rm_data) < 3) {
@@ -4522,9 +5100,9 @@ perform_friedman_test <- function(marker_data, stats_config) {
   
   friedman_data <- marker_data %>%
     select(all_of(c(stats_config$pairing_var, "congenics", "MFI"))) %>%
-    filter(!is.na(MFI)) %>%
+    dplyr::filter(!is.na(MFI)) %>%
     pivot_wider(names_from = congenics, values_from = MFI) %>%
-    filter(if_all(all_of(stats_config$groups), ~ !is.na(.)))
+    dplyr::filter(if_all(all_of(stats_config$groups), ~ !is.na(.)))
   
   if (nrow(friedman_data) < 3) {
     warning("Insufficient paired data for Friedman test")
@@ -4670,17 +5248,17 @@ create_mfi_heatmaps_with_stats <- function(mfi_data,
   }
   
   mfi_clean <- mfi_data %>%
-    filter(!is.na(congenics))
+    dplyr::filter(!is.na(congenics))
   
   if (!is.null(selected_congenics)) {
     mfi_clean <- mfi_clean %>%
-      filter(congenics %in% selected_congenics)
+      dplyr::filter(congenics %in% selected_congenics)
     cat("Filtered to selected congenics:", paste(selected_congenics, collapse = ", "), "\n")
   }
   
   if (!is.null(selected_markers)) {
     mfi_clean <- mfi_clean %>%
-      filter(marker %in% selected_markers)
+      dplyr::filter(marker %in% selected_markers)
     cat("Filtered to selected markers:", paste(selected_markers, collapse = ", "), "\n")
   }
   
@@ -4728,7 +5306,7 @@ create_separate_heatmaps_with_stats <- function(mfi_clean, scale_method, aggrega
     cat("Processing tissue:", group, "\n")
     
     group_data <- mfi_clean %>%
-      filter(tissue_factor == group)
+      dplyr::filter(tissue_factor == group)
     
     if (nrow(group_data) == 0) {
       warning(paste("No data found for tissue:", group))
@@ -5049,7 +5627,7 @@ create_tissue_significance_matrix <- function(stats_results, selected_markers, c
   current_tissue <- as.character(current_tissue)
   
   tissue_summary <- summary_df %>%
-    filter(tissue == current_tissue)
+    dplyr::filter(tissue == current_tissue)
   
   if (nrow(tissue_summary) == 0) {
     return(NULL)
@@ -5160,7 +5738,7 @@ create_mfi_heatmaps_interactive_enhanced <- function(mfi_data, auto_save = FALSE
     
     # Step 3: Select markers
     filtered_data <- mfi_data %>%
-      filter(!is.na(congenics), congenics %in% selected_congenics)
+      dplyr::filter(!is.na(congenics), congenics %in% selected_congenics)
     
     selected_markers <- select_markers_interactive(filtered_data)
     if(is.null(selected_markers)) {
@@ -5490,7 +6068,7 @@ create_engraftment_plot <- function(data,
     
     # Create a lookup table for normalization frequencies
     norm_lookup <- congenic_engraftment %>%
-      filter(.data[[group_col]] == normalization_tissue) %>%
+      dplyr::filter(.data[[group_col]] == normalization_tissue) %>%
       select(all_of(c(marker_col, "well_letter", freq_col)))
     
     # Rename the frequency column to norm_freq
@@ -5500,7 +6078,7 @@ create_engraftment_plot <- function(data,
     congenic_engraftment <- congenic_engraftment %>%
       left_join(norm_lookup, by = c(marker_col, "well_letter")) %>%
       # Check for missing normalization values
-      filter(!is.na(norm_freq)) %>%
+      dplyr::filter(!is.na(norm_freq)) %>%
       mutate(
         normalized_freq = ifelse(norm_freq == 0, .data[[freq_col]], .data[[freq_col]] / norm_freq)
       ) %>%
@@ -5528,7 +6106,7 @@ create_engraftment_plot <- function(data,
       engraftment_ratio = log2(.data[[ko_marker]] / .data[[wt_marker]])
     ) %>%
     # Filter out infinite values
-    filter(is.finite(engraftment_ratio)) %>%
+    dplyr::filter(is.finite(engraftment_ratio)) %>%
     select(all_of(c(wellid_col, group_col)), engraftment_ratio)
   
   # Check if we have data after processing
@@ -5560,7 +6138,7 @@ create_engraftment_plot <- function(data,
     if(order_by_mean) {
       # Order other groups by mean (excluding normalization tissue)
       other_stats <- summary_stats %>% 
-        filter(.data[[group_col]] != normalization_tissue)
+        dplyr::filter(.data[[group_col]] != normalization_tissue)
       other_groups_ordered <- other_stats[[group_col]][order(-other_stats$mean_val)]
       factor_levels <- c(normalization_tissue, other_groups_ordered)
     } else {
@@ -5747,7 +6325,7 @@ create_paired_comparison_plots_enhanced <- function(data,
         if(test_type == "paired_t_test" && pairing_enabled) {
           stat_test_results <- df %>%
             group_by(NodeShort) %>%
-            filter(n_distinct(congenics) == 2) %>%
+            dplyr::filter(n_distinct(congenics) == 2) %>%
             pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
                             paired = TRUE, 
                             p.adjust.method = "bonferroni") %>%
@@ -5756,7 +6334,7 @@ create_paired_comparison_plots_enhanced <- function(data,
         } else if(test_type == "wilcox_test" && pairing_enabled) {
           stat_test_results <- df %>%
             group_by(NodeShort) %>%
-            filter(n_distinct(congenics) == 2) %>%
+            dplyr::filter(n_distinct(congenics) == 2) %>%
             pairwise_wilcox_test(as.formula(paste("Freq ~", "congenics")), 
                                  paired = TRUE,
                                  p.adjust.method = "bonferroni") %>%
@@ -5766,7 +6344,7 @@ create_paired_comparison_plots_enhanced <- function(data,
           # Unpaired tests
           stat_test_results <- df %>%
             group_by(NodeShort) %>%
-            filter(n_distinct(congenics) == 2) %>%
+            dplyr::filter(n_distinct(congenics) == 2) %>%
             pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
                             paired = FALSE,
                             p.adjust.method = "bonferroni") %>%
@@ -5778,7 +6356,7 @@ create_paired_comparison_plots_enhanced <- function(data,
         if(test_type == "paired_t_test" && pairing_enabled) {
           stat_test_results <- df %>%
             group_by(.data[[tissue_col]]) %>%
-            filter(n_distinct(congenics) == 2) %>%
+            dplyr::filter(n_distinct(congenics) == 2) %>%
             pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
                             paired = TRUE,
                             p.adjust.method = "bonferroni") %>%
@@ -5787,7 +6365,7 @@ create_paired_comparison_plots_enhanced <- function(data,
         } else if(test_type == "wilcox_test" && pairing_enabled) {
           stat_test_results <- df %>%
             group_by(.data[[tissue_col]]) %>%
-            filter(n_distinct(congenics) == 2) %>%
+            dplyr::filter(n_distinct(congenics) == 2) %>%
             pairwise_wilcox_test(as.formula(paste("Freq ~", "congenics")), 
                                  paired = TRUE,
                                  p.adjust.method = "bonferroni") %>%
@@ -5797,7 +6375,7 @@ create_paired_comparison_plots_enhanced <- function(data,
           # Unpaired tests
           stat_test_results <- df %>%
             group_by(.data[[tissue_col]]) %>%
-            filter(n_distinct(congenics) == 2) %>%
+            dplyr::filter(n_distinct(congenics) == 2) %>%
             pairwise_t_test(as.formula(paste("Freq ~", "congenics")), 
                             paired = FALSE,
                             p.adjust.method = "bonferroni") %>%
@@ -6206,7 +6784,7 @@ exclude_samples_by_metadata <- function(gs, pd) {
   }
   
   excluded_samples <- pd %>%
-    filter(.data[[selected_col]] %in% values_to_exclude) %>%
+    dplyr::filter(.data[[selected_col]] %in% values_to_exclude) %>%
     pull(Sample)
   
   cat("Samples to exclude based on", selected_col, ":\n")
@@ -6354,11 +6932,11 @@ select_markers_for_umap <- function(gs) {
   exclude_regex <- paste0("(?i)", paste(exclude_patterns, collapse = "|"))
   
   potential_markers <- lookup %>%
-    filter(!str_detect(colname, exclude_regex)) %>%
-    filter(!str_detect(marker, exclude_regex))
+    dplyr::filter(!str_detect(colname, exclude_regex)) %>%
+    dplyr::filter(!str_detect(marker, exclude_regex))
   
   comp_channels <- potential_markers %>%
-    filter(str_detect(colname, "(?i)comp")) %>%
+    dplyr::filter(str_detect(colname, "(?i)comp")) %>%
     pull(colname)
   
   while(TRUE) {
@@ -6411,7 +6989,7 @@ select_markers_for_umap <- function(gs) {
                return(list(
                  channels = selected_channels,
                  markers = selected_markers,
-                 lookup = potential_markers %>% filter(colname %in% selected_channels)
+                 lookup = potential_markers %>% dplyr::filter(colname %in% selected_channels)
                ))
              }
            },
@@ -6422,7 +7000,7 @@ select_markers_for_umap <- function(gs) {
                next
              }
              
-             selected_lookup <- potential_markers %>% filter(colname %in% comp_channels)
+             selected_lookup <- potential_markers %>% dplyr::filter(colname %in% comp_channels)
              
              cat(sprintf("Using %d compensated channels:\n", nrow(selected_lookup)))
              iwalk(selected_lookup$colname, ~cat(sprintf("  %d. %s (%s)\n", .y, 
@@ -6532,7 +7110,7 @@ get_population_event_counts <- function(gs, node, selected_samples = NULL) {
 
 extract_single_cell_data <- function(gs, node, selected_markers, 
                                      selected_samples = NULL,
-                                     keywords = c("$WELLID", "GROUPNAME"),
+                                     keywords = c("pairing_factor", "tissue_factor"),
                                      sample_limit = NULL, 
                                      max_cells_per_sample = 5000) {
   
@@ -7836,7 +8414,7 @@ import_external_metadata <- function(gs) {
       final_metadata <- metadata %>%
         select(all_of(c(sample_col, selected_cols))) %>%
         rename(Sample = all_of(sample_col)) %>%
-        filter(Sample %in% current_samples) %>%
+        dplyr::filter(Sample %in% current_samples) %>%
         as_tibble()
       
       # Final verification - ensure no duplicates at sample level
@@ -7911,7 +8489,7 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
       n_rows = n(),
       .groups = "drop"
     ) %>%
-    filter(n_rows > 1)
+    dplyr::filter(n_rows > 1)
   
   if(nrow(metadata_consistency_check) > 0) {
     cat("Found samples with multiple metadata rows in external data:\n")
@@ -7922,7 +8500,7 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
     # Check if duplicated samples have identical metadata
     problem_samples <- c()
     for(sample_id in metadata_consistency_check$Sample) {
-      sample_rows <- external_metadata %>% filter(Sample == sample_id)
+      sample_rows <- external_metadata %>% dplyr::filter(Sample == sample_id)
       
       # Check if all rows are identical (excluding Sample column)
       metadata_cols <- setdiff(names(sample_rows), "Sample")
@@ -7942,7 +8520,7 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
       cat("ERROR: Found samples with inconsistent metadata:\n")
       for(sample_id in head(problem_samples, 5)) {
         cat("Sample:", sample_id, "\n")
-        problem_rows <- external_metadata %>% filter(Sample == sample_id)
+        problem_rows <- external_metadata %>% dplyr::filter(Sample == sample_id)
         print(problem_rows)
         cat("\n")
       }
@@ -8015,7 +8593,7 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
 # MAIN ENHANCED FUNCTION WITH SAMPLE EXCLUSION
 # ============================================================================
 
-analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME")) {
+analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissue_factor")) {
   
   cat("=== Enhanced Interactive UMAP Analysis for Flow Cytometry ===\n")
   cat("Features:\n")
@@ -9256,7 +9834,7 @@ create_mfi_violin_plots <- function(clustered_data, marker_names,
   
   # Create violin plots
   violin_plots <- map(selected_markers, function(marker) {
-    marker_data <- violin_data %>% filter(Marker == marker)
+    marker_data <- violin_data %>% dplyr::filter(Marker == marker)
     
     ggplot(marker_data, aes(x = .data[[cluster_column]], y = Expression, 
                             fill = .data[[cluster_column]])) +
@@ -9325,7 +9903,7 @@ perform_cluster_differential_analysis <- function(mfi_analysis,
   
   # Get reference cluster expression values
   reference_expr <- mfi_data %>%
-    filter(.data[[cluster_column]] == reference_cluster) %>%
+    dplyr::filter(.data[[cluster_column]] == reference_cluster) %>%
     select(Marker, mean_expr) %>%
     rename(ref_mean = mean_expr)
   
@@ -9344,7 +9922,7 @@ perform_cluster_differential_analysis <- function(mfi_analysis,
   
   # FIXED: Summarize differential markers per cluster with proper variable handling
   cluster_diff_summary <- diff_expr %>%
-    filter(.data[[cluster_column]] != reference_cluster) %>%
+    dplyr::filter(.data[[cluster_column]] != reference_cluster) %>%
     group_by(.data[[cluster_column]]) %>%
     summarise(
       n_upregulated = sum(is_upregulated, na.rm = TRUE),
@@ -9409,7 +9987,7 @@ extract_cluster_data <- function(clustered_data, target_cluster,
   
   # Extract cluster data
   cluster_data <- clustered_data %>%
-    filter(.data[[cluster_column]] == target_cluster)
+    dplyr::filter(.data[[cluster_column]] == target_cluster)
   
   cat("Extracted", nrow(cluster_data), "cells from", target_cluster, "\n")
   
