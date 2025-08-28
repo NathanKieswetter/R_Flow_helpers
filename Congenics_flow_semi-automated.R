@@ -1,22 +1,88 @@
+#=============================================================================
+# Package Installation and Loading
+#=============================================================================
+
+# Function to check and install CRAN packages
+install_cran_packages <- function(packages) {
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if(length(new_packages)) {
+    cat("Installing CRAN packages:", paste(new_packages, collapse = ", "), "\n")
+    install.packages(new_packages, dependencies = TRUE)
+  }
+}
+
+# Function to check and install Bioconductor packages
+install_bioc_packages <- function(packages) {
+  # First ensure BiocManager is installed
+  if (!require("BiocManager", quietly = TRUE)) {
+    install.packages("BiocManager")
+  }
+  
+  new_packages <- packages[!(packages %in% installed.packages()[,"Package"])]
+  if(length(new_packages)) {
+    cat("Installing Bioconductor packages:", paste(new_packages, collapse = ", "), "\n")
+    BiocManager::install(new_packages, ask = FALSE, update = FALSE)
+  }
+}
+
+# Define package lists
+cran_packages <- c(
+  "here",
+  "tidyverse", 
+  "ggpubr",
+  "rstatix",
+  "scales",
+  "glue",
+  "circlize",
+  "RColorBrewer",
+  "umap",
+  "cluster",
+  "factoextra",
+  "patchwork"
+)
+
+bioc_packages <- c(
+  "CytoML",
+  "flowCore", 
+  "flowWorkspace",
+  "CATALYST",
+  "FlowSOM",
+  "ConsensusClusterPlus",
+  "ComplexHeatmap"
+)
+
+# Check and install packages
+cat("Checking and installing required packages...\n")
+install_cran_packages(cran_packages)
+install_bioc_packages(bioc_packages)
+
+# Load all packages
+cat("Loading packages...\n")
+
+# Load CRAN packages
 library(here)
-library(CytoML)
-library(flowCore)
-library(flowWorkspace)
 library(tidyverse)
 library(ggpubr)
 library(rstatix)
 library(scales)
 library(glue)
-library(ComplexHeatmap)
 library(circlize)
 library(RColorBrewer)
 library(umap)
-library(CATALYST)
-library(FlowSOM)
-library(ConsensusClusterPlus)
 library(cluster)
 library(factoextra)
 library(patchwork)
+
+# Load Bioconductor packages
+library(CytoML)
+library(flowCore)
+library(flowWorkspace)
+library(CATALYST)
+library(FlowSOM)
+library(ConsensusClusterPlus)
+library(ComplexHeatmap)
+
+cat("All packages loaded successfully!\n")
 
 #=============================================================================
 # Folder structure helper functions
