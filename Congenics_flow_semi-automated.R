@@ -11,6 +11,12 @@ library(ComplexHeatmap)
 library(circlize)
 library(RColorBrewer)
 library(umap)
+library(CATALYST)
+library(FlowSOM)
+library(ConsensusClusterPlus)
+library(cluster)
+library(factoextra)
+library(patchwork)
 
 #=============================================================================
 # Folder structure helper functions
@@ -918,6 +924,7 @@ preview_keywords_only <- function(fcs_path, sample_limit = 5) {
 }
 
 #Extract data/counts
+# Completely bulletproof extract_counts_freqs_base function
 extract_counts_freqs_base <- function(gs, nodes, parent_mapping = NULL, keywords = NULL) {
   
   # Helper to safely get counts for a node in a sample
@@ -947,7 +954,7 @@ extract_counts_freqs_base <- function(gs, nodes, parent_mapping = NULL, keywords
       tibble(
         Sample = sample_name,
         Node = node,
-        Count = result$count,
+        Subpop = result$count,  # Name it Subpop directly to avoid any conflicts
         ParentCount = result$parent_count
       )
     })
@@ -957,14 +964,45 @@ extract_counts_freqs_base <- function(gs, nodes, parent_mapping = NULL, keywords
     stop("No counts extracted. Check that nodes exist in the gating set.")
   }
   
-  # Get ALL available sample metadata - don't filter by keywords yet
+  # Get ALL available sample metadata
   pd <- pData(gs) %>% 
     rownames_to_column("Sample")
   
-  # Join with all available metadata
+  # Debug: Check for column name conflicts BEFORE join
+  cat("Results columns before join:", paste(names(results), collapse = ", "), "\n")
+  cat("Metadata columns:", paste(names(pd), collapse = ", "), "\n")
+  
+  # Check for conflicts and rename them proactively
+  conflicting_cols <- intersect(names(results), names(pd))
+  conflicting_cols <- setdiff(conflicting_cols, "Sample")  # Sample is expected to match
+  
+  if(length(conflicting_cols) > 0) {
+    cat("⚠️  Column name conflicts detected:", paste(conflicting_cols, collapse = ", "), "\n")
+    cat("Renaming metadata columns to avoid conflicts\n")
+    
+    # Rename conflicting columns in metadata with .meta suffix
+    for(col in conflicting_cols) {
+      old_name <- col
+      new_name <- paste0(col, ".meta")
+      names(pd)[names(pd) == old_name] <- new_name
+      cat("Renamed metadata column:", old_name, "->", new_name, "\n")
+    }
+  }
+  
+  # Verify results structure before join
+  cat("Verifying 'Subpop' column exists:", "Subpop" %in% names(results), "\n")
+  
+  # Perform the join
+  cat("Performing left_join...\n")
   results <- results %>%
-    left_join(pd, by = "Sample") %>%
-    rename(Subpop = Count)
+    left_join(pd, by = "Sample")
+  
+  cat("Results columns after join:", paste(names(results), collapse = ", "), "\n")
+  
+  # Verify Subpop column still exists after join
+  if(!"Subpop" %in% names(results)) {
+    stop("ERROR: Subpop column disappeared after join! This indicates a serious column conflict.")
+  }
   
   # Calculate frequencies with custom parents if provided
   if(!is.null(parent_mapping)) {
@@ -1164,38 +1202,31 @@ analyze_flow_data_auto_enhanced <- function(gs,
       )
     }
     
-    # Apply the SAME factor definitions to MFI data
+    # Apply the SAME factor definitions to MFI data - FIXED VERSION
     if(!is.null(results$mfi) && nrow(results$mfi) > 0 && exists("factor_info")) {
       cat("Applying same factor definitions to MFI data...\n")
       
-      # Apply the same transformations that were applied to counts data
-      if(factor_info$original_tissue_col %in% names(results$mfi)) {
-        results$mfi <- results$mfi %>%
-          mutate(tissue_factor = .data[[factor_info$original_tissue_col]])
-      }
+      # For MFI data, we need to handle the fact that it has multiple rows per sample
+      # First, create a sample-level metadata table with the factor definitions
+      sample_factors <- results$counts %>%
+        select(Sample, tissue_factor, pairing_factor) %>%
+        distinct()
       
-      if(factor_info$pairing_enabled && factor_info$original_pairing_col %in% names(results$mfi)) {
-        # Handle the pairing factor creation logic
-        if(factor_info$original_pairing_col == "pairing_factor") {
-          # This means pairing factor was created from well ID
-          if("pairing_factor" %in% names(results$mfi)) {
-            results$mfi <- results$mfi %>%
-              mutate(pairing_factor = str_extract(pairing_factor, "^[A-H]"))
-          }
-        } else {
-          results$mfi <- results$mfi %>%
-            mutate(pairing_factor = .data[[factor_info$original_pairing_col]])
-        }
-      } else {
-        results$mfi <- results$mfi %>%
-          mutate(pairing_factor = "no_pairing")
-      }
+      # Remove any existing tissue_factor and pairing_factor columns from MFI data to avoid conflicts
+      results$mfi <- results$mfi %>%
+        select(-any_of(c("tissue_factor", "pairing_factor")))
+      
+      # Join the factor definitions to MFI data
+      results$mfi <- results$mfi %>%
+        left_join(sample_factors, by = "Sample")
       
       cat("✅ Applied factor definitions to MFI data\n")
     }
     
     # Store factor information in results
-    results$factor_info <- factor_info
+    if(exists("factor_info")) {
+      results$factor_info <- factor_info
+    }
     
     cat("\n✅ Factor definition complete!\n")
     cat("All subsequent analyses will use:\n")
@@ -1226,11 +1257,6 @@ analyze_flow_data_auto_enhanced <- function(gs,
   
   return(results)
 }
-
-cat("Enhanced functions loaded! All original function names preserved.\n")
-cat("Add auto_save=TRUE parameter to any function to skip save prompts.\n")
-cat("Enhanced folder structure created automatically.\n")
-
 # ============================================================================
 # NODE SELECTION AND RESOLUTION
 # ============================================================================
@@ -2247,23 +2273,40 @@ define_analysis_factors <- function(df) {
     cat("• Timepoint (Day_0, Day_7, Day_14, etc.)\n")
     cat("• Genotype (WT, KO, etc.)\n\n")
     
-    # Show unique values for potential tissue factors
+    # Show unique values for potential tissue factors with safer processing
     cat("Column preview with unique values:\n")
     for(i in seq_along(available_cols)) {
       col_name <- available_cols[i]
-      unique_vals <- unique(df[[col_name]])
       
-      # Only show if reasonable number of unique values (likely categorical)
-      if(length(unique_vals) <= 20 && length(unique_vals) > 1) {
-        cat(sprintf("%2d. %-20s | %d groups: %s\n", 
-                    i, col_name, length(unique_vals),
-                    paste(head(unique_vals, 4), collapse = ", ")))
-        if(length(unique_vals) > 4) cat(sprintf("%-24s   ... and %d more\n", "", length(unique_vals) - 4))
-      } else if(length(unique_vals) == 1) {
-        cat(sprintf("%2d. %-20s | 1 group: %s\n", i, col_name, unique_vals[1]))
-      } else {
-        cat(sprintf("%2d. %-20s | %d unique values (likely continuous)\n", i, col_name, length(unique_vals)))
-      }
+      # Safely get unique values
+      tryCatch({
+        col_data <- df[[col_name]]
+        
+        # Handle different data types safely
+        if(is.list(col_data)) {
+          cat(sprintf("%2d. %-20s | List column (not suitable for grouping)\n", i, col_name))
+          next
+        }
+        
+        # Convert to character to handle factors and other types
+        col_data_char <- as.character(col_data)
+        unique_vals <- unique(col_data_char[!is.na(col_data_char)])
+        
+        # Only show if reasonable number of unique values (likely categorical)
+        if(length(unique_vals) <= 20 && length(unique_vals) > 1) {
+          cat(sprintf("%2d. %-20s | %d groups: %s\n", 
+                      i, col_name, length(unique_vals),
+                      paste(head(unique_vals, 4), collapse = ", ")))
+          if(length(unique_vals) > 4) cat(sprintf("%-24s   ... and %d more\n", "", length(unique_vals) - 4))
+        } else if(length(unique_vals) == 1) {
+          cat(sprintf("%2d. %-20s | 1 group: %s\n", i, col_name, unique_vals[1]))
+        } else {
+          cat(sprintf("%2d. %-20s | %d unique values (likely continuous)\n", i, col_name, length(unique_vals)))
+        }
+        
+      }, error = function(e) {
+        cat(sprintf("%2d. %-20s | Error processing column\n", i, col_name))
+      })
     }
     
     tissue_choice <- readline("\nEnter column number or name for TISSUE FACTOR: ")
@@ -2284,21 +2327,81 @@ define_analysis_factors <- function(df) {
       next
     }
     
-    # Show tissue factor summary
-    tissue_summary <- df %>%
-      count(.data[[selected_tissue_factor]], name = "n_samples") %>%
-      arrange(desc(n_samples))
+    # Validate the selected column
+    selected_col_data <- df[[selected_tissue_factor]]
     
-    cat(sprintf("\n✅ Selected tissue factor: %s\n", selected_tissue_factor))
-    cat("Groups found:\n")
-    print(tissue_summary)
-    
-    confirm <- readline("Confirm this tissue factor? (y/n): ")
-    if(tolower(confirm) == "y") {
-      tissue_factor_col <- selected_tissue_factor
-    } else {
-      cat("Selection cancelled. Choose again.\n")
+    if(is.list(selected_col_data)) {
+      cat("❌ Selected column contains list data and cannot be used for grouping. Please choose another column.\n")
+      next
     }
+    
+    # Show tissue factor summary with safer processing
+    tryCatch({
+      # Get the selected column data and check its structure more thoroughly
+      selected_data <- df[[selected_tissue_factor]]
+      
+      # More robust validation
+      if(is.null(selected_data)) {
+        stop("Selected column is NULL")
+      }
+      
+      # Handle different data types more safely
+      if(is.data.frame(selected_data) || is.matrix(selected_data) || 
+         (is.list(selected_data) && !is.factor(selected_data))) {
+        stop("Selected column contains complex data structure (not a simple vector)")
+      }
+      
+      # Convert to character more safely
+      if(is.factor(selected_data)) {
+        char_data <- as.character(selected_data)
+      } else if(is.numeric(selected_data) || is.logical(selected_data)) {
+        char_data <- as.character(selected_data)
+      } else if(is.character(selected_data)) {
+        char_data <- selected_data
+      } else {
+        # Try to coerce to character, but wrap in additional error handling
+        char_data <- tryCatch({
+          as.character(selected_data)
+        }, error = function(e) {
+          stop("Cannot convert selected column to character: ", e$message)
+        })
+      }
+      
+      # Filter out NA and empty values
+      valid_data <- char_data[!is.na(char_data) & char_data != "" & char_data != "NA"]
+      
+      if(length(valid_data) == 0) {
+        stop("No valid (non-empty, non-NA) values found in selected column")
+      }
+      
+      # Create summary using base R to avoid dplyr issues
+      unique_vals <- unique(valid_data)
+      counts <- table(valid_data)
+      
+      # Create a simple summary
+      temp_df <- data.frame(
+        group = names(counts),
+        n_samples = as.numeric(counts),
+        stringsAsFactors = FALSE
+      )
+      temp_df <- temp_df[order(temp_df$n_samples, decreasing = TRUE), ]
+      names(temp_df)[1] <- selected_tissue_factor
+      
+      cat(sprintf("\n✅ Selected tissue factor: %s\n", selected_tissue_factor))
+      cat("Groups found:\n")
+      print(temp_df)
+      
+      confirm <- readline("Confirm this tissue factor? (y/n): ")
+      if(tolower(confirm) == "y") {
+        tissue_factor_col <- selected_tissue_factor
+      } else {
+        cat("Selection cancelled. Choose again.\n")
+      }
+      
+    }, error = function(e) {
+      cat("❌ Error processing selected column:", e$message, "\n")
+      cat("Please choose a different column.\n")
+    })
   }
   
   # ==========================================================================
@@ -2324,26 +2427,38 @@ define_analysis_factors <- function(df) {
     pairing_option <- readline("Choose pairing option (1-4): ")
     
     if(pairing_option == "1") {
-      # Use existing column
+      # Use existing column - with safer processing
       cat("\nColumns that might contain pairing information:\n")
       
-      # Show columns with reasonable number of unique values for pairing
       pairing_candidates <- character(0)
       counter <- 1
       
       for(col_name in available_cols) {
-        unique_vals <- unique(df[[col_name]])
-        n_unique <- length(unique_vals)
-        n_total <- nrow(df)
-        
-        # Good pairing candidates: fewer unique values than total rows, but more than 1
-        if(n_unique > 1 && n_unique < n_total && n_unique >= (n_total * 0.1)) {
-          avg_samples_per_group <- round(n_total / n_unique, 1)
-          cat(sprintf("%2d. %-20s | %d groups, avg %.1f samples/group\n", 
-                      counter, col_name, n_unique, avg_samples_per_group))
-          pairing_candidates <- c(pairing_candidates, col_name)
-          counter <- counter + 1
-        }
+        tryCatch({
+          col_data <- df[[col_name]]
+          
+          # Skip list columns
+          if(is.list(col_data)) {
+            next
+          }
+          
+          # Convert to character safely
+          col_data_char <- as.character(col_data)
+          unique_vals <- unique(col_data_char[!is.na(col_data_char) & col_data_char != ""])
+          n_unique <- length(unique_vals)
+          n_total <- nrow(df)
+          
+          # Good pairing candidates: fewer unique values than total rows, but more than 1
+          if(n_unique > 1 && n_unique < n_total && n_unique >= (n_total * 0.1)) {
+            avg_samples_per_group <- round(n_total / n_unique, 1)
+            cat(sprintf("%2d. %-20s | %d groups, avg %.1f samples/group\n", 
+                        counter, col_name, n_unique, avg_samples_per_group))
+            pairing_candidates <- c(pairing_candidates, col_name)
+            counter <- counter + 1
+          }
+        }, error = function(e) {
+          # Skip problematic columns silently
+        })
       }
       
       if(length(pairing_candidates) == 0) {
@@ -2358,29 +2473,42 @@ define_analysis_factors <- function(df) {
       if(grepl("^\\d+$", pair_choice)) {
         choice_num <- as.numeric(pair_choice)
         if(!is.na(choice_num) && choice_num >= 1 && choice_num <= length(pairing_candidates)) {
-          pairing_factor_col <- pairing_candidates[choice_num]
+          candidate_col <- pairing_candidates[choice_num]
+          
+          # Validate it's not a list column
+          if(!is.list(df[[candidate_col]])) {
+            pairing_factor_col <- candidate_col
+          } else {
+            cat("❌ Selected column contains list data. Please choose another.\n")
+          }
         }
-      } else if(pair_choice %in% available_cols) {
+      } else if(pair_choice %in% available_cols && !is.list(df[[pair_choice]])) {
         pairing_factor_col <- pair_choice
       }
       
     } else if(pairing_option == "2") {
-      # Extract from WELL ID
+      # Extract from WELL ID - similar logic as before but with safer processing
       cat("\nWELL ID Pairing Options:\n")
       cat("a. Row letter pairing (A1,A2,A3 = Mouse 1; B1,B2,B3 = Mouse 2)\n")
       cat("b. Custom pattern extraction\n")
       
       # Look for well ID columns
-      wellid_cols <- available_cols[grepl("well|WellID|Well_ID|pairing_factor", available_cols, ignore.case = TRUE)]
+      wellid_cols <- available_cols[grepl("well|WellID|Well_ID|\\$WELLID|\\$LOCATIONID|LOCATIONID", available_cols, ignore.case = TRUE)]
       
       if(length(wellid_cols) > 0) {
         cat("\nFound potential well ID columns:\n")
         iwalk(wellid_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
         
-        # Show examples
+        # Show examples safely
         for(col in wellid_cols) {
-          sample_vals <- head(unique(df[[col]]), 5)
-          cat(sprintf("  %s examples: %s\n", col, paste(sample_vals, collapse = ", ")))
+          tryCatch({
+            if(!is.list(df[[col]])) {
+              sample_vals <- head(unique(as.character(df[[col]])), 5)
+              cat(sprintf("  %s examples: %s\n", col, paste(sample_vals, collapse = ", ")))
+            }
+          }, error = function(e) {
+            cat(sprintf("  %s: Error reading examples\n", col))
+          })
         }
         
         wellid_choice <- readline("Enter well ID column number or name: ")
@@ -2396,7 +2524,7 @@ define_analysis_factors <- function(df) {
           selected_wellid <- wellid_choice
         }
         
-        if(!is.null(selected_wellid)) {
+        if(!is.null(selected_wellid) && !is.list(df[[selected_wellid]])) {
           cat("\nPairing method:\n")
           cat("a. Row letter (A1,A2→A; B1,B2→B)\n")
           cat("b. Custom pattern\n")
@@ -2405,33 +2533,32 @@ define_analysis_factors <- function(df) {
           
           if(tolower(method_choice) == "a") {
             # Create row letter pairing
-            pairing_factor_col <- "pairing_factor_created"  # Signal that we'll create this
+            pairing_factor_col <- "pairing_factor_created"
             df <- df %>%
-              mutate(pairing_factor_created = str_extract(.data[[selected_wellid]], "^[A-H]"))
+              mutate(pairing_factor_created = str_extract(as.character(.data[[selected_wellid]]), "^[A-H]"))
             
-            # Show pairing preview
-            pairing_preview <- df %>%
-              count(pairing_factor_created, name = "n_samples") %>%
-              arrange(pairing_factor_created)
-            
-            cat("\nPairing groups created from row letters:\n")
-            print(pairing_preview)
-            
-          } else if(tolower(method_choice) == "b") {
-            pattern <- readline("Enter regex pattern to extract pairing ID: ")
-            if(pattern != "") {
-              pairing_factor_col <- "pairing_factor_created"
-              df <- df %>%
-                mutate(pairing_factor_created = str_extract(.data[[selected_wellid]], pattern))
+            # Show pairing preview using base R to avoid dplyr issues
+            tryCatch({
+              pairing_data <- df$pairing_factor_created
+              valid_pairing <- pairing_data[!is.na(pairing_data) & pairing_data != ""]
               
-              # Show results
-              pairing_preview <- df %>%
-                count(pairing_factor_created, name = "n_samples") %>%
-                arrange(pairing_factor_created)
-              
-              cat("\nPairing groups created from pattern:\n")
-              print(pairing_preview)
-            }
+              if(length(valid_pairing) > 0) {
+                pairing_counts <- table(valid_pairing)
+                pairing_preview <- data.frame(
+                  pairing_factor_created = names(pairing_counts),
+                  n_samples = as.numeric(pairing_counts),
+                  stringsAsFactors = FALSE
+                )
+                pairing_preview <- pairing_preview[order(pairing_preview$pairing_factor_created), ]
+                
+                cat("\nPairing groups created from row letters:\n")
+                print(pairing_preview)
+              } else {
+                cat("\nWarning: No valid pairing groups created from row letters.\n")
+              }
+            }, error = function(e) {
+              cat("\nWarning: Could not display pairing preview, but pairing factor was created.\n")
+            })
           }
         }
         
@@ -2440,89 +2567,12 @@ define_analysis_factors <- function(df) {
         next
       }
       
-    } else if(pairing_option == "3") {
-      # Custom pairing
-      cat("\nCustom Pairing Creation:\n")
-      cat("This will create pairing groups based on a pattern or rule you define.\n")
-      
-      cat("Available columns:\n")
-      iwalk(available_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
-      
-      base_col_choice <- readline("Enter base column number or name: ")
-      
-      # Parse base column choice
-      base_col <- NULL
-      if(grepl("^\\d+$", base_col_choice)) {
-        choice_num <- as.numeric(base_col_choice)
-        if(!is.na(choice_num) && choice_num >= 1 && choice_num <= length(available_cols)) {
-          base_col <- available_cols[choice_num]
-        }
-      } else if(base_col_choice %in% available_cols) {
-        base_col <- base_col_choice
-      }
-      
-      if(!is.null(base_col)) {
-        cat("\nExamples from", base_col, ":\n")
-        sample_vals <- head(unique(df[[base_col]]), 10)
-        iwalk(sample_vals, ~cat(sprintf("%d. %s\n", .y, .x)))
-        
-        cat("\nTransformation options:\n")
-        cat("1. Extract pattern with regex\n")
-        cat("2. Remove suffix/prefix\n")
-        cat("3. Use first N characters\n")
-        cat("4. Use as-is\n")
-        
-        transform_choice <- readline("Choose transformation (1-4): ")
-        
-        if(transform_choice == "1") {
-          pattern <- readline("Enter regex pattern to extract: ")
-          if(pattern != "") {
-            pairing_factor_col <- "pairing_factor_created"
-            df <- df %>%
-              mutate(pairing_factor_created = str_extract(.data[[base_col]], pattern))
-          }
-        } else if(transform_choice == "2") {
-          cat("Remove:\n1. Prefix\n2. Suffix\n")
-          remove_choice <- readline("Choose (1/2): ")
-          pattern_to_remove <- readline("Enter pattern to remove: ")
-          
-          if(pattern_to_remove != "") {
-            pairing_factor_col <- "pairing_factor_created"
-            if(remove_choice == "1") {
-              df <- df %>%
-                mutate(pairing_factor_created = str_remove(.data[[base_col]], paste0("^", pattern_to_remove)))
-            } else {
-              df <- df %>%
-                mutate(pairing_factor_created = str_remove(.data[[base_col]], paste0(pattern_to_remove, "$")))
-            }
-          }
-        } else if(transform_choice == "3") {
-          n_chars <- readline("Enter number of characters to keep: ")
-          if(grepl("^\\d+$", n_chars)) {
-            n <- as.numeric(n_chars)
-            pairing_factor_col <- "pairing_factor_created"
-            df <- df %>%
-              mutate(pairing_factor_created = str_sub(.data[[base_col]], 1, n))
-          }
-        } else if(transform_choice == "4") {
-          pairing_factor_col <- base_col
-        }
-        
-        # Show results if we created a new column
-        if(pairing_factor_col == "pairing_factor_created") {
-          pairing_preview <- df %>%
-            count(pairing_factor_created, name = "n_samples") %>%
-            arrange(pairing_factor_created)
-          
-          cat("\nPairing groups created:\n")
-          print(pairing_preview)
-        }
-      }
-      
     } else if(pairing_option == "4") {
       # No pairing
       pairing_factor_col <- "none"
       cat("✅ No pairing selected. Only unpaired analyses will be available.\n")
+    } else {
+      cat("Option 3 (custom pairing) not fully implemented. Please choose 1, 2, or 4.\n")
     }
     
     if(is.null(pairing_factor_col)) {
@@ -2532,24 +2582,72 @@ define_analysis_factors <- function(df) {
     
     # Confirm pairing factor (unless "none")
     if(pairing_factor_col != "none") {
-      # Show pairing summary
+      # Show pairing summary safely
       if(pairing_factor_col %in% names(df)) {
-        pairing_summary <- df %>%
-          count(.data[[pairing_factor_col]], name = "n_samples") %>%
-          arrange(desc(n_samples))
-        
-        cat(sprintf("\n✅ Selected pairing factor: %s\n", pairing_factor_col))
-        cat("Pairing groups:\n")
-        print(head(pairing_summary, 10))
-        if(nrow(pairing_summary) > 10) {
-          cat("... and", nrow(pairing_summary) - 10, "more groups\n")
-        }
-      }
-      
-      confirm <- readline("Confirm this pairing factor? (y/n): ")
-      if(tolower(confirm) != "y") {
-        pairing_factor_col <- NULL
-        cat("Selection cancelled. Choose again.\n")
+        tryCatch({
+          # Get the pairing column data and validate it
+          pairing_data <- df[[pairing_factor_col]]
+          
+          # More robust validation for pairing data
+          if(is.null(pairing_data)) {
+            stop("Pairing column is NULL")
+          }
+          
+          if(is.data.frame(pairing_data) || is.matrix(pairing_data) || 
+             (is.list(pairing_data) && !is.factor(pairing_data))) {
+            stop("Pairing column contains complex data structure")
+          }
+          
+          # Convert to character safely
+          if(is.factor(pairing_data)) {
+            char_pairing_data <- as.character(pairing_data)
+          } else if(is.numeric(pairing_data) || is.logical(pairing_data)) {
+            char_pairing_data <- as.character(pairing_data)
+          } else if(is.character(pairing_data)) {
+            char_pairing_data <- pairing_data
+          } else {
+            char_pairing_data <- tryCatch({
+              as.character(pairing_data)
+            }, error = function(e) {
+              stop("Cannot convert pairing column to character: ", e$message)
+            })
+          }
+          
+          # Filter out invalid values
+          valid_pairing_data <- char_pairing_data[!is.na(char_pairing_data) & 
+                                                    char_pairing_data != "" & 
+                                                    char_pairing_data != "NA"]
+          
+          if(length(valid_pairing_data) == 0) {
+            stop("No valid values found in pairing column")
+          }
+          
+          # Create summary using base R
+          pairing_counts <- table(valid_pairing_data)
+          temp_pairing_df <- data.frame(
+            group = names(pairing_counts),
+            n_samples = as.numeric(pairing_counts),
+            stringsAsFactors = FALSE
+          )
+          temp_pairing_df <- temp_pairing_df[order(temp_pairing_df$n_samples, decreasing = TRUE), ]
+          names(temp_pairing_df)[1] <- pairing_factor_col
+          
+          cat(sprintf("\n✅ Selected pairing factor: %s\n", pairing_factor_col))
+          cat("Pairing groups:\n")
+          print(head(temp_pairing_df, 10))
+          if(nrow(temp_pairing_df) > 10) {
+            cat("... and", nrow(temp_pairing_df) - 10, "more groups\n")
+          }
+          
+          confirm <- readline("Confirm this pairing factor? (y/n): ")
+          if(tolower(confirm) != "y") {
+            pairing_factor_col <- NULL
+            cat("Selection cancelled. Choose again.\n")
+          }
+        }, error = function(e) {
+          cat("❌ Error processing pairing factor:", e$message, "\n")
+          pairing_factor_col <- NULL
+        })
       }
     }
   }
@@ -2564,14 +2662,14 @@ define_analysis_factors <- function(df) {
   
   # Create tissue_factor column (duplicate and rename for clarity)
   df <- df %>%
-    mutate(tissue_factor = .data[[tissue_factor_col]])
+    mutate(tissue_factor = as.character(.data[[tissue_factor_col]]))
   
   cat("✅ Created 'tissue_factor' column based on:", tissue_factor_col, "\n")
   
   # Create pairing_factor column if not "none"
   if(pairing_factor_col != "none") {
     df <- df %>%
-      mutate(pairing_factor = .data[[pairing_factor_col]])
+      mutate(pairing_factor = as.character(.data[[pairing_factor_col]]))
     cat("✅ Created 'pairing_factor' column based on:", pairing_factor_col, "\n")
   } else {
     df <- df %>%
@@ -2579,24 +2677,34 @@ define_analysis_factors <- function(df) {
     cat("✅ Created 'pairing_factor' column with value: no_pairing\n")
   }
   
-  # Final summary
+  # Final summary with safer processing
   cat("\n=== FACTOR DEFINITION COMPLETE ===\n")
   cat("Analysis factors created:\n")
   
-  tissue_final <- df %>% count(tissue_factor, name = "n") %>% arrange(desc(n))
-  cat("\nTissue Factor Groups:\n")
-  print(tissue_final)
-  
-  if(pairing_factor_col != "none") {
-    pairing_final <- df %>% count(pairing_factor, name = "n") %>% arrange(desc(n))
-    cat("\nPairing Factor Groups:\n")
-    print(head(pairing_final, 15))
-    if(nrow(pairing_final) > 15) {
-      cat("... and", nrow(pairing_final) - 15, "more pairing groups\n")
+  tryCatch({
+    tissue_final <- df %>% 
+      filter(!is.na(tissue_factor), tissue_factor != "") %>%
+      count(tissue_factor, name = "n") %>% 
+      arrange(desc(n))
+    cat("\nTissue Factor Groups:\n")
+    print(tissue_final)
+    
+    if(pairing_factor_col != "none") {
+      pairing_final <- df %>% 
+        filter(!is.na(pairing_factor), pairing_factor != "") %>%
+        count(pairing_factor, name = "n") %>% 
+        arrange(desc(n))
+      cat("\nPairing Factor Groups:\n")
+      print(head(pairing_final, 15))
+      if(nrow(pairing_final) > 15) {
+        cat("... and", nrow(pairing_final) - 15, "more pairing groups\n")
+      }
+    } else {
+      cat("\nPairing Factor: No pairing (unpaired analyses only)\n")
     }
-  } else {
-    cat("\nPairing Factor: No pairing (unpaired analyses only)\n")
-  }
+  }, error = function(e) {
+    cat("Warning: Could not display factor summaries, but factors were created.\n")
+  })
   
   return(list(
     data = df,
@@ -2608,7 +2716,8 @@ define_analysis_factors <- function(df) {
   ))
 }
 
-#' Enhanced metadata assignment with factor definition
+
+# Enhanced metadata assignment with factor definition
 assign_metadata_menu_enhanced <- function(df, include_factor_definition = TRUE) {
   
   # First, define analysis factors if requested
@@ -3766,7 +3875,7 @@ configure_two_group_test <- function(test_type, pairing, selected_congenics, mfi
   pairing_var <- NULL
   if (pairing == "paired") {
     cat("\nFor paired analysis, samples need to be matched.\n")
-    cat("Common pairing variables: Sample, NodeShort, Subject_ID, etc.\n")
+    cat("Default: [pairing_factor]; Other Common pairing variables: Sample, NodeShort, Subject_ID, etc.\n")
     pairing_var <- readline("Enter column name for pairing (default: 'Sample'): ")
     if (pairing_var == "") pairing_var <- "Sample"
   }
@@ -5316,8 +5425,10 @@ create_engraftment_plot <- function(data,
     # Create a lookup table for normalization frequencies
     norm_lookup <- congenic_engraftment %>%
       filter(.data[[group_col]] == normalization_tissue) %>%
-      select(all_of(c(marker_col, "well_letter", freq_col))) %>%
-      rename(norm_freq = all_of(freq_col))
+      select(all_of(c(marker_col, "well_letter", freq_col)))
+    
+    # Rename the frequency column to norm_freq
+    names(norm_lookup)[names(norm_lookup) == freq_col] <- "norm_freq"
     
     # Join normalization frequencies with the main data
     congenic_engraftment <- congenic_engraftment %>%
@@ -5736,1912 +5847,10 @@ create_paired_comparison_plots_enhanced <- function(data,
   return(plots)
 }
 
-# ============================================================================
-# ENHANCED INTERACTIVE UMAP ANALYSIS FOR FLOW CYTOMETRY DATA
-# Fixed version with sample exclusion and streamlined workflow
-# ============================================================================
-
-library(tidyverse)
-library(umap)
-library(ggplot2)
-library(patchwork)
-library(viridis)
-library(RColorBrewer)
-library(scales)
-
-# ============================================================================
-# MISSING DEPENDENCY FUNCTIONS - REPLACE WITH YOUR ACTUAL IMPLEMENTATIONS
-# ============================================================================
-
-get_all_populations <- function(gs) {
-  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
-    return(flowWorkspace::gs_get_pop_paths(gs))
-  } else {
-    stop("flowWorkspace package required. Please load flowWorkspace.")
-  }
-}
-
-get_marker_lookup <- function(gs) {
-  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
-    # Get channel info from first sample
-    first_sample <- flowWorkspace::gs_cyto_data(gs)[[1]]
-    markers <- flowCore::markernames(first_sample)
-    channels <- names(markers)
-    
-    return(tibble(
-      colname = channels,
-      marker = ifelse(is.na(markers), channels, markers)
-    ))
-  } else {
-    stop("flowWorkspace package required. Please load flowWorkspace.")
-  }
-}
-
-resolve_nodes_by_leaf <- function(gs, leaf_name) {
-  all_pops <- get_all_populations(gs)
-  matches <- all_pops[grepl(paste0("\\b", leaf_name, "\\b"), basename(all_pops), ignore.case = TRUE)]
-  return(matches)
-}
-
-gh_get_pop_paths <- function(gh) {
-  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
-    return(flowWorkspace::gs_get_pop_paths(gh))
-  } else {
-    stop("flowWorkspace package required")
-  }
-}
-
-gh_pop_get_data <- function(gh, node) {
-  if(requireNamespace("flowWorkspace", quietly = TRUE)) {
-    return(flowWorkspace::gh_pop_get_data(gh, node))
-  } else {
-    stop("flowWorkspace package required")
-  }
-}
-
-# ============================================================================
-# ENHANCED SAMPLE EXCLUSION FUNCTIONALITY
-# ============================================================================
-
-interactive_sample_exclusion <- function(gs) {
-  cat("=== Interactive Sample Exclusion ===\n")
-  
-  all_samples <- sampleNames(gs)
-  excluded_samples <- c()
-  
-  repeat {
-    cat("\n--- Current Sample List ---\n")
-    current_samples <- setdiff(all_samples, excluded_samples)
-    
-    if(length(current_samples) == 0) {
-      cat("Warning: All samples have been excluded!\n")
-      reset_choice <- readline("Reset exclusions? (y/n): ")
-      if(tolower(reset_choice) == "y") {
-        excluded_samples <- c()
-        current_samples <- all_samples
-      } else {
-        return(character(0))  # Return empty if no samples selected
-      }
-    }
-    
-    cat("Samples to be included (", length(current_samples), " total):\n", sep = "")
-    for(i in seq_along(current_samples)) {
-      cat(i, " ", current_samples[i], "\n", sep = "")
-    }
-    
-    if(length(excluded_samples) > 0) {
-      cat("\nExcluded samples (", length(excluded_samples), " total):\n", sep = "")
-      for(i in seq_along(excluded_samples)) {
-        cat("X ", excluded_samples[i], "\n", sep = "")
-      }
-    }
-    
-    cat("\n--- Exclusion Options ---\n")
-    cat("1. Exclude samples by pattern (recommended for unstained, controls)\n")
-    cat("2. Exclude specific samples (interactive selection)\n")
-    cat("3. Exclude samples by metadata criteria\n")
-    cat("4. Preview current sample list\n")
-    cat("5. Continue with all samples\n")
-    cat("6. Continue with current exclusions\n")
-    
-    choice <- readline("Choose option (1-6): ")
-    
-    if(choice == "1") {
-      # Exclude by pattern
-      cat("\nCommon patterns to exclude:\n")
-      cat("Examples: 'unstained', 'control', 'blank', 'compensation'\n")
-      pattern <- readline("Enter pattern to exclude (case-insensitive): ")
-      
-      if(pattern != "") {
-        matching_samples <- grep(pattern, current_samples, ignore.case = TRUE, value = TRUE)
-        
-        if(length(matching_samples) > 0) {
-          cat("Samples matching pattern '", pattern, "':\n", sep = "")
-          for(sample in matching_samples) {
-            cat("- ", sample, "\n", sep = "")
-          }
-          
-          confirm <- readline(paste0("Exclude these ", length(matching_samples), " samples? (y/n): "))
-          if(tolower(confirm) == "y") {
-            excluded_samples <- c(excluded_samples, matching_samples)
-            cat("Excluded ", length(matching_samples), " samples\n", sep = "")
-          }
-        } else {
-          cat("No samples found matching pattern: ", pattern, "\n")
-        }
-      }
-      
-    } else if(choice == "2") {
-      # Exclude specific samples
-      if(length(current_samples) == 0) {
-        cat("No samples available for exclusion.\n")
-        next
-      }
-      
-      cat("\nSelect samples to exclude:\n")
-      for(i in seq_along(current_samples)) {
-        cat(i, ". ", current_samples[i], "\n", sep = "")
-      }
-      
-      selection <- readline("Enter sample numbers to exclude (comma-separated, or Enter to cancel): ")
-      
-      if(selection != "") {
-        sample_indices <- as.numeric(strsplit(selection, ",")[[1]])
-        sample_indices <- sample_indices[!is.na(sample_indices)]
-        sample_indices <- sample_indices[sample_indices >= 1 & sample_indices <= length(current_samples)]
-        
-        if(length(sample_indices) > 0) {
-          samples_to_exclude <- current_samples[sample_indices]
-          excluded_samples <- c(excluded_samples, samples_to_exclude)
-          cat("Excluded ", length(samples_to_exclude), " samples\n", sep = "")
-        } else {
-          cat("No valid sample indices provided.\n")
-        }
-      }
-      
-    } else if(choice == "3") {
-      # Exclude by metadata criteria
-      cat("\nExcluding by metadata criteria...\n")
-      
-      # Get available metadata from pData
-      tryCatch({
-        sample_metadata <- pData(gs)
-        
-        if(ncol(sample_metadata) == 0) {
-          cat("No metadata available for filtering.\n")
-          next
-        }
-        
-        cat("Available metadata columns:\n")
-        meta_cols <- names(sample_metadata)
-        for(i in seq_along(meta_cols)) {
-          cat(i, ". ", meta_cols[i], "\n", sep = "")
-        }
-        
-        col_choice <- readline(paste0("Choose metadata column (1-", length(meta_cols), ", or Enter to cancel): "))
-        
-        if(col_choice != "") {
-          col_idx <- as.numeric(col_choice)
-          if(!is.na(col_idx) && col_idx >= 1 && col_idx <= length(meta_cols)) {
-            selected_col <- meta_cols[col_idx]
-            unique_values <- unique(sample_metadata[[selected_col]])
-            
-            cat("Unique values in '", selected_col, "':\n", sep = "")
-            for(i in seq_along(unique_values)) {
-              cat(i, ". ", unique_values[i], "\n", sep = "")
-            }
-            
-            value_choice <- readline("Enter value numbers to exclude (comma-separated): ")
-            
-            if(value_choice != "") {
-              value_indices <- as.numeric(strsplit(value_choice, ",")[[1]])
-              value_indices <- value_indices[!is.na(value_indices)]
-              value_indices <- value_indices[value_indices >= 1 & value_indices <= length(unique_values)]
-              
-              if(length(value_indices) > 0) {
-                values_to_exclude <- unique_values[value_indices]
-                samples_to_exclude <- rownames(sample_metadata)[sample_metadata[[selected_col]] %in% values_to_exclude]
-                samples_to_exclude <- intersect(samples_to_exclude, current_samples)  # Only exclude from current samples
-                
-                if(length(samples_to_exclude) > 0) {
-                  excluded_samples <- c(excluded_samples, samples_to_exclude)
-                  cat("Excluded ", length(samples_to_exclude), " samples based on metadata\n", sep = "")
-                } else {
-                  cat("No matching samples found to exclude.\n")
-                }
-              }
-            }
-          }
-        }
-      }, error = function(e) {
-        cat("Error accessing metadata:", e$message, "\n")
-      })
-      
-    } else if(choice == "4") {
-      # Preview - just continue the loop to show current list
-      next
-      
-    } else if(choice == "5") {
-      # Continue with all samples
-      return(all_samples)
-      
-    } else if(choice == "6") {
-      # Continue with current exclusions
-      final_samples <- setdiff(all_samples, excluded_samples)
-      if(length(final_samples) == 0) {
-        cat("Warning: No samples selected!\n")
-        next
-      }
-      return(final_samples)
-      
-    } else {
-      cat("Invalid choice. Please select 1-6.\n")
-    }
-  }
-}
-
-exclude_samples_by_pattern <- function(all_samples) {
-  cat("\n=== Pattern-Based Sample Exclusion ===\n")
-  cat("This is useful for removing unstained controls, compensation controls, etc.\n")
-  
-  excluded_samples <- character(0)
-  
-  while(TRUE) {
-    cat("\nCurrent samples:", length(all_samples), "\n")
-    cat("Currently excluded:", length(excluded_samples), "\n")
-    
-    if(length(excluded_samples) > 0) {
-      cat("Excluded samples:", paste(head(excluded_samples, 5), collapse = ", "))
-      if(length(excluded_samples) > 5) cat("...")
-      cat("\n")
-    }
-    
-    cat("\nPattern exclusion options:\n")
-    cat("1. Add exclusion pattern\n")
-    cat("2. Remove exclusion pattern\n")
-    cat("3. Preview samples matching pattern\n")
-    cat("4. Common patterns (unstained, compensation, etc.)\n")
-    cat("5. Clear all exclusions\n")
-    cat("6. Finish exclusions\n")
-    
-    choice <- readline("Choose (1-6): ")
-    
-    if(choice == "1") {
-      pattern <- readline("Enter pattern to exclude (case-insensitive regex): ")
-      if(pattern == "") {
-        cat("Empty pattern, skipping\n")
-        next
-      }
-      
-      matches <- grep(pattern, all_samples, ignore.case = TRUE, value = TRUE)
-      if(length(matches) == 0) {
-        cat("No samples match pattern:", pattern, "\n")
-      } else {
-        cat("Pattern '", pattern, "' matches", length(matches), "samples:\n")
-        iwalk(matches, ~cat(sprintf("  %d. %s\n", .y, .x)))
-        
-        confirm <- readline("Exclude these samples? (y/n): ")
-        if(tolower(confirm) == "y") {
-          excluded_samples <- unique(c(excluded_samples, matches))
-          all_samples <- setdiff(all_samples, matches)
-          cat("Excluded", length(matches), "samples\n")
-        }
-      }
-      
-    } else if(choice == "4") {
-      # Common patterns
-      common_patterns <- list(
-        "Unstained" = "unstained|blank|negative",
-        "Compensation" = "comp|compensation",
-        "Controls" = "control|ctrl",
-        "Single stain" = "single|ss[_-]",
-        "FMO" = "fmo|minus.one"
-      )
-      
-      cat("\nCommon exclusion patterns:\n")
-      iwalk(names(common_patterns), ~cat(sprintf("%d. %s (%s)\n", .y, .x, common_patterns[[.x]])))
-      
-      pattern_choice <- readline("Select pattern number or enter custom: ")
-      
-      # Fixed: Handle both numeric and text input safely
-      selected_pattern <- NULL
-      
-      # Try numeric first
-      if(grepl("^\\d+$", pattern_choice)) {
-        pattern_num <- as.numeric(pattern_choice)
-        if(!is.na(pattern_num) && pattern_num >= 1 && pattern_num <= length(common_patterns)) {
-          selected_pattern <- common_patterns[[pattern_num]]
-        }
-      } else if(pattern_choice != "") {
-        # Use as custom pattern
-        selected_pattern <- pattern_choice
-      }
-      
-      if(!is.null(selected_pattern)) {
-        matches <- grep(selected_pattern, all_samples, ignore.case = TRUE, value = TRUE)
-        if(length(matches) > 0) {
-          cat("Pattern matches", length(matches), "samples:\n")
-          iwalk(matches, ~cat(sprintf("  %d. %s\n", .y, .x)))
-          
-          confirm <- readline("Exclude these samples? (y/n): ")
-          if(tolower(confirm) == "y") {
-            excluded_samples <- unique(c(excluded_samples, matches))
-            all_samples <- setdiff(all_samples, matches)
-            cat("Excluded", length(matches), "samples\n")
-          }
-        } else {
-          cat("No samples match this pattern\n")
-        }
-      } else {
-        cat("Invalid selection\n")
-      }
-      
-    } else if(choice == "6") {
-      break
-    } else {
-      cat("Option not yet implemented or invalid choice\n")
-    }
-  }
-  
-  remaining_samples <- setdiff(sampleNames(gs), excluded_samples)
-  cat("\nFinal sample count:", length(remaining_samples), "(excluded", length(excluded_samples), ")\n")
-  
-  return(remaining_samples)
-}
-
-exclude_samples_interactive <- function(all_samples) {
-  cat("\n=== Interactive Sample Selection for Exclusion ===\n")
-  cat("Select samples to EXCLUDE from analysis\n")
-  
-  # Use select.list for cross-platform compatibility
-  selected_for_exclusion <- select.list(
-    all_samples, 
-    multiple = TRUE, 
-    title = "Select samples to EXCLUDE (Cancel to skip exclusions)"
-  )
-  
-  if(length(selected_for_exclusion) == 0) {
-    cat("No samples selected for exclusion\n")
-    return(all_samples)
-  }
-  
-  cat("\nSamples selected for exclusion:\n")
-  iwalk(selected_for_exclusion, ~cat(sprintf("%d. %s\n", .y, .x)))
-  
-  confirm <- readline(paste0("Exclude these ", length(selected_for_exclusion), " samples? (y/n): "))
-  
-  if(tolower(confirm) == "y") {
-    remaining_samples <- setdiff(all_samples, selected_for_exclusion)
-    cat("Excluded", length(selected_for_exclusion), "samples\n")
-    cat("Remaining samples:", length(remaining_samples), "\n")
-    return(remaining_samples)
-  } else {
-    cat("Exclusion cancelled, keeping all samples\n")
-    return(all_samples)
-  }
-}
-
-exclude_samples_by_metadata <- function(gs, pd) {
-  cat("\n=== Metadata-Based Sample Exclusion ===\n")
-  
-  if(ncol(pd) <= 1) {
-    cat("No metadata columns available for filtering\n")
-    return(sampleNames(gs))
-  }
-  
-  metadata_cols <- setdiff(names(pd), "Sample")
-  cat("Available metadata columns:\n")
-  iwalk(metadata_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
-  
-  col_choice <- readline("Enter column number or name: ")
-  
-  # Fixed: Safe column selection
-  selected_col <- NULL
-  if(grepl("^\\d+$", col_choice)) {
-    col_num <- as.numeric(col_choice)
-    if(!is.na(col_num) && col_num >= 1 && col_num <= length(metadata_cols)) {
-      selected_col <- metadata_cols[col_num]
-    }
-  } else if(col_choice %in% metadata_cols) {
-    selected_col <- col_choice
-  }
-  
-  if(is.null(selected_col)) {
-    cat("Invalid selection\n")
-    return(sampleNames(gs))
-  }
-  
-  # Show unique values in selected column
-  unique_values <- unique(pd[[selected_col]])
-  cat("\nUnique values in", selected_col, ":\n")
-  iwalk(unique_values, ~cat(sprintf("%d. %s\n", .y, .x)))
-  
-  values_to_exclude <- select.list(
-    as.character(unique_values), 
-    multiple = TRUE,
-    title = paste("Select", selected_col, "values to EXCLUDE")
-  )
-  
-  if(length(values_to_exclude) == 0) {
-    cat("No values selected for exclusion\n")
-    return(sampleNames(gs))
-  }
-  
-  excluded_samples <- pd %>%
-    filter(.data[[selected_col]] %in% values_to_exclude) %>%
-    pull(Sample)
-  
-  cat("Samples to exclude based on", selected_col, ":\n")
-  iwalk(excluded_samples, ~cat(sprintf("%d. %s\n", .y, .x)))
-  
-  confirm <- readline(paste0("Exclude these ", length(excluded_samples), " samples? (y/n): "))
-  
-  if(tolower(confirm) == "y") {
-    remaining_samples <- setdiff(sampleNames(gs), excluded_samples)
-    cat("Excluded", length(excluded_samples), "samples\n")
-    cat("Remaining samples:", length(remaining_samples), "\n")
-    return(remaining_samples)
-  } else {
-    return(sampleNames(gs))
-  }
-}
-
-# ============================================================================
-# INTERACTIVE NODE SELECTION (STREAMLINED)
-# ============================================================================
-
-select_single_node_for_umap <- function(gs) {
-  pops <- get_all_populations(gs)
-  
-  while(TRUE) {
-    cat("\n=== Node Selection for UMAP Analysis ===\n")
-    cat("1. Select from list (interactive)\n")
-    cat("2. Use regex pattern\n") 
-    cat("3. Use leaf names\n")
-    cat("4. Exit/Cancel\n")
-    
-    choice <- readline("Choose method (1-4): ")
-    
-    if(choice == "4") {
-      stop("Node selection cancelled by user.")
-    }
-    
-    result <- switch(choice,
-                     "1" = {
-                       cat("\nAvailable populations:\n")
-                       sel <- select.list(pops, multiple = FALSE, title = "Select ONE population for UMAP")
-                       if(length(sel) == 0) {
-                         cat("No population selected. Going back...\n")
-                         next
-                       }
-                       sel
-                     },
-                     
-                     "2" = {
-                       while(TRUE) {
-                         pattern <- readline("Enter regex pattern or 'back': ")
-                         
-                         if(tolower(pattern) == "back") break
-                         if(pattern == "") {
-                           cat("Empty pattern. Please try again.\n")
-                           next
-                         }
-                         
-                         matches <- grep(pattern, pops, value = TRUE, ignore.case = TRUE)
-                         if(length(matches) == 0) {
-                           cat("No matches found. Try a different pattern.\n")
-                           retry <- readline("Try again? (y/n): ")
-                           if(tolower(retry) != "y") break
-                           next
-                         }
-                         
-                         cat(sprintf("Found %d matches:\n", length(matches)))
-                         iwalk(matches, ~cat(sprintf("%d. %s\n", .y, .x)))
-                         
-                         while(TRUE) {
-                           index <- readline("Enter number of population to select, or 'back': ")
-                           if(tolower(index) == "back") break
-                           
-                           # Fixed: Safe numeric conversion
-                           if(grepl("^\\d+$", index)) {
-                             selected_idx <- as.numeric(index)
-                             if(!is.na(selected_idx) && selected_idx >= 1 && selected_idx <= length(matches)) {
-                               return(matches[selected_idx])
-                             }
-                           }
-                           cat("Invalid selection. Please try again.\n")
-                         }
-                       }
-                       NULL
-                     },
-                     
-                     "3" = {
-                       while(TRUE) {
-                         input <- readline("Enter leaf name or 'back': ")
-                         if(tolower(input) == "back") break
-                         if(input == "") {
-                           cat("No leaf name provided. Please try again.\n")
-                           next
-                         }
-                         
-                         matches <- resolve_nodes_by_leaf(gs, input)
-                         
-                         if(length(matches) == 0) {
-                           cat("No matches found for that leaf name.\n")
-                           retry <- readline("Try again? (y/n): ")
-                           if(tolower(retry) != "y") break
-                           next
-                         }
-                         
-                         if(length(matches) == 1) {
-                           return(matches[1])
-                         } else {
-                           cat(sprintf("Found %d matches:\n", length(matches)))
-                           iwalk(matches, ~cat(sprintf("%d. %s\n", .y, .x)))
-                           
-                           while(TRUE) {
-                             index <- readline("Enter number to select, or 'back': ")
-                             if(tolower(index) == "back") break
-                             
-                             # Fixed: Safe numeric conversion
-                             if(grepl("^\\d+$", index)) {
-                               selected_idx <- as.numeric(index)
-                               if(!is.na(selected_idx) && selected_idx >= 1 && selected_idx <= length(matches)) {
-                                 return(matches[selected_idx])
-                               }
-                             }
-                             cat("Invalid selection. Please try again.\n")
-                           }
-                         }
-                       }
-                       NULL
-                     },
-                     
-                     {
-                       cat("Invalid choice. Please select 1-4.\n")
-                       NULL
-                     }
-    )
-    
-    if(!is.null(result)) return(result)
-  }
-}
-
-# ============================================================================
-# INTERACTIVE MARKER/CHANNEL SELECTION (STREAMLINED)
-# ============================================================================
-
-select_markers_for_umap <- function(gs) {
-  lookup <- get_marker_lookup(gs)
-  
-  # Identify potential markers (exclude scatter, time, etc.)
-  exclude_patterns <- c("FSC", "SSC", "Time", "Event", "Original", "Width", "Height")
-  exclude_regex <- paste0("(?i)", paste(exclude_patterns, collapse = "|"))
-  
-  potential_markers <- lookup %>%
-    filter(!str_detect(colname, exclude_regex)) %>%
-    filter(!str_detect(marker, exclude_regex))
-  
-  # Identify compensated channels
-  comp_channels <- potential_markers %>%
-    filter(str_detect(colname, "(?i)comp")) %>%
-    pull(colname)
-  
-  while(TRUE) {
-    cat("\n=== Marker Selection for UMAP Analysis ===\n")
-    cat("Available markers:", nrow(potential_markers), "\n")
-    if(length(comp_channels) > 0) {
-      cat("Compensated channels found:", length(comp_channels), "\n")
-    }
-    
-    cat("\nRecommendation: Use compensated channels for best results\n")
-    
-    cat("\nOptions:\n")
-    cat("1. Select specific markers/channels\n")
-    cat("2. Use all compensated channels (recommended)\n")
-    cat("3. Use all available channels\n")
-    cat("4. Preview marker distributions\n")
-    cat("5. Back\n")
-    
-    choice <- readline("Choose (1-5): ")
-    
-    switch(choice,
-           "1" = {
-             choices <- paste0(potential_markers$colname, " :: ", potential_markers$marker)
-             sel <- select.list(choices, multiple = TRUE, 
-                                title = "Select markers for UMAP (Cancel to go back)")
-             
-             if(length(sel) == 0) {
-               cat("No markers selected.\n")
-               retry <- readline("Try again? (y/n): ")
-               if(tolower(retry) != "y") next
-               next
-             }
-             
-             if(length(sel) < 2) {
-               cat("UMAP requires at least 2 dimensions. Please select more markers.\n")
-               retry <- readline("Try again? (y/n): ")
-               if(tolower(retry) != "y") next
-               next
-             }
-             
-             selected_channels <- map_chr(sel, ~str_split(.x, " :: ")[[1]][1])
-             selected_markers <- map_chr(sel, ~str_split(.x, " :: ")[[1]][2])
-             
-             cat(sprintf("Selected %d markers:\n", length(selected_channels)))
-             iwalk(selected_channels, ~cat(sprintf("  %d. %s (%s)\n", .y, 
-                                                   selected_markers[.y], .x)))
-             
-             confirm <- readline("Confirm selection? (y/n): ")
-             if(tolower(confirm) == "y") {
-               return(list(
-                 channels = selected_channels,
-                 markers = selected_markers,
-                 lookup = potential_markers %>% filter(colname %in% selected_channels)
-               ))
-             }
-           },
-           
-           "2" = {
-             if(length(comp_channels) == 0) {
-               cat("No compensated channels found. Try option 1 or 3.\n")
-               next
-             }
-             
-             selected_lookup <- potential_markers %>% filter(colname %in% comp_channels)
-             
-             cat(sprintf("Using %d compensated channels:\n", nrow(selected_lookup)))
-             iwalk(selected_lookup$colname, ~cat(sprintf("  %d. %s (%s)\n", .y, 
-                                                         selected_lookup$marker[.y], .x)))
-             
-             confirm <- readline("Confirm compensated channels? (y/n): ")
-             if(tolower(confirm) == "y") {
-               return(list(
-                 channels = selected_lookup$colname,
-                 markers = selected_lookup$marker,
-                 lookup = selected_lookup
-               ))
-             }
-           },
-           
-           "3" = {
-             cat(sprintf("Using all %d available channels:\n", nrow(potential_markers)))
-             cat("First 10 markers:\n")
-             iwalk(head(potential_markers$marker, 10), 
-                   ~cat(sprintf("  %d. %s\n", .y, .x)))
-             if(nrow(potential_markers) > 10) {
-               cat(sprintf("  ... and %d more\n", nrow(potential_markers) - 10))
-             }
-             
-             confirm <- readline("Confirm all channels? (y/n): ")
-             if(tolower(confirm) == "y") {
-               return(list(
-                 channels = potential_markers$colname,
-                 markers = potential_markers$marker,
-                 lookup = potential_markers
-               ))
-             }
-           },
-           
-           "4" = {
-             cat("\n--- Marker Distribution ---\n")
-             cat("Total potential markers:", nrow(potential_markers), "\n")
-             cat("Compensated channels:", length(comp_channels), "\n")
-             
-             cat("\nSample of available markers:\n")
-             sample_markers <- potential_markers %>% 
-               slice_sample(n = min(20, nrow(potential_markers)))
-             iwalk(sample_markers$marker, 
-                   ~cat(sprintf("  %s (%s)\n", .x, sample_markers$colname[.y])))
-             
-             cat("\nPress Enter to continue...")
-             readline()
-             next
-           },
-           
-           "5" = {
-             return("BACK")
-           },
-           
-           {
-             cat("Invalid choice. Please select 1-5.\n")
-           }
-    )
-  }
-}
-
-# ============================================================================
-# ENHANCED SINGLE-CELL DATA EXTRACTION WITH SAMPLE FILTERING
-# ============================================================================
-
-get_population_event_counts <- function(gs, node, selected_samples = NULL) {
-  if(is.null(selected_samples)) {
-    selected_samples <- sampleNames(gs)
-  }
-  
-  cat("Analyzing event counts for node:", basename(node), "\n")
-  cat("Analyzing", length(selected_samples), "samples\n")
-  
-  event_counts <- map_dfr(selected_samples, function(sample_name) {
-    gh <- gs[[sample_name]]
-    
-    # Check if node exists
-    if(!node %in% gh_get_pop_paths(gh)) {
-      return(tibble(Sample = sample_name, EventCount = 0))
-    }
-    
-    tryCatch({
-      ff <- gh_pop_get_data(gh, node)
-      if(is.null(ff)) {
-        event_count <- 0
-      } else {
-        event_count <- nrow(if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff))
-      }
-      
-      tibble(Sample = sample_name, EventCount = event_count)
-    }, error = function(e) {
-      tibble(Sample = sample_name, EventCount = 0)
-    })
-  })
-  
-  # Add summary statistics
-  event_summary <- list(
-    counts = event_counts,
-    total_events = sum(event_counts$EventCount),
-    mean_events = mean(event_counts$EventCount),
-    median_events = median(event_counts$EventCount),
-    min_sample = event_counts[which.min(event_counts$EventCount), ],
-    max_sample = event_counts[which.max(event_counts$EventCount), ],
-    samples_with_zero = sum(event_counts$EventCount == 0)
-  )
-  
-  return(event_summary)
-}
-
-extract_single_cell_data <- function(gs, node, selected_markers, 
-                                     selected_samples = NULL,
-                                     keywords = c("pairing_factor", "tissue_factor"),
-                                     sample_limit = NULL, 
-                                     max_cells_per_sample = 5000) {
-  
-  # Use selected samples if provided, otherwise use all
-  if(is.null(selected_samples)) {
-    selected_samples <- sampleNames(gs)
-  }
-  
-  cat("Extracting single-cell data from node:", basename(node), "\n")
-  cat("Using", length(selected_samples), "samples\n")
-  
-  # Get sample metadata - with error handling
-  tryCatch({
-    if(exists("pData") && is.function(pData)) {
-      pd <- pData(gs) %>% 
-        rownames_to_column("Sample") %>%
-        select(Sample, any_of(keywords))
-    } else {
-      pd <- tibble(Sample = selected_samples)
-    }
-  }, error = function(e) {
-    cat("Warning: Could not load sample metadata, using sample names only\n")
-    pd <- tibble(Sample = selected_samples)
-  })
-  
-  # Determine samples to process
-  samples_to_process <- selected_samples
-  if(!is.null(sample_limit) && sample_limit < length(samples_to_process)) {
-    samples_to_process <- sample(samples_to_process, sample_limit)
-    cat("Randomly selected", sample_limit, "samples for analysis\n")
-  }
-  
-  # Extract data from each sample
-  all_data <- map_dfr(samples_to_process, function(sample_name) {
-    cat("Processing sample:", sample_name, "\n")
-    
-    gh <- gs[[sample_name]]
-    
-    # Check if node exists in this sample
-    if(!node %in% gh_get_pop_paths(gh)) {
-      cat("  Node not found in sample, skipping\n")
-      return(tibble())
-    }
-    
-    # Get single-cell data
-    tryCatch({
-      ff <- gh_pop_get_data(gh, node)
-      
-      if(is.null(ff)) {
-        cat("  No data found, skipping\n")
-        return(tibble())
-      }
-      
-      # Extract expression matrix
-      expr_data <- if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
-      
-      # Check if we have the required channels
-      available_channels <- intersect(selected_markers$channels, colnames(expr_data))
-      
-      if(length(available_channels) == 0) {
-        cat("  No selected channels found, skipping\n")
-        return(tibble())
-      }
-      
-      # Convert to tibble and add sample info
-      cell_data <- as_tibble(expr_data[, available_channels, drop = FALSE])
-      
-      # Subsample if too many cells
-      if(nrow(cell_data) > max_cells_per_sample) {
-        cell_data <- slice_sample(cell_data, n = max_cells_per_sample)
-        cat("  Subsampled to", max_cells_per_sample, "cells\n")
-      }
-      
-      # Add sample identifier and cell ID
-      cell_data <- cell_data %>%
-        mutate(
-          Sample = sample_name,
-          CellID = paste0(sample_name, "_", row_number()),
-          .before = 1
-        )
-      
-      cat("  Extracted", nrow(cell_data), "cells\n")
-      return(cell_data)
-      
-    }, error = function(e) {
-      cat("  Error processing sample:", e$message, "\n")
-      return(tibble())
-    })
-  })
-  
-  if(nrow(all_data) == 0) {
-    stop("No single-cell data extracted. Check node selection and markers.")
-  }
-  
-  # Replace channel names with marker names
-  marker_lookup <- selected_markers$lookup %>%
-    select(colname, marker) %>%
-    deframe()
-  
-  # Rename columns (keeping Sample and CellID)
-  for(channel in names(marker_lookup)) {
-    if(channel %in% names(all_data)) {
-      names(all_data)[names(all_data) == channel] <- marker_lookup[channel]
-    }
-  }
-  
-  # Add sample metadata
-  all_data <- all_data %>%
-    left_join(pd, by = "Sample")
-  
-  cat("Final dataset:", nrow(all_data), "cells from", 
-      n_distinct(all_data$Sample), "samples\n")
-  cat("Markers for UMAP:", paste(marker_lookup, collapse = ", "), "\n")
-  
-  return(list(
-    data = all_data,
-    marker_names = unname(marker_lookup),
-    sample_metadata = pd
-  ))
-}
-
-# ============================================================================
-# ENHANCED UMAP COMPUTATION (ROBUST ERROR HANDLING)
-# ============================================================================
-
-compute_umap_embedding <- function(single_cell_data, 
-                                   n_neighbors = 15, 
-                                   min_dist = 0.1, 
-                                   n_components = 2,
-                                   transform_data = "asinh") {
-  
-  cat("Computing UMAP embedding...\n")
-  
-  # Get marker columns (exclude Sample, CellID, and metadata)
-  metadata_cols <- c("Sample", "CellID")
-  if(!is.null(single_cell_data$sample_metadata)) {
-    metadata_cols <- c(metadata_cols, names(single_cell_data$sample_metadata))
-  }
-  
-  # Also exclude any non-numeric columns that might have been added via external metadata
-  all_cols <- names(single_cell_data$data)
-  numeric_cols <- all_cols[map_lgl(all_cols, ~is.numeric(single_cell_data$data[[.x]]))]
-  marker_cols <- setdiff(numeric_cols, metadata_cols)
-  
-  cat("Using", length(marker_cols), "markers:", paste(marker_cols, collapse = ", "), "\n")
-  
-  # Prepare data matrix
-  umap_matrix <- single_cell_data$data %>%
-    select(all_of(marker_cols)) %>%
-    as.matrix()
-  
-  # Check for problematic values before transformation
-  cat("Data range before transformation: [", min(umap_matrix, na.rm = TRUE), ", ", 
-      max(umap_matrix, na.rm = TRUE), "]\n")
-  
-  if(any(is.na(umap_matrix))) {
-    n_na <- sum(is.na(umap_matrix))
-    cat("Warning:", n_na, "NA values found in data. These will be handled.\n")
-  }
-  
-  # Apply transformation with proper handling of edge cases
-  if(transform_data == "asinh") {
-    umap_matrix <- asinh(umap_matrix / 5)  # Typical cofactor for flow cytometry
-    cat("Applied asinh transformation (cofactor = 5)\n")
-    
-  } else if(transform_data == "log10") {
-    # Handle negative and zero values properly
-    min_val <- min(umap_matrix, na.rm = TRUE)
-    
-    if(min_val <= 0) {
-      # Shift data to ensure all values are positive
-      shift_amount <- abs(min_val) + 1
-      cat("Shifting data by", shift_amount, "to handle negative/zero values\n")
-      umap_matrix <- umap_matrix + shift_amount
-    } else {
-      # Add small constant to avoid log(0) 
-      umap_matrix <- umap_matrix + 1
-    }
-    
-    umap_matrix <- log10(umap_matrix)
-    cat("Applied log10 transformation\n")
-    
-  } else if(transform_data == "sqrt") {
-    # Handle negative values for sqrt
-    if(any(umap_matrix < 0, na.rm = TRUE)) {
-      min_val <- min(umap_matrix, na.rm = TRUE)
-      shift_amount <- abs(min_val)
-      cat("Shifting data by", shift_amount, "to handle negative values for sqrt\n")
-      umap_matrix <- umap_matrix + shift_amount
-    }
-    
-    umap_matrix <- sqrt(umap_matrix)
-    cat("Applied square root transformation\n")
-    
-  } else {
-    cat("No transformation applied\n")
-  }
-  
-  # Check for NaN/Inf values after transformation
-  if(any(is.nan(umap_matrix)) || any(is.infinite(umap_matrix))) {
-    n_nan <- sum(is.nan(umap_matrix))
-    n_inf <- sum(is.infinite(umap_matrix))
-    
-    if(n_nan > 0) cat("Error: Found", n_nan, "NaN values after transformation\n")
-    if(n_inf > 0) cat("Error: Found", n_inf, "infinite values after transformation\n")
-    
-    # Replace NaN and Inf with median values
-    for(i in 1:ncol(umap_matrix)) {
-      col_data <- umap_matrix[, i]
-      if(any(is.nan(col_data) | is.infinite(col_data))) {
-        median_val <- median(col_data[is.finite(col_data)], na.rm = TRUE)
-        if(is.na(median_val)) median_val <- 0  # fallback if all values are problematic
-        
-        umap_matrix[is.nan(col_data) | is.infinite(col_data), i] <- median_val
-        cat("Replaced problematic values in", marker_cols[i], "with median:", median_val, "\n")
-      }
-    }
-  }
-  
-  # Final check for remaining NA values
-  if(any(is.na(umap_matrix))) {
-    # Replace remaining NAs with column medians
-    for(i in 1:ncol(umap_matrix)) {
-      col_data <- umap_matrix[, i]
-      if(any(is.na(col_data))) {
-        median_val <- median(col_data, na.rm = TRUE)
-        if(is.na(median_val)) median_val <- 0  # fallback
-        
-        umap_matrix[is.na(col_data), i] <- median_val
-        cat("Replaced NA values in", marker_cols[i], "with median:", median_val, "\n")
-      }
-    }
-  }
-  
-  cat("Data range after transformation: [", min(umap_matrix), ", ", max(umap_matrix), "]\n")
-  
-  # UMAP configuration
-  umap_config <- umap.defaults
-  umap_config$n_neighbors <- n_neighbors
-  umap_config$min_dist <- min_dist
-  umap_config$n_components <- n_components
-  umap_config$random_state <- 42
-  
-  # Compute UMAP
-  cat("Running UMAP with", n_neighbors, "neighbors and", min_dist, "min_dist...\n")
-  
-  tryCatch({
-    umap_result <- umap(umap_matrix, config = umap_config)
-  }, error = function(e) {
-    cat("UMAP failed with error:", e$message, "\n")
-    cat("This might be due to data scaling issues. Trying with scaled data...\n")
-    
-    # Try with scaled data as fallback
-    umap_matrix_scaled <- scale(umap_matrix)
-    
-    # Replace any NaN values from scaling
-    if(any(is.nan(umap_matrix_scaled))) {
-      umap_matrix_scaled[is.nan(umap_matrix_scaled)] <- 0
-    }
-    
-    umap_result <- umap(umap_matrix_scaled, config = umap_config)
-    cat("UMAP successful with scaled data\n")
-    return(umap_result)
-  }) -> umap_result
-  
-  # Add UMAP coordinates to original data
-  umap_data <- single_cell_data$data %>%
-    mutate(
-      UMAP1 = umap_result$layout[,1],
-      UMAP2 = umap_result$layout[,2]
-    )
-  
-  if(n_components > 2) {
-    for(i in 3:n_components) {
-      umap_data[[paste0("UMAP", i)]] <- umap_result$layout[,i]
-    }
-  }
-  
-  cat("UMAP computation complete!\n")
-  
-  return(list(
-    data = umap_data,
-    embedding = umap_result,
-    marker_names = marker_cols,
-    config = umap_config,
-    transformation = transform_data
-  ))
-}
-
-# ============================================================================
-# ENHANCED INTERACTIVE VISUALIZATION WITH CONSISTENT CHOICE MENUS
-# ============================================================================
-
-# Helper function for consistent menu selection
-select_from_menu <- function(options, title, allow_multiple = FALSE, show_preview = TRUE) {
-  if (length(options) == 0) {
-    cat("No options available\n")
-    return(NULL)
-  }
-  
-  cat("\n", title, "\n")
-  cat(strrep("=", nchar(title)), "\n")
-  
-  # Show preview if requested and many options
-  if (show_preview && length(options) > 20) {
-    cat("Showing first 20 options (", length(options), "total):\n")
-    display_options <- head(options, 20)
-    cat("...\n")
-  } else {
-    display_options <- options
-  }
-  
-  iwalk(display_options, ~cat(sprintf("%d. %s\n", .y, .x)))
-  
-  if (length(options) > 20) {
-    cat(sprintf("... and %d more options\n", length(options) - 20))
-    cat("Enter 'all' to see all options\n")
-  }
-  
-  while (TRUE) {
-    prompt <- if (allow_multiple) {
-      "Enter choice(s) (numbers/ranges like 1,3,5-8 or 'all'): "
-    } else {
-      "Enter choice number: "
-    }
-    
-    choice <- readline(prompt)
-    
-    if (choice == "") {
-      cat("No selection made\n")
-      return(NULL)
-    }
-    
-    if (tolower(choice) == "all") {
-      if (length(options) > 20) {
-        cat("\nAll available options:\n")
-        iwalk(options, ~cat(sprintf("%d. %s\n", .y, .x)))
-        next
-      } else {
-        return(if (allow_multiple) options else options[1])
-      }
-    }
-    
-    # Parse selection
-    selected_indices <- parse_selection(choice, length(options))
-    
-    if (length(selected_indices) == 0) {
-      cat("Invalid selection. Please try again.\n")
-      next
-    }
-    
-    if (!allow_multiple && length(selected_indices) > 1) {
-      cat("Multiple selections not allowed. Using first selection.\n")
-      selected_indices <- selected_indices[1]
-    }
-    
-    return(options[selected_indices])
-  }
-}
-
-# Parse selection input (handles ranges, comma-separated values)
-parse_selection <- function(input, max_value) {
-  tryCatch({
-    # Remove spaces and split by commas
-    parts <- str_trim(str_split(input, ",")[[1]])
-    indices <- numeric(0)
-    
-    for (part in parts) {
-      if (str_detect(part, "-")) {
-        # Handle ranges like "1-5"
-        range_parts <- as.numeric(str_split(part, "-")[[1]])
-        if (length(range_parts) == 2 && all(!is.na(range_parts))) {
-          start_idx <- range_parts[1]
-          end_idx <- range_parts[2]
-          if (start_idx >= 1 && end_idx <= max_value && start_idx <= end_idx) {
-            indices <- c(indices, start_idx:end_idx)
-          }
-        }
-      } else if (str_detect(part, "^\\d+$")) {
-        # Handle single numbers
-        idx <- as.numeric(part)
-        if (!is.na(idx) && idx >= 1 && idx <= max_value) {
-          indices <- c(indices, idx)
-        }
-      }
-    }
-    
-    return(unique(indices))
-  }, error = function(e) {
-    return(numeric(0))
-  })
-}
-
-# Enhanced variable selection with consistent menus
-select_visualization_variable <- function(marker_names, metadata_cols, 
-                                          purpose = "coloring", allow_multiple = FALSE) {
-  
-  cat("\n=== Variable Selection for", str_to_title(purpose), "===\n")
-  
-  # Combine and categorize options
-  all_options <- c()
-  option_labels <- c()
-  
-  if (length(metadata_cols) > 0) {
-    metadata_labels <- paste0(metadata_cols, " (metadata)")
-    all_options <- c(all_options, metadata_cols)
-    option_labels <- c(option_labels, metadata_labels)
-  }
-  
-  if (length(marker_names) > 0) {
-    marker_labels <- paste0(marker_names, " (marker)")
-    all_options <- c(all_options, marker_names)
-    option_labels <- c(option_labels, marker_labels)
-  }
-  
-  if (length(all_options) == 0) {
-    cat("No variables available for", purpose, "\n")
-    return(NULL)
-  }
-  
-  # Show categorized menu
-  cat("Available variables:\n")
-  
-  counter <- 1
-  if (length(metadata_cols) > 0) {
-    cat("\nMETADATA VARIABLES:\n")
-    for (i in seq_along(metadata_cols)) {
-      cat(sprintf("%d. %s\n", counter, metadata_cols[i]))
-      counter <- counter + 1
-    }
-  }
-  
-  if (length(marker_names) > 0) {
-    cat("\nMARKER VARIABLES:\n")
-    for (i in seq_along(marker_names)) {
-      cat(sprintf("%d. %s\n", counter, marker_names[i]))
-      counter <- counter + 1
-    }
-  }
-  
-  selected <- select_from_menu(
-    all_options, 
-    paste("Select variable(s) for", purpose),
-    allow_multiple = allow_multiple,
-    show_preview = FALSE
-  )
-  
-  return(selected)
-}
-
-# Enhanced multi-marker heatmap with consistent selection
-create_multi_marker_heatmap <- function() {
-  umap_data <- .umap_session_plots$umap_data
-  marker_names <- .umap_session_plots$marker_names
-  
-  if (length(marker_names) == 0) {
-    cat("No markers available for heatmap\n")
-    return(NULL)
-  }
-  
-  cat("\n=== Multi-Marker Heatmap Creation ===\n")
-  cat("Available markers:", length(marker_names), "\n")
-  
-  # Menu for marker selection strategy
-  selection_options <- c(
-    "Select specific markers",
-    "Use first 9 markers (3x3 grid)",
-    "Use all markers",
-    "Show marker list and return"
-  )
-  
-  strategy <- select_from_menu(
-    selection_options,
-    "Choose marker selection strategy"
-  )
-  
-  if (is.null(strategy)) return(NULL)
-  
-  selected_markers <- switch(
-    strategy,
-    "Select specific markers" = {
-      select_from_menu(
-        marker_names,
-        "Select markers for heatmap (max 16 recommended)",
-        allow_multiple = TRUE
-      )
-    },
-    "Use first 9 markers (3x3 grid)" = {
-      n_markers <- min(9, length(marker_names))
-      head(marker_names, n_markers)
-    },
-    "Use all markers" = {
-      if (length(marker_names) > 16) {
-        cat("Warning: Using all", length(marker_names), "markers may create a crowded plot\n")
-        confirm_options <- c("Yes, continue", "No, go back")
-        confirm <- select_from_menu(confirm_options, "Continue with all markers?")
-        if (is.null(confirm) || confirm == "No, go back") return(NULL)
-      }
-      marker_names
-    },
-    "Show marker list and return" = {
-      cat("\nAll available markers:\n")
-      iwalk(marker_names, ~cat(sprintf("%d. %s\n", .y, .x)))
-      readline("Press Enter to continue...")
-      return(NULL)
-    }
-  )
-  
-  if (is.null(selected_markers) || length(selected_markers) == 0) {
-    cat("No markers selected\n")
-    return(NULL)
-  }
-  
-  cat("Creating heatmap with", length(selected_markers), "markers\n")
-  
-  # Create individual plots for each marker
-  marker_plots <- map(selected_markers, function(marker) {
-    ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = .data[[marker]])) +
-      geom_point(size = 0.1, alpha = 0.5) +
-      scale_color_viridis_c(name = "", option = "plasma") +
-      labs(title = marker) +
-      theme_void() +
-      theme(
-        plot.title = element_text(size = 10, hjust = 0.5),
-        legend.key.size = unit(0.6, "cm"), # Legend key dot size
-        legend.text = element_text(size = 6)
-      )
-  })
-  
-  # Determine optimal grid layout
-  n_markers <- length(selected_markers)
-  ncol_grid <- case_when(
-    n_markers <= 4 ~ 2,
-    n_markers <= 9 ~ 3,
-    n_markers <= 16 ~ 4,
-    TRUE ~ ceiling(sqrt(n_markers))
-  )
-  
-  # Arrange in grid
-  combined_plot <- wrap_plots(marker_plots, ncol = ncol_grid)
-  
-  # Store and display
-  .umap_session_plots$plot_counter <<- .umap_session_plots$plot_counter + 1
-  plot_id <- paste0("plot_", .umap_session_plots$plot_counter)
-  
-  plot_title <- paste("Multi-marker heatmap (", length(selected_markers), "markers)")
-  
-  plot_info <- list(
-    plot = combined_plot,
-    color_by = "multiple_markers",
-    facet_by = NULL,
-    plot_type = "heatmap",
-    title = plot_title,
-    markers_used = selected_markers,
-    timestamp = Sys.time()
-  )
-  
-  .umap_session_plots$plots[[plot_id]] <<- plot_info
-  print(combined_plot)
-  
-  # Save option
-  save_options <- c("Yes, save plot", "No, continue without saving")
-  save_choice <- select_from_menu(save_options, "Save this heatmap?")
-  
-  if (!is.null(save_choice) && save_choice == "Yes, save plot") {
-    filename <- readline("Enter filename: ")
-    if (filename != "") {
-      if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
-        filename <- paste0(filename, ".png")
-      }
-      
-      # Adjust size based on number of markers
-      width <- max(8, ceiling(ncol_grid * 2.5))
-      height <- max(6, ceiling((length(marker_plots) / ncol_grid) * 2))
-      
-      tryCatch({
-        ggsave(filename, plot = combined_plot, width = width, height = height, dpi = 300)
-        cat("Heatmap saved as:", filename, "\n")
-      }, error = function(e) {
-        cat("Error saving plot:", e$message, "\n")
-      })
-    }
-  }
-  
-  cat("Plot created and stored as:", plot_id, "\n")
-  return(plot_id)
-}
-
-# Enhanced density plot creation
-create_density_plot <- function() {
-  umap_data <- .umap_session_plots$umap_data
-  metadata_cols <- .umap_session_plots$metadata_cols
-  marker_names <- .umap_session_plots$marker_names
-  all_options <- c(metadata_cols, marker_names)
-  
-  cat("\n=== Density Plot Creation ===\n")
-  
-  density_options <- c(
-    "Overall density (no grouping)",
-    "Density faceted by variable"
-  )
-  
-  density_type <- select_from_menu(density_options, "Choose density plot type")
-  
-  if (is.null(density_type)) return(NULL)
-  
-  facet_var <- NULL
-  if (density_type == "Density faceted by variable") {
-    # Filter to categorical variables
-    categorical_vars <- all_options[map_lgl(all_options, ~!is.numeric(umap_data[[.x]]))]
-    
-    if (length(categorical_vars) == 0) {
-      cat("No categorical variables available for faceting\n")
-      return(NULL)
-    }
-    
-    facet_var <- select_from_menu(
-      categorical_vars,
-      "Select variable for faceting"
-    )
-    
-    if (is.null(facet_var)) return(NULL)
-  }
-  
-  # Save option
-  save_options <- c("Yes, save plot", "No, continue without saving")
-  save_choice <- select_from_menu(save_options, "Save this plot?")
-  
-  filename <- NULL
-  if (!is.null(save_choice) && save_choice == "Yes, save plot") {
-    filename <- readline("Enter filename: ")
-    if (filename == "") filename <- NULL
-  }
-  
-  create_and_save_umap_plot(
-    facet_by = facet_var,
-    plot_type = "density",
-    filename = filename
-  )
-}
-
-# Enhanced plot management
-manage_stored_plots <- function() {
-  if (length(.umap_session_plots$plots) == 0) {
-    cat("No plots stored in current session\n")
-    return(NULL)
-  }
-  
-  while (TRUE) {
-    cat("\n=== Stored Plot Management ===\n")
-    cat("Total plots:", length(.umap_session_plots$plots), "\n\n")
-    
-    # Show plot list
-    plot_info <- map_chr(names(.umap_session_plots$plots), function(plot_id) {
-      plot_data <- .umap_session_plots$plots[[plot_id]]
-      info_parts <- c(plot_data$title)
-      if (!is.null(plot_data$color_by)) {
-        info_parts <- c(info_parts, paste("color:", plot_data$color_by))
-      }
-      if (!is.null(plot_data$facet_by)) {
-        info_parts <- c(info_parts, paste("facet:", plot_data$facet_by))
-      }
-      info_parts <- c(info_parts, format(plot_data$timestamp, "%H:%M:%S"))
-      paste(info_parts, collapse = " | ")
-    })
-    
-    management_options <- c(
-      "Display a plot",
-      "Save a plot to file", 
-      "Export all plots",
-      "Delete a plot",
-      "Clear all plots",
-      "Return to main menu"
-    )
-    
-    action <- select_from_menu(management_options, "Choose action")
-    
-    if (is.null(action) || action == "Return to main menu") {
-      break
-    }
-    
-    if (action %in% c("Display a plot", "Save a plot to file", "Delete a plot")) {
-      selected_plot_id <- select_from_menu(
-        names(.umap_session_plots$plots),
-        paste("Select plot to", tolower(str_remove(action, " a plot| to file")))
-      )
-      
-      if (is.null(selected_plot_id)) next
-      
-      if (action == "Display a plot") {
-        print(.umap_session_plots$plots[[selected_plot_id]]$plot)
-        
-      } else if (action == "Save a plot to file") {
-        filename <- readline("Enter filename: ")
-        if (filename != "") {
-          if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
-            filename <- paste0(filename, ".png")
-          }
-          tryCatch({
-            ggsave(filename, plot = .umap_session_plots$plots[[selected_plot_id]]$plot)
-            cat("Plot saved as:", filename, "\n")
-          }, error = function(e) {
-            cat("Error saving plot:", e$message, "\n")
-          })
-        }
-        
-      } else if (action == "Delete a plot") {
-        confirm_options <- c("Yes, delete", "No, cancel")
-        confirm <- select_from_menu(confirm_options, "Confirm deletion")
-        if (!is.null(confirm) && confirm == "Yes, delete") {
-          .umap_session_plots$plots[[selected_plot_id]] <<- NULL
-          cat("Plot", selected_plot_id, "deleted\n")
-        }
-      }
-      
-    } else if (action == "Export all plots") {
-      directory <- readline("Export directory (default: umap_plots): ")
-      if (directory == "") directory <- "umap_plots"
-      export_all_session_plots(directory)
-      
-    } else if (action == "Clear all plots") {
-      confirm_options <- c("Yes, clear all", "No, cancel")
-      confirm <- select_from_menu(confirm_options, "Clear all plots?")
-      if (!is.null(confirm) && confirm == "Yes, clear all") {
-        .umap_session_plots$plots <<- list()
-        .umap_session_plots$plot_counter <<- 0
-        cat("All plots cleared\n")
-      }
-    }
-  }
-}
-
-# Main enhanced interactive visualization menu
-interactive_visualization_menu <- function() {
-  if (length(.umap_session_plots) == 0) {
-    cat("No active visualization session. Please run analyze_flow_umap_enhanced() first.\n")
-    return(NULL)
-  }
-  
-  umap_data <- .umap_session_plots$umap_data
-  marker_names <- .umap_session_plots$marker_names
-  metadata_cols <- .umap_session_plots$metadata_cols
-  
-  while (TRUE) {
-    cat("\n=== Interactive UMAP Visualization Menu ===\n")
-    cat("Current session:", scales::comma(nrow(umap_data)), "cells\n")
-    cat("Stored plots:", length(.umap_session_plots$plots), "\n")
-    cat("Available variables:", length(c(metadata_cols, marker_names)), 
-        "(", length(metadata_cols), "metadata,", length(marker_names), "markers)\n\n")
-    
-    main_options <- c(
-      "Create basic UMAP plot",
-      "Color by variable", 
-      "Facet by variable",
-      "Color AND facet",
-      "Create density plot",
-      "Multi-marker heatmap overlay",
-      "Manage stored plots",
-      "Session summary",
-      "Exit visualization"
-    )
-    
-    choice <- select_from_menu(main_options, "Choose visualization option")
-    
-    if (is.null(choice) || choice == "Exit visualization") {
-      cat("Exiting visualization menu\n")
-      break
-    }
-    
-    # Execute selected action
-    if (choice == "Create basic UMAP plot") {
-      save_options <- c("Yes, save plot", "No, continue without saving")
-      save_choice <- select_from_menu(save_options, "Save this plot?")
-      
-      filename <- NULL
-      if (!is.null(save_choice) && save_choice == "Yes, save plot") {
-        filename <- readline("Enter filename: ")
-        if (filename == "") filename <- NULL
-      }
-      
-      create_and_save_umap_plot(title = "Basic UMAP", filename = filename)
-      
-    } else if (choice == "Color by variable") {
-      color_var <- select_visualization_variable(
-        marker_names, metadata_cols, "coloring"
-      )
-      
-      if (!is.null(color_var)) {
-        var_type <- if (color_var %in% marker_names) "marker" else "metadata"
-        plot_title <- paste("UMAP colored by", color_var, "(", var_type, ")")
-        
-        save_options <- c("Yes, save plot", "No, continue without saving")
-        save_choice <- select_from_menu(save_options, "Save this plot?")
-        
-        filename <- NULL
-        if (!is.null(save_choice) && save_choice == "Yes, save plot") {
-          filename <- readline("Enter filename: ")
-          if (filename == "") filename <- NULL
-        }
-        
-        create_and_save_umap_plot(
-          color_by = color_var,
-          title = plot_title,
-          filename = filename
-        )
-      }
-      
-    } else if (choice == "Facet by variable") {
-      all_options <- c(metadata_cols, marker_names)
-      categorical_vars <- all_options[map_lgl(all_options, ~!is.numeric(umap_data[[.x]]))]
-      
-      if (length(categorical_vars) == 0) {
-        cat("No categorical variables available for faceting\n")
-        next
-      }
-      
-      facet_var <- select_from_menu(
-        categorical_vars,
-        "Select variable for faceting"
-      )
-      
-      if (!is.null(facet_var)) {
-        save_options <- c("Yes, save plot", "No, continue without saving")
-        save_choice <- select_from_menu(save_options, "Save this plot?")
-        
-        filename <- NULL
-        if (!is.null(save_choice) && save_choice == "Yes, save plot") {
-          filename <- readline("Enter filename: ")
-          if (filename == "") filename <- NULL
-        }
-        
-        create_and_save_umap_plot(facet_by = facet_var, filename = filename)
-      }
-      
-    } else if (choice == "Color AND facet") {
-      all_options <- c(metadata_cols, marker_names)
-      
-      # Step 1: Color variable
-      color_var <- select_visualization_variable(
-        marker_names, metadata_cols, "coloring"
-      )
-      
-      if (is.null(color_var)) next
-      
-      # Step 2: Facet variable (exclude color variable if categorical)
-      categorical_vars <- all_options[map_lgl(all_options, ~!is.numeric(umap_data[[.x]]))]
-      available_facet_vars <- setdiff(categorical_vars, color_var)
-      
-      if (length(available_facet_vars) == 0) {
-        cat("No additional categorical variables available for faceting\n")
-        next
-      }
-      
-      facet_var <- select_from_menu(
-        available_facet_vars,
-        "Select variable for faceting"
-      )
-      
-      if (!is.null(facet_var)) {
-        save_options <- c("Yes, save plot", "No, continue without saving")
-        save_choice <- select_from_menu(save_options, "Save this plot?")
-        
-        filename <- NULL
-        if (!is.null(save_choice) && save_choice == "Yes, save plot") {
-          filename <- readline("Enter filename: ")
-          if (filename == "") filename <- NULL
-        }
-        
-        create_and_save_umap_plot(
-          color_by = color_var,
-          facet_by = facet_var,
-          filename = filename
-        )
-      }
-      
-    } else if (choice == "Create density plot") {
-      create_density_plot()
-      
-    } else if (choice == "Multi-marker heatmap overlay") {
-      create_multi_marker_heatmap()
-      
-    } else if (choice == "Manage stored plots") {
-      manage_stored_plots()
-      
-    } else if (choice == "Session summary") {
-      cat("\n=== Session Summary ===\n")
-      cat("Cells:", scales::comma(nrow(umap_data)), "\n")
-      cat("Markers:", length(marker_names), "\n")
-      cat("Metadata columns:", length(metadata_cols), "\n")
-      cat("Stored plots:", length(.umap_session_plots$plots), "\n\n")
-      
-      if (length(marker_names) > 0) {
-        cat("Markers:", paste(marker_names, collapse = ", "), "\n")
-      }
-      if (length(metadata_cols) > 0) {
-        cat("Metadata:", paste(metadata_cols, collapse = ", "), "\n")
-      }
-      
-      if (length(.umap_session_plots$plots) > 0) {
-        cat("\nPlot history:\n")
-        iwalk(.umap_session_plots$plots, function(plot_info, plot_id) {
-          cat(sprintf("- %s: %s\n", plot_id, plot_info$title))
-        })
-      }
-      
-      readline("Press Enter to continue...")
-    }
-  }
-  
-  return(invisible(.umap_session_plots))
-}
-
-# ============================================================================
-# ROBUST EXTERNAL METADATA IMPORT (OPTIONAL)
-# ============================================================================
-
-import_external_metadata <- function(gs) {
-  cat("\n=== External Metadata Import ===\n")
-  cat("This function will help you import and merge external metadata\n")
-  cat("with your flow cytometry samples.\n\n")
-  
-  # Get current sample names for matching
-  current_samples <- sampleNames(gs)
-  cat("Current samples in gating set:", length(current_samples), "\n")
-  cat("Sample preview:", paste(head(current_samples, 3), collapse = ", "), "...\n\n")
-  
-  while(TRUE) {
-    cat("Metadata Import Options:\n")
-    cat("1. Load from CSV file\n")
-    cat("2. Load from R object in environment\n")
-    cat("3. Skip metadata import\n")
-    
-    choice <- readline("Choose option (1-3): ")
-    
-    metadata <- NULL
-    
-    if(choice == "1") {
-      # CSV import
-      file_path <- readline("Enter CSV file path: ")
-      if(file.exists(file_path)) {
-        tryCatch({
-          metadata <- read_csv(file_path, show_col_types = FALSE)
-          cat("Successfully loaded CSV with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
-        }, error = function(e) {
-          cat("Error loading CSV:", e$message, "\n")
-          next
-        })
-      } else {
-        cat("File not found:", file_path, "\n")
-        next
-      }
-      
-    } else if(choice == "2") {
-      # R object import
-      cat("\n=== R Object Metadata Import ===\n")
-      cat("Available objects in environment:\n")
-      objects_list <- ls(envir = .GlobalEnv)
-      data_objects <- objects_list[sapply(objects_list, function(x) {
-        obj <- get(x, envir = .GlobalEnv)
-        is.data.frame(obj) || is_tibble(obj)
-      })]
-      
-      if(length(data_objects) == 0) {
-        cat("No data frame objects found in global environment\n")
-        next
-      }
-      
-      cat("Data frame objects:\n")
-      iwalk(data_objects, ~cat(sprintf("%d. %s\n", .y, .x)))
-      
-      obj_choice <- readline("Enter object name or number: ")
-      
-      # Fixed: Safe object selection
-      selected_obj <- NULL
-      if(grepl("^\\d+$", obj_choice)) {
-        obj_num <- as.numeric(obj_choice)
-        if(!is.na(obj_num) && obj_num >= 1 && obj_num <= length(data_objects)) {
-          selected_obj <- data_objects[obj_num]
-        }
-      } else if(obj_choice %in% data_objects) {
-        selected_obj <- obj_choice
-      }
-      
-      if(is.null(selected_obj)) {
-        cat("Invalid selection\n")
-        next
-      }
-      
-      metadata <- get(selected_obj, envir = .GlobalEnv)
-      cat("Using object '", selected_obj, "' with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
-      
-    } else if(choice == "3") {
-      cat("Skipping metadata import\n")
-      return(NULL)
-    } else {
-      cat("Invalid choice\n")
-      next
-    }
-    
-    # If we have metadata, process it
-    if(!is.null(metadata)) {
-      # Show preview
-      cat("\nMetadata preview:\n")
-      print(head(metadata, 5))
-      cat("Column names:", paste(names(metadata), collapse = ", "), "\n\n")
-      
-      # Identify sample ID column
-      cat("Sample ID Column Selection:\n")
-      cat("Available columns:\n")
-      iwalk(names(metadata), ~cat(sprintf("%d. %s\n", .y, .x)))
-      
-      sample_col_choice <- readline("Enter column number/name for Sample ID: ")
-      
-      # Fixed: Safe column selection
-      sample_col <- NULL
-      if(grepl("^\\d+$", sample_col_choice)) {
-        col_num <- as.numeric(sample_col_choice)
-        if(!is.na(col_num) && col_num >= 1 && col_num <= ncol(metadata)) {
-          sample_col <- names(metadata)[col_num]
-        }
-      } else if(sample_col_choice %in% names(metadata)) {
-        sample_col <- sample_col_choice
-      }
-      
-      if(is.null(sample_col)) {
-        cat("Invalid selection\n")
-        next
-      }
-      
-      # Check sample matching
-      metadata_samples <- metadata[[sample_col]]
-      matched_samples <- intersect(current_samples, metadata_samples)
-      unmatched_gs <- setdiff(current_samples, metadata_samples)
-      unmatched_meta <- setdiff(metadata_samples, current_samples)
-      
-      cat("\nSample Matching Results:\n")
-      cat("Samples in both datasets:", length(matched_samples), "\n")
-      cat("Samples in GatingSet only:", length(unmatched_gs), "\n")
-      cat("Samples in metadata only:", length(unmatched_meta), "\n")
-      
-      if(length(matched_samples) == 0) {
-        cat("No matching samples found! Check sample naming.\n")
-        cat("GatingSet samples preview:", paste(head(current_samples, 3), collapse = ", "), "\n")
-        cat("Metadata samples preview:", paste(head(metadata_samples, 3), collapse = ", "), "\n")
-        next
-      }
-      
-      if(length(unmatched_gs) > 0) {
-        cat("Unmatched GatingSet samples:", paste(head(unmatched_gs, 5), collapse = ", "))
-        if(length(unmatched_gs) > 5) cat("...")
-        cat("\n")
-      }
-      
-      # Select metadata columns to include
-      other_cols <- setdiff(names(metadata), sample_col)
-      cat("\nAvailable metadata columns to include:\n")
-      iwalk(other_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
-      
-      col_selection <- readline("Enter column numbers (space-separated) or 'all' or 'none': ")
-      
-      selected_cols <- NULL
-      if(tolower(col_selection) == "all") {
-        selected_cols <- other_cols
-      } else if(tolower(col_selection) == "none") {
-        cat("No additional metadata columns selected\n")
-        next
-      } else if(col_selection == "") {
-        selected_cols <- other_cols
-        cat("No input provided, using all columns\n")
-      } else {
-        # Parse space-separated column numbers/names
-        tryCatch({
-          # Split by spaces and clean up
-          selections <- str_trim(str_split(col_selection, "\\s+")[[1]])
-          selected_cols <- character(0)
-          
-          for(sel in selections) {
-            if(grepl("^\\d+$", sel)) {
-              # Numeric selection
-              col_num <- as.numeric(sel)
-              if(!is.na(col_num) && col_num >= 1 && col_num <= length(other_cols)) {
-                selected_cols <- c(selected_cols, other_cols[col_num])
-              }
-            } else if(sel %in% other_cols) {
-              # Column name selection
-              selected_cols <- c(selected_cols, sel)
-            }
-          }
-          
-          selected_cols <- unique(selected_cols)
-          
-          if(length(selected_cols) == 0) {
-            cat("No valid columns selected\n")
-            next
-          }
-          
-        }, error = function(e) {
-          cat("Invalid input format. Using all columns\n")
-          selected_cols <- other_cols
-        })
-      }
-      
-      cat("\nSelected metadata columns:\n")
-      iwalk(selected_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
-      
-      confirm <- readline("Confirm metadata column selection? (y/n): ")
-      if(tolower(confirm) != "y") {
-        cat("Column selection cancelled\n")
-        next
-      }
-      
-      # Prepare final metadata
-      final_metadata <- metadata %>%
-        select(all_of(c(sample_col, selected_cols))) %>%
-        rename(Sample = all_of(sample_col)) %>%
-        filter(Sample %in% current_samples)
-      
-      cat("Final metadata prepared with", nrow(final_metadata), 
-          "samples and", ncol(final_metadata)-1, "metadata columns\n")
-      cat("Final columns:", paste(names(final_metadata), collapse = ", "), "\n")
-      
-      return(final_metadata)
-    }
-  }
-}
 
 # ============================================================================
 # ENHANCED INTERACTIVE UMAP ANALYSIS FOR FLOW CYTOMETRY DATA
 # Fixed version with sample exclusion and streamlined workflow
-# ============================================================================
-
-library(tidyverse)
-library(umap)
-library(ggplot2)
-library(patchwork)
-library(viridis)
-library(RColorBrewer)
-library(scales)
-
-# ============================================================================
-# MISSING DEPENDENCY FUNCTIONS - REPLACE WITH YOUR ACTUAL IMPLEMENTATIONS
 # ============================================================================
 
 get_all_populations <- function(gs) {
@@ -9299,6 +7508,10 @@ interactive_visualization_menu <- function() {
 # ROBUST EXTERNAL METADATA IMPORT (OPTIONAL)
 # ============================================================================
 
+# ============================================================================
+# FIXED EXTERNAL METADATA IMPORT WITH PROPER DUPLICATE HANDLING
+# ============================================================================
+
 import_external_metadata <- function(gs) {
   cat("\n=== External Metadata Import ===\n")
   cat("This function will help you import and merge external metadata\n")
@@ -9323,6 +7536,7 @@ import_external_metadata <- function(gs) {
       if(file.exists(file_path)) {
         tryCatch({
           metadata <- read_csv(file_path, show_col_types = FALSE)
+          metadata <- as_tibble(metadata)
           cat("Successfully loaded CSV with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
         }, error = function(e) {
           cat("Error loading CSV:", e$message, "\n")
@@ -9367,7 +7581,8 @@ import_external_metadata <- function(gs) {
         next
       }
       
-      metadata <- get(selected_obj, envir = .GlobalEnv)
+      metadata_obj <- get(selected_obj, envir = .GlobalEnv)
+      metadata <- as_tibble(metadata_obj)
       cat("Using object '", selected_obj, "' with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
       
     } else if(choice == "3") {
@@ -9379,10 +7594,21 @@ import_external_metadata <- function(gs) {
     }
     
     if(!is.null(metadata)) {
+      # Ensure metadata is a proper data frame/tibble
+      if(!is.data.frame(metadata)) {
+        tryCatch({
+          metadata <- as_tibble(metadata)
+        }, error = function(e) {
+          cat("Error converting to tibble:", e$message, "\n")
+          next
+        })
+      }
+      
       cat("\nMetadata preview:\n")
       print(head(metadata, 5))
       cat("Column names:", paste(names(metadata), collapse = ", "), "\n\n")
       
+      # Sample ID Column Selection
       cat("Sample ID Column Selection:\n")
       cat("Available columns:\n")
       iwalk(names(metadata), ~cat(sprintf("%d. %s\n", .y, .x)))
@@ -9404,7 +7630,59 @@ import_external_metadata <- function(gs) {
         next
       }
       
+      # FIXED: Removed duplicate checking logic
+      # In flow cytometry, having the same sample metadata repeated is expected and normal
       metadata_samples <- metadata[[sample_col]]
+      
+      # Simple validation: check for data quality issues
+      if(length(metadata_samples) == 0) {
+        cat("Error: No sample names found in selected column\n")
+        next
+      }
+      
+      # Check for actual data issues (like empty/NA sample names)
+      na_samples <- sum(is.na(metadata_samples))
+      empty_samples <- sum(metadata_samples == "", na.rm = TRUE)
+      
+      if(na_samples > 0) {
+        cat("Warning:", na_samples, "NA sample names found\n")
+      }
+      
+      if(empty_samples > 0) {
+        cat("Warning:", empty_samples, "empty sample names found\n")
+      }
+      
+      # If there are repeated sample names with identical metadata, deduplicate to sample level
+      unique_samples <- unique(metadata_samples)
+      if(length(unique_samples) < length(metadata_samples)) {
+        cat("Note: Found repeated sample names in metadata (", length(metadata_samples), 
+            "rows ->", length(unique_samples), "unique samples)\n")
+        cat("This is normal for single-cell data. Deduplicating to sample-level metadata.\n")
+        
+        # Convert to standard data frame to avoid Bioconductor S4 object issues
+        tryCatch({
+          # Force conversion to standard data types
+          metadata <- as.data.frame(metadata)
+          metadata <- as_tibble(metadata)
+          
+          # Keep first occurrence of each sample using base R approach to avoid slice() issues
+          sample_indices <- match(unique_samples, metadata[[sample_col]])
+          metadata <- metadata[sample_indices, ]
+          
+        }, error = function(e) {
+          cat("Error during deduplication:", e$message, "\n")
+          cat("Attempting alternative deduplication method...\n")
+          
+          # Alternative approach using base R
+          unique_rows <- !duplicated(metadata[[sample_col]])
+          metadata <- metadata[unique_rows, ]
+        })
+        
+        metadata_samples <- metadata[[sample_col]]
+        cat("Deduplicated to", nrow(metadata), "unique sample entries\n")
+      }
+      
+      # Continue with sample matching
       matched_samples <- intersect(current_samples, metadata_samples)
       unmatched_gs <- setdiff(current_samples, metadata_samples)
       unmatched_meta <- setdiff(metadata_samples, current_samples)
@@ -9418,6 +7696,13 @@ import_external_metadata <- function(gs) {
         cat("No matching samples found! Check sample naming.\n")
         cat("GatingSet samples preview:", paste(head(current_samples, 3), collapse = ", "), "\n")
         cat("Metadata samples preview:", paste(head(metadata_samples, 3), collapse = ", "), "\n")
+        
+        # Show sample comparison for debugging
+        cat("\nFirst 10 GatingSet samples:\n")
+        iwalk(head(current_samples, 10), ~cat(sprintf("  %d. '%s'\n", .y, .x)))
+        cat("\nFirst 10 metadata samples:\n") 
+        iwalk(head(metadata_samples, 10), ~cat(sprintf("  %d. '%s'\n", .y, .x)))
+        
         next
       }
       
@@ -9427,6 +7712,7 @@ import_external_metadata <- function(gs) {
         cat("\n")
       }
       
+      # Column selection
       other_cols <- setdiff(names(metadata), sample_col)
       cat("\nAvailable metadata columns to include:\n")
       iwalk(other_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
@@ -9480,20 +7766,185 @@ import_external_metadata <- function(gs) {
         next
       }
       
+      # Create final metadata with proper structure
       final_metadata <- metadata %>%
         select(all_of(c(sample_col, selected_cols))) %>%
         rename(Sample = all_of(sample_col)) %>%
-        filter(Sample %in% current_samples)
+        filter(Sample %in% current_samples) %>%
+        as_tibble()
       
-      cat("Final metadata prepared with", nrow(final_metadata), 
-          "samples and", ncol(final_metadata)-1, "metadata columns\n")
-      cat("Final columns:", paste(names(final_metadata), collapse = ", "), "\n")
+      # Final verification - ensure no duplicates at sample level
+      final_sample_check <- table(final_metadata$Sample)
+      final_duplicates <- names(final_sample_check)[final_sample_check > 1]
+      
+      if(length(final_duplicates) > 0) {
+        cat("Warning: Sample-level duplicates still present. Taking first occurrence of each.\n")
+        tryCatch({
+          # Use base R approach to avoid slice() issues with S4 objects
+          unique_sample_rows <- !duplicated(final_metadata$Sample)
+          final_metadata <- final_metadata[unique_sample_rows, ]
+        }, error = function(e) {
+          cat("Error removing final duplicates:", e$message, "\n")
+          # Force conversion and try again
+          final_metadata <- as.data.frame(final_metadata)
+          final_metadata <- as_tibble(final_metadata)
+          unique_sample_rows <- !duplicated(final_metadata$Sample)
+          final_metadata <- final_metadata[unique_sample_rows, ]
+        })
+      }
+      
+      cat("Final metadata prepared successfully:\n")
+      cat("- Samples:", nrow(final_metadata), "\n")
+      cat("- Metadata columns:", ncol(final_metadata)-1, "\n")
+      cat("- Column names:", paste(names(final_metadata), collapse = ", "), "\n")
+      cat("- Sample-level metadata confirmed\n")
       
       return(final_metadata)
     }
   }
 }
 
+# ============================================================================
+# FIXED SECTION IN MAIN FUNCTION FOR METADATA MERGING
+# ============================================================================
+
+merge_external_metadata_safely <- function(single_cell_data, external_metadata) {
+  cat("Merging external metadata with single-cell data...\n")
+  cat("External metadata dimensions:", nrow(external_metadata), "rows,", ncol(external_metadata), "columns\n")
+  
+  # Ensure Sample column exists
+  if(!"Sample" %in% names(external_metadata)) {
+    stop("No 'Sample' column found in external metadata")
+  }
+  
+  # Check for column conflicts
+  current_meta_cols <- setdiff(names(single_cell_data$data), 
+                               c("CellID", single_cell_data$marker_names))
+  ext_meta_cols <- setdiff(names(external_metadata), "Sample")
+  conflicting_cols <- intersect(current_meta_cols, ext_meta_cols)
+  
+  if(length(conflicting_cols) > 0) {
+    cat("Column name conflicts found:", paste(conflicting_cols, collapse = ", "), "\n")
+    cat("External metadata columns will be prefixed with 'ext_'\n")
+    
+    for(col in conflicting_cols) {
+      names(external_metadata)[names(external_metadata) == col] <- paste0("ext_", col)
+    }
+  }
+  
+  original_nrow <- nrow(single_cell_data$data)
+  
+  # FIXED: Check for duplicates ONLY in external metadata (sample-level duplicates)
+  # This checks if the same sample has different metadata (which would be an error)
+  cat("Checking external metadata for sample-level inconsistencies...\n")
+  
+  # Group by Sample and check if all metadata is identical for each sample
+  metadata_consistency_check <- external_metadata %>%
+    group_by(Sample) %>%
+    summarise(
+      n_rows = n(),
+      .groups = "drop"
+    ) %>%
+    filter(n_rows > 1)
+  
+  if(nrow(metadata_consistency_check) > 0) {
+    cat("Found samples with multiple metadata rows in external data:\n")
+    print(head(metadata_consistency_check, 10))
+    
+    cat("\nChecking if metadata is consistent across duplicate sample entries...\n")
+    
+    # Check if duplicated samples have identical metadata
+    problem_samples <- c()
+    for(sample_id in metadata_consistency_check$Sample) {
+      sample_rows <- external_metadata %>% filter(Sample == sample_id)
+      
+      # Check if all rows are identical (excluding Sample column)
+      metadata_cols <- setdiff(names(sample_rows), "Sample")
+      if(length(metadata_cols) > 0) {
+        unique_metadata_combinations <- sample_rows %>%
+          select(all_of(metadata_cols)) %>%
+          distinct() %>%
+          nrow()
+        
+        if(unique_metadata_combinations > 1) {
+          problem_samples <- c(problem_samples, sample_id)
+        }
+      }
+    }
+    
+    if(length(problem_samples) > 0) {
+      cat("ERROR: Found samples with inconsistent metadata:\n")
+      for(sample_id in head(problem_samples, 5)) {
+        cat("Sample:", sample_id, "\n")
+        problem_rows <- external_metadata %>% filter(Sample == sample_id)
+        print(problem_rows)
+        cat("\n")
+      }
+      stop("Cannot merge metadata with inconsistent values for the same sample. Please clean your external metadata.")
+    } else {
+      cat("Duplicate sample entries have consistent metadata. Using first occurrence of each.\n")
+      external_metadata <- external_metadata %>%
+        group_by(Sample) %>%
+        slice(1) %>%
+        ungroup()
+      cat("Deduplicated external metadata to", nrow(external_metadata), "unique samples\n")
+    }
+  } else {
+    cat("No duplicate samples found in external metadata - each sample has unique metadata\n")
+  }
+  
+  # Check sample overlap between datasets
+  sc_samples <- unique(single_cell_data$data$Sample)
+  meta_samples <- external_metadata$Sample
+  
+  cat("Sample matching summary:\n")
+  cat("- Single-cell data samples:", length(sc_samples), "\n")
+  cat("- External metadata samples:", length(meta_samples), "\n")
+  cat("- Overlapping samples:", length(intersect(sc_samples, meta_samples)), "\n")
+  cat("- SC samples without metadata:", length(setdiff(sc_samples, meta_samples)), "\n")
+  cat("- Metadata samples not in SC data:", length(setdiff(meta_samples, sc_samples)), "\n")
+  
+  # Perform the join - this is a many-to-one relationship (many cells to one sample metadata)
+  tryCatch({
+    merged_data <- single_cell_data$data %>%
+      left_join(external_metadata, by = "Sample", relationship = "many-to-one")
+    
+    if(nrow(merged_data) != original_nrow) {
+      stop("Row count changed during merge (", original_nrow, "->", nrow(merged_data), 
+           "). This suggests a join issue.")
+    }
+    
+    cat("Merge successful: row count maintained at", nrow(merged_data), "\n")
+    
+    # Check how many cells got metadata
+    cells_with_metadata <- merged_data %>%
+      select(all_of(setdiff(names(external_metadata), "Sample"))) %>%
+      complete.cases() %>%
+      sum()
+    
+    cat("Cells with complete metadata:", scales::comma(cells_with_metadata), 
+        "out of", scales::comma(nrow(merged_data)), "\n")
+    
+    cat("External metadata successfully merged!\n")
+    cat("Added columns:", paste(setdiff(names(external_metadata), "Sample"), collapse = ", "), "\n")
+    
+    # Update the single-cell data object
+    single_cell_data$data <- merged_data
+    
+    return(single_cell_data)
+    
+  }, error = function(e) {
+    cat("Error during join operation:", conditionMessage(e), "\n")
+    
+    # Provide detailed debugging information
+    cat("\nDebugging information:\n")
+    cat("Single-cell data samples (unique):", length(unique(single_cell_data$data$Sample)), "\n")
+    cat("External metadata samples:", nrow(external_metadata), "\n")
+    cat("Matching samples:", length(intersect(unique(single_cell_data$data$Sample), external_metadata$Sample)), "\n")
+    
+    stop("Join operation failed. See debugging information above.")
+  })
+}
 # ============================================================================
 # MAIN ENHANCED FUNCTION WITH SAMPLE EXCLUSION
 # ============================================================================
@@ -9553,7 +8004,7 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME"))
     max_cells_per_sample = max_cells
   )
   
-  # Step 5: Import external metadata (optional)
+  # Step 5: Import external metadata (optional) - FIXED VERSION
   cat("\n=== Metadata Import ===\n")
   import_choice <- readline("Import external metadata? (y/n, default n): ")
   
@@ -9562,52 +8013,61 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("$WELLID", "GROUPNAME"))
     external_metadata <- import_external_metadata(gs)
     
     if(!is.null(external_metadata)) {
-      cat("Merging external metadata with single-cell data...\n")
+      # FIXED: More robust type checking
+      cat("Debug: external_metadata class:", paste(class(external_metadata), collapse = ", "), "\n")
+      cat("Debug: is.data.frame():", is.data.frame(external_metadata), "\n")
+      cat("Debug: inherits data.frame:", inherits(external_metadata, "data.frame"), "\n")
       
-      current_meta_cols <- setdiff(names(single_cell_data$data), 
-                                   c("CellID", single_cell_data$marker_names))
+      # Use inherits() instead of is.data.frame() for more robust checking
+      is_dataframe_like <- inherits(external_metadata, "data.frame") || 
+        inherits(external_metadata, "tbl_df") || 
+        inherits(external_metadata, "tbl")
       
-      ext_meta_cols <- setdiff(names(external_metadata), "Sample")
-      conflicting_cols <- intersect(current_meta_cols, ext_meta_cols)
-      
-      if(length(conflicting_cols) > 0) {
-        cat("Column name conflicts found:", paste(conflicting_cols, collapse = ", "), "\n")
-        cat("External metadata columns will be prefixed with 'ext_'\n")
+      if(!is_dataframe_like) {
+        cat("Warning: External metadata is not a data frame-like object\n")
         
-        for(col in conflicting_cols) {
-          names(external_metadata)[names(external_metadata) == col] <- paste0("ext_", col)
+        # Only try to extract from list if it's actually not data.frame-like
+        if(is.list(external_metadata)) {
+          cat("Attempting to extract data frame from list...\n")
+          
+          # Try to find a data frame in the list
+          df_elements <- external_metadata[sapply(external_metadata, function(x) {
+            inherits(x, "data.frame") || inherits(x, "tbl_df") || inherits(x, "tbl")
+          })]
+          
+          if(length(df_elements) > 0) {
+            external_metadata <- df_elements[[1]]
+            cat("Extracted data frame from list\n")
+          } else {
+            cat("Error: No data frame found in returned list. Skipping external metadata.\n")
+            external_metadata <- NULL
+          }
+        } else {
+          cat("Error: Metadata is not a list or data frame. Skipping external metadata.\n")
+          external_metadata <- NULL
         }
       }
       
-      original_nrow <- nrow(single_cell_data$data)
-      
-      duplicate_samples_ext <- external_metadata %>%
-        count(Sample) %>%
-        filter(n > 1)
-      
-      if(nrow(duplicate_samples_ext) > 0) {
-        cat("Warning: Duplicate Sample IDs found in external metadata:\n")
-        print(duplicate_samples_ext)
-        cat("Using first occurrence of each Sample ID\n")
-        
-        external_metadata <- external_metadata %>%
-          group_by(Sample) %>%
-          slice(1) %>%
-          ungroup()
+      # Final validation and conversion if needed
+      if(!is.null(external_metadata)) {
+        # Ensure it's a proper tibble for consistency
+        if(!inherits(external_metadata, "tbl_df")) {
+          tryCatch({
+            external_metadata <- as_tibble(external_metadata)
+            cat("Converted to tibble\n")
+          }, error = function(e) {
+            cat("Error: Could not convert external metadata to tibble:", e$message, "\n")
+            external_metadata <- NULL
+          })
+        } else {
+          cat("Metadata is already a proper tibble\n")
+        }
       }
       
-      single_cell_data$data <- single_cell_data$data %>%
-        left_join(external_metadata, by = "Sample", relationship = "many-to-one")
-      
-      if(nrow(single_cell_data$data) != original_nrow) {
-        cat("Warning: Row count changed during merge (", original_nrow, "->", nrow(single_cell_data$data), ")\n")
-        cat("This suggests duplicate Sample IDs. Please check your data.\n")
-      } else {
-        cat("Merge successful: row count maintained\n")
+      # FIXED: Use the new safe merging function
+      if(!is.null(external_metadata) && inherits(external_metadata, "data.frame")) {
+        single_cell_data <- merge_external_metadata_safely(single_cell_data, external_metadata)
       }
-      
-      cat("External metadata successfully merged!\n")
-      cat("Added columns:", paste(setdiff(names(external_metadata), "Sample"), collapse = ", "), "\n")
     }
   }
   
@@ -9843,16 +8303,1502 @@ summarize_umap_by_group <- function(umap_results, group_column) {
 }
 
 # ============================================================================
-# EXAMPLE USAGE AND DOCUMENTATION
+# TODO ENHANCED CLUSTERING ANALYSIS EXTENSION FOR UMAP FLOW CYTOMETRY
+# Integrates with existing UMAP visualization framework (IN-Devleopment)
 # ============================================================================
 
-cat("Enhanced Interactive UMAP Flow Cytometry Analysis Functions Loaded!\n")
-cat("Main function: analyze_flow_umap_enhanced(gs)\n")
-cat("\nNew features:\n")
-cat("- Interactive sample exclusion (remove unstained, controls, etc.)\n")
-cat("- Event counting with population assessment\n")
-cat("- Optional external metadata import from CSV\n")
-cat("- Persistent plot session with save/reload capability\n")
-cat("- Interactive visualization menu with multiple plot types\n")
-cat("- Session management and export utilities\n")
-cat("- Fixed all numeric input handling to prevent NA errors\n")
+# ============================================================================
+# GLOBAL CLUSTERING SESSION ENVIRONMENT
+# ============================================================================
+
+.clustering_session <- new.env()
+
+# ============================================================================
+# UTILITY FUNCTIONS TO HANDLE S4/TIBBLE COUNTING ISSUES
+# ============================================================================
+
+safe_tibble_operations <- function(data) {
+  # Convert any S4 or complex objects to standard data frame, then back to tibble
+  # This resolves issues with FlowSOM results and dplyr operations
+  if (inherits(data, c("tbl_df", "tbl", "data.frame"))) {
+    return(as_tibble(as.data.frame(data)))
+  } else {
+    return(as_tibble(data))
+  }
+}
+
+safe_count <- function(data, group_col, count_name = "n") {
+  # Use base R table instead of dplyr count to avoid S4/vector issues
+  if (is.character(group_col)) {
+    group_values <- data[[group_col]]
+  } else {
+    group_values <- pull(data, !!group_col)
+  }
+  
+  counts <- table(group_values)
+  
+  result <- tibble(
+    !!group_col := names(counts),
+    !!count_name := as.numeric(counts)
+  ) %>%
+    arrange(desc(.data[[count_name]]))
+  
+  return(result)
+}
+
+check_clustering_packages <- function() {
+  required_packages <- c("FlowSOM", "ConsensusClusterPlus", "cluster", "dbscan")
+  available <- sapply(required_packages, function(pkg) {
+    requireNamespace(pkg, quietly = TRUE)
+  })
+  
+  if (!all(available)) {
+    missing <- required_packages[!available]
+    cat("Missing packages:", paste(missing, collapse = ", "), "\n")
+    cat("Install with: BiocManager::install(c(", paste0("'", missing, "'", collapse = ", "), "))\n")
+    return(FALSE)
+  }
+  
+  return(TRUE)
+}
+
+# ============================================================================
+# INTERACTIVE CLUSTERING METHOD SELECTION
+# ============================================================================
+
+select_clustering_method <- function() {
+  clustering_methods <- c(
+    "FlowSOM (Self-Organizing Maps) - Recommended for flow cytometry",
+    "FlowSOM + ConsensusClusterPlus - Most robust option",
+    "K-means clustering",
+    "Hierarchical clustering", 
+    "DBSCAN density-based clustering",
+    "Multiple methods comparison"
+  )
+  
+  cat("\n=== Clustering Method Selection ===\n")
+  cat("Choose clustering approach for your UMAP data:\n\n")
+  
+  iwalk(clustering_methods, ~cat(sprintf("%d. %s\n", .y, .x)))
+  
+  while (TRUE) {
+    choice <- readline("\nEnter choice number (1-6): ")
+    
+    if (grepl("^[1-6]$", choice)) {
+      method_choice <- as.numeric(choice)
+      selected_method <- switch(method_choice,
+                                "flowsom",
+                                "flowsom_consensus", 
+                                "kmeans",
+                                "hierarchical",
+                                "dbscan",
+                                "comparison"
+      )
+      
+      cat("Selected:", str_split(clustering_methods[method_choice], " - ")[[1]][1], "\n")
+      return(selected_method)
+    }
+    
+    cat("Invalid choice. Please enter 1-6.\n")
+  }
+}
+
+# ============================================================================
+# FLOWSOM CLUSTERING IMPLEMENTATION
+# ============================================================================
+
+perform_flowsom_clustering <- function(umap_data, marker_names, 
+                                       use_umap_coords = TRUE,
+                                       xdim = 10, ydim = 10, 
+                                       n_metaclusters = NULL) {
+  
+  cat("\n=== FlowSOM Clustering ===\n")
+  
+  if (!requireNamespace("FlowSOM", quietly = TRUE)) {
+    stop("FlowSOM package required. Install with: BiocManager::install('FlowSOM')")
+  }
+  
+  # Clean data structure first
+  umap_data <- safe_tibble_operations(umap_data)
+  
+  # Data preparation
+  if (use_umap_coords) {
+    clustering_data <- umap_data %>%
+      select(UMAP1, UMAP2, all_of(marker_names)) %>%
+      as.matrix()
+    cat("Using UMAP coordinates + original markers for clustering\n")
+  } else {
+    clustering_data <- umap_data %>%
+      select(all_of(marker_names)) %>%
+      as.matrix()
+    cat("Using original markers only for clustering\n")
+  }
+  
+  cat("Clustering data dimensions:", nrow(clustering_data), "cells x", ncol(clustering_data), "features\n")
+  
+  # Handle missing values
+  if (any(is.na(clustering_data))) {
+    n_na <- sum(is.na(clustering_data))
+    cat("Warning: Found", n_na, "NA values. Replacing with column medians.\n")
+    
+    for (i in 1:ncol(clustering_data)) {
+      col_data <- clustering_data[, i]
+      if (any(is.na(col_data))) {
+        median_val <- median(col_data, na.rm = TRUE)
+        clustering_data[is.na(col_data), i] <- median_val
+      }
+    }
+  }
+  
+  # FlowSOM parameters
+  if (is.null(n_metaclusters)) {
+    # Estimate optimal number of metaclusters
+    n_cells <- nrow(clustering_data)
+    n_metaclusters <- case_when(
+      n_cells < 1000 ~ 5,
+      n_cells < 5000 ~ 8,
+      n_cells < 20000 ~ 12,
+      n_cells < 50000 ~ 15,
+      TRUE ~ 20
+    )
+    
+    cat("Auto-selected", n_metaclusters, "metaclusters based on cell count\n")
+    
+    # Allow user to override
+    override_input <- readline(paste0("Override with custom number (current: ", n_metaclusters, ", Enter to keep): "))
+    if (override_input != "" && grepl("^\\d+$", override_input)) {
+      n_metaclusters <- as.numeric(override_input)
+      cat("Using", n_metaclusters, "metaclusters\n")
+    }
+  }
+  
+  cat("FlowSOM grid size:", xdim, "x", ydim, "\n")
+  cat("Number of metaclusters:", n_metaclusters, "\n")
+  
+  # Run FlowSOM
+  cat("Running FlowSOM clustering...\n")
+  
+  tryCatch({
+    # Create FlowSOM object
+    flowsom_result <- FlowSOM::FlowSOM(
+      input = clustering_data,
+      compensate = FALSE,
+      transform = FALSE,
+      scale = TRUE,
+      colsToUse = 1:ncol(clustering_data),
+      nClus = n_metaclusters,
+      xdim = xdim,
+      ydim = ydim,
+      seed = 42
+    )
+    
+    # Extract cluster assignments
+    som_clusters <- FlowSOM::GetClusters(flowsom_result)
+    metaclusters <- FlowSOM::GetMetaclusters(flowsom_result)
+    
+    # Add cluster information to original data
+    clustered_data <- umap_data %>%
+      mutate(
+        SOM_Cluster = as.factor(som_clusters),
+        MetaCluster = as.factor(metaclusters),
+        ClusterID = paste0("Cluster_", metaclusters)
+      )
+    
+    cat("FlowSOM clustering complete!\n")
+    cat("SOM nodes:", xdim * ydim, "\n")
+    cat("Metaclusters identified:", n_distinct(metaclusters), "\n")
+    
+    # FIXED: More robust cluster size summary creation
+    cat("Creating cluster summary...\n")
+    
+    cluster_summary <- safe_count(clustered_data, "MetaCluster", "n_cells") %>%
+      mutate(
+        percentage = round(n_cells / sum(n_cells) * 100, 1),
+        cumulative_pct = round(cumsum(n_cells) / sum(n_cells) * 100, 1)
+      )
+    
+    cat("\nCluster size distribution:\n")
+    print(as.data.frame(cluster_summary))
+    
+    return(list(
+      method = "FlowSOM",
+      clustered_data = clustered_data,
+      flowsom_object = flowsom_result,
+      cluster_summary = cluster_summary,
+      n_clusters = n_distinct(metaclusters),
+      parameters = list(
+        xdim = xdim,
+        ydim = ydim, 
+        n_metaclusters = n_metaclusters,
+        use_umap_coords = use_umap_coords
+      )
+    ))
+    
+  }, error = function(e) {
+    stop("FlowSOM clustering failed: ", e$message)
+  })
+}
+
+# ============================================================================
+# FLOWSOM + CONSENSUSCLUSTERPLUS IMPLEMENTATION
+# ============================================================================
+
+perform_consensus_clustering <- function(umap_data, marker_names,
+                                         use_umap_coords = TRUE,
+                                         max_clusters = 20,
+                                         reps = 50,
+                                         sample_proportion = 0.8) {
+  
+  cat("\n=== FlowSOM + ConsensusClusterPlus Clustering ===\n")
+  
+  if (!requireNamespace("ConsensusClusterPlus", quietly = TRUE)) {
+    stop("ConsensusClusterPlus package required. Install with: BiocManager::install('ConsensusClusterPlus')")
+  }
+  
+  # Clean data structure first
+  umap_data <- safe_tibble_operations(umap_data)
+  
+  # Data preparation  
+  if (use_umap_coords) {
+    clustering_data <- umap_data %>%
+      select(UMAP1, UMAP2, all_of(marker_names)) %>%
+      as.matrix()
+  } else {
+    clustering_data <- umap_data %>%
+      select(all_of(marker_names)) %>%
+      as.matrix()
+  }
+  
+  # Handle large datasets by subsampling for consensus
+  if (nrow(clustering_data) > 10000) {
+    subsample_size <- 10000
+    cat("Large dataset detected. Subsampling to", subsample_size, "cells for consensus clustering\n")
+    
+    subsample_indices <- sample(nrow(clustering_data), subsample_size)
+    consensus_data <- clustering_data[subsample_indices, ]
+  } else {
+    consensus_data <- clustering_data
+    subsample_indices <- 1:nrow(clustering_data)
+  }
+  
+  cat("Consensus clustering on", nrow(consensus_data), "cells\n")
+  cat("Testing up to", max_clusters, "clusters with", reps, "repetitions\n")
+  
+  # Run consensus clustering
+  cat("Running ConsensusClusterPlus (this may take a while)...\n")
+  
+  tryCatch({
+    consensus_result <- ConsensusClusterPlus::ConsensusClusterPlus(
+      d = t(consensus_data),
+      maxK = max_clusters,
+      reps = reps,
+      pItem = sample_proportion,
+      pFeature = 1,
+      clusterAlg = "km",
+      distance = "euclidean",
+      seed = 42,
+      plot = NULL,  # Suppress automatic plots
+      verbose = FALSE
+    )
+    
+    # Analyze consensus results to find optimal k
+    consensus_stats <- map_dfr(2:max_clusters, function(k) {
+      consensus_matrix <- consensus_result[[k]]$consensusMatrix
+      consensus_cdf <- ConsensusClusterPlus::calcICL(consensus_result, k)
+      
+      tibble(
+        k = k,
+        consensus_cdf = consensus_cdf[["clusterConsensus"]],
+        area_under_cdf = sum(consensus_cdf[["cdf"]][, "y"])
+      )
+    })
+    
+    # Find optimal k using elbow method on area under CDF
+    optimal_k_idx <- which.max(diff(consensus_stats$area_under_cdf)) + 1
+    optimal_k <- consensus_stats$k[optimal_k_idx]
+    
+    cat("Optimal number of clusters (by consensus):", optimal_k, "\n")
+    
+    # Allow user to override optimal k
+    override_input <- readline(paste0("Use different number of clusters? (current: ", optimal_k, ", Enter to keep): "))
+    if (override_input != "" && grepl("^\\d+$", override_input)) {
+      selected_k <- as.numeric(override_input)
+      if (selected_k >= 2 && selected_k <= max_clusters) {
+        optimal_k <- selected_k
+        cat("Using", optimal_k, "clusters\n")
+      } else {
+        cat("Invalid cluster number, using optimal:", optimal_k, "\n")
+      }
+    }
+    
+    # Get final cluster assignments for subsampled data
+    consensus_clusters <- consensus_result[[optimal_k]]$consensusClass
+    
+    # Apply clustering to full dataset using k-means with optimal k
+    cat("Applying", optimal_k, "clusters to full dataset...\n")
+    
+    set.seed(42)
+    full_kmeans <- kmeans(clustering_data, centers = optimal_k, nstart = 25, iter.max = 100)
+    
+    # Add cluster information to original data
+    clustered_data <- umap_data %>%
+      mutate(
+        ConsensusCluster = as.factor(full_kmeans$cluster),
+        ClusterID = paste0("Cluster_", full_kmeans$cluster)
+      )
+    
+    # FIXED: Cluster size summary
+    cluster_summary <- safe_count(clustered_data, "ConsensusCluster", "n_cells") %>%
+      mutate(
+        percentage = round(n_cells / sum(n_cells) * 100, 1),
+        cumulative_pct = round(cumsum(n_cells) / sum(n_cells) * 100, 1)
+      )
+    
+    cat("\nCluster size distribution:\n")
+    print(as.data.frame(cluster_summary))
+    
+    return(list(
+      method = "ConsensusClusterPlus",
+      clustered_data = clustered_data,
+      consensus_result = consensus_result,
+      consensus_stats = consensus_stats,
+      kmeans_result = full_kmeans,
+      cluster_summary = cluster_summary,
+      n_clusters = optimal_k,
+      optimal_k = optimal_k,
+      parameters = list(
+        max_clusters = max_clusters,
+        reps = reps,
+        sample_proportion = sample_proportion,
+        use_umap_coords = use_umap_coords
+      )
+    ))
+    
+  }, error = function(e) {
+    stop("Consensus clustering failed: ", e$message)
+  })
+}
+
+# ============================================================================
+# ALTERNATIVE CLUSTERING METHODS
+# ============================================================================
+
+perform_kmeans_clustering <- function(umap_data, marker_names, 
+                                      use_umap_coords = TRUE,
+                                      max_clusters = 15) {
+  
+  cat("\n=== K-means Clustering ===\n")
+  
+  # Clean data structure first
+  umap_data <- safe_tibble_operations(umap_data)
+  
+  # Data preparation
+  if (use_umap_coords) {
+    clustering_data <- umap_data %>%
+      select(UMAP1, UMAP2, all_of(marker_names)) %>%
+      as.matrix()
+  } else {
+    clustering_data <- umap_data %>%
+      select(all_of(marker_names)) %>%
+      as.matrix()
+  }
+  
+  # Scale the data
+  clustering_data_scaled <- scale(clustering_data)
+  
+  # Find optimal k using elbow method
+  cat("Finding optimal number of clusters (testing 1 to", max_clusters, ")...\n")
+  
+  wss_values <- map_dbl(1:max_clusters, function(k) {
+    if (k == 1) {
+      return(sum(scale(clustering_data, center = TRUE, scale = FALSE)^2))
+    }
+    
+    set.seed(42)
+    kmeans_result <- kmeans(clustering_data_scaled, centers = k, nstart = 25)
+    return(kmeans_result$tot.withinss)
+  })
+  
+  # Find elbow point
+  elbow_k <- 2
+  if (length(wss_values) > 3) {
+    diffs <- diff(wss_values)
+    second_diffs <- diff(diffs)
+    elbow_k <- which.max(second_diffs) + 2
+  }
+  
+  cat("Optimal k by elbow method:", elbow_k, "\n")
+  
+  # Allow user to override
+  override_input <- readline(paste0("Use different k? (current: ", elbow_k, ", Enter to keep): "))
+  if (override_input != "" && grepl("^\\d+$", override_input)) {
+    selected_k <- as.numeric(override_input)
+    if (selected_k >= 1 && selected_k <= max_clusters) {
+      elbow_k <- selected_k
+      cat("Using k =", elbow_k, "\n")
+    }
+  }
+  
+  # Perform final k-means clustering
+  set.seed(42)
+  final_kmeans <- kmeans(clustering_data_scaled, centers = elbow_k, nstart = 25, iter.max = 100)
+  
+  # Add cluster information to original data
+  clustered_data <- umap_data %>%
+    mutate(
+      KMeansCluster = as.factor(final_kmeans$cluster),
+      ClusterID = paste0("Cluster_", final_kmeans$cluster)
+    )
+  
+  # FIXED: Cluster size summary
+  cluster_summary <- safe_count(clustered_data, "KMeansCluster", "n_cells") %>%
+    mutate(percentage = round(n_cells / sum(n_cells) * 100, 1))
+  
+  cat("\nK-means clustering complete!\n")
+  cat("Final k:", elbow_k, "\n")
+  print(as.data.frame(cluster_summary))
+  
+  return(list(
+    method = "K-means",
+    clustered_data = clustered_data,
+    kmeans_result = final_kmeans,
+    wss_values = wss_values,
+    cluster_summary = cluster_summary,
+    n_clusters = elbow_k,
+    optimal_k = elbow_k
+  ))
+}
+
+perform_dbscan_clustering <- function(umap_data, marker_names, 
+                                      use_umap_coords = TRUE,
+                                      eps = NULL, min_pts = 5) {
+  
+  cat("\n=== DBSCAN Clustering ===\n")
+  
+  if (!requireNamespace("dbscan", quietly = TRUE)) {
+    cat("dbscan package not available. Install with: install.packages('dbscan')\n")
+    cat("Using alternative density-based clustering...\n")
+    
+    # Fallback to hierarchical clustering with density estimation
+    return(perform_hierarchical_clustering(umap_data, marker_names, use_umap_coords))
+  }
+  
+  # Clean data structure first
+  umap_data <- safe_tibble_operations(umap_data)
+  
+  # Data preparation
+  if (use_umap_coords) {
+    clustering_data <- umap_data %>%
+      select(UMAP1, UMAP2) %>%  # DBSCAN works best on UMAP coordinates
+      as.matrix()
+    cat("Using UMAP coordinates for DBSCAN\n")
+  } else {
+    clustering_data <- umap_data %>%
+      select(all_of(marker_names)) %>%
+      as.matrix()
+    cat("Using original markers for DBSCAN\n")
+  }
+  
+  # Scale the data
+  clustering_data_scaled <- scale(clustering_data)
+  
+  # Estimate eps if not provided
+  if (is.null(eps)) {
+    # Use k-distance plot to estimate eps
+    k_distances <- dbscan::kNNdist(clustering_data_scaled, k = min_pts)
+    eps <- quantile(sort(k_distances), 0.95)  # Use 95th percentile
+    cat("Auto-estimated eps:", round(eps, 3), "\n")
+    
+    # Allow user to override
+    override_input <- readline(paste0("Use different eps? (current: ", round(eps, 3), ", Enter to keep): "))
+    if (override_input != "" && grepl("^[0-9.]+$", override_input)) {
+      eps <- as.numeric(override_input)
+      cat("Using eps =", eps, "\n")
+    }
+  }
+  
+  cat("DBSCAN parameters: eps =", eps, ", min_pts =", min_pts, "\n")
+  
+  # Perform DBSCAN clustering
+  dbscan_result <- dbscan::dbscan(clustering_data_scaled, eps = eps, minPts = min_pts)
+  
+  # Add cluster information to original data
+  clustered_data <- umap_data %>%
+    mutate(
+      DBSCANCluster = as.factor(ifelse(dbscan_result$cluster == 0, "Noise", 
+                                       paste0("Cluster_", dbscan_result$cluster))),
+      ClusterID = as.character(DBSCANCluster)
+    )
+  
+  n_clusters <- max(dbscan_result$cluster)
+  n_noise <- sum(dbscan_result$cluster == 0)
+  
+  # FIXED: Cluster size summary
+  cluster_summary <- safe_count(clustered_data, "DBSCANCluster", "n_cells") %>%
+    mutate(percentage = round(n_cells / sum(n_cells) * 100, 1))
+  
+  cat("\nDBSCAN clustering complete!\n")
+  cat("Clusters found:", n_clusters, "\n")
+  cat("Noise points:", n_noise, "(", round(n_noise/nrow(clustered_data)*100, 1), "%)\n")
+  print(as.data.frame(cluster_summary))
+  
+  return(list(
+    method = "DBSCAN",
+    clustered_data = clustered_data,
+    dbscan_result = dbscan_result,
+    cluster_summary = cluster_summary,
+    n_clusters = n_clusters,
+    n_noise = n_noise,
+    parameters = list(eps = eps, min_pts = min_pts)
+  ))
+}
+
+perform_hierarchical_clustering <- function(umap_data, marker_names, 
+                                            use_umap_coords = TRUE,
+                                            max_clusters = 15,
+                                            linkage_method = "ward.D2") {
+  
+  cat("\n=== Hierarchical Clustering ===\n")
+  
+  # Clean data structure first
+  umap_data <- safe_tibble_operations(umap_data)
+  
+  # Data preparation
+  if (use_umap_coords) {
+    clustering_data <- umap_data %>%
+      select(UMAP1, UMAP2, all_of(marker_names)) %>%
+      as.matrix()
+  } else {
+    clustering_data <- umap_data %>%
+      select(all_of(marker_names)) %>%
+      as.matrix()
+  }
+  
+  # Scale the data
+  clustering_data_scaled <- scale(clustering_data)
+  
+  # For large datasets, subsample for dendrogram computation
+  if (nrow(clustering_data_scaled) > 5000) {
+    subsample_size <- 5000
+    cat("Large dataset detected. Using", subsample_size, "cells for dendrogram\n")
+    
+    subsample_indices <- sample(nrow(clustering_data_scaled), subsample_size)
+    hclust_data <- clustering_data_scaled[subsample_indices, ]
+  } else {
+    hclust_data <- clustering_data_scaled
+  }
+  
+  cat("Computing hierarchical clustering (method:", linkage_method, ")...\n")
+  
+  # Compute distance matrix and hierarchical clustering
+  dist_matrix <- dist(hclust_data, method = "euclidean")
+  hclust_result <- hclust(dist_matrix, method = linkage_method)
+  
+  # Find optimal number of clusters using silhouette analysis
+  cat("Finding optimal number of clusters...\n")
+  
+  sil_scores <- map_dbl(2:min(max_clusters, nrow(hclust_data)-1), function(k) {
+    clusters <- cutree(hclust_result, k = k)
+    sil_result <- cluster::silhouette(clusters, dist_matrix)
+    mean(sil_result[, "sil_width"])
+  })
+  
+  optimal_k <- which.max(sil_scores) + 1
+  cat("Optimal k by silhouette analysis:", optimal_k, "\n")
+  
+  # Allow user to override
+  override_input <- readline(paste0("Use different k? (current: ", optimal_k, ", Enter to keep): "))
+  if (override_input != "" && grepl("^\\d+$", override_input)) {
+    selected_k <- as.numeric(override_input)
+    if (selected_k >= 2 && selected_k <= max_clusters) {
+      optimal_k <- selected_k
+      cat("Using k =", optimal_k, "\n")
+    }
+  }
+  
+  # Cut dendrogram to get clusters for full dataset
+  if (nrow(clustering_data_scaled) > 5000) {
+    # Apply clustering to full dataset using same tree structure
+    full_dist <- dist(clustering_data_scaled, method = "euclidean")
+    full_hclust <- hclust(full_dist, method = linkage_method)
+    clusters <- cutree(full_hclust, k = optimal_k)
+  } else {
+    clusters <- cutree(hclust_result, k = optimal_k)
+  }
+  
+  # Add cluster information to original data
+  clustered_data <- umap_data %>%
+    mutate(
+      HierarchicalCluster = as.factor(clusters),
+      ClusterID = paste0("Cluster_", clusters)
+    )
+  
+  # FIXED: Cluster size summary
+  cluster_summary <- safe_count(clustered_data, "HierarchicalCluster", "n_cells") %>%
+    mutate(percentage = round(n_cells / sum(n_cells) * 100, 1))
+  
+  cat("\nHierarchical clustering complete!\n")
+  cat("Final k:", optimal_k, "\n")
+  print(as.data.frame(cluster_summary))
+  
+  return(list(
+    method = "Hierarchical",
+    clustered_data = clustered_data,
+    hclust_result = if (nrow(clustering_data_scaled) <= 5000) hclust_result else full_hclust,
+    sil_scores = sil_scores,
+    cluster_summary = cluster_summary,
+    n_clusters = optimal_k,
+    optimal_k = optimal_k,
+    parameters = list(linkage_method = linkage_method)
+  ))
+}
+
+# ============================================================================
+# CLUSTER CHARACTERIZATION AND MFI ANALYSIS
+# ============================================================================
+
+analyze_cluster_mfi <- function(clustered_data, marker_names, 
+                                cluster_column = "ClusterID") {
+  
+  cat("\n=== Cluster MFI Analysis ===\n")
+  
+  if (!cluster_column %in% names(clustered_data)) {
+    available_cluster_cols <- names(clustered_data)[str_detect(names(clustered_data), "Cluster")]
+    cat("Cluster column not found. Available cluster columns:\n")
+    iwalk(available_cluster_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    choice <- readline("Enter column number or name: ")
+    
+    if (grepl("^\\d+$", choice)) {
+      col_num <- as.numeric(choice)
+      if (!is.na(col_num) && col_num >= 1 && col_num <= length(available_cluster_cols)) {
+        cluster_column <- available_cluster_cols[col_num]
+      }
+    } else if (choice %in% available_cluster_cols) {
+      cluster_column <- choice
+    } else {
+      stop("Invalid cluster column selection")
+    }
+  }
+  
+  cat("Analyzing MFI by", cluster_column, "\n")
+  
+  # Clean data structure first
+  clustered_data <- safe_tibble_operations(clustered_data)
+  
+  # FIXED: Convert to standard data frame first and handle operations more robustly
+  analysis_data <- clustered_data %>%
+    select(all_of(c(cluster_column, marker_names))) %>%
+    as.data.frame()  # Convert to standard data frame to avoid tibble/S4 issues
+  
+  # Convert back to tibble for dplyr operations
+  analysis_data <- as_tibble(analysis_data)
+  
+  # Calculate MFI statistics for each cluster
+  cat("Computing MFI statistics...\n")
+  
+  mfi_summary <- analysis_data %>%
+    pivot_longer(cols = all_of(marker_names), names_to = "Marker", values_to = "Expression") %>%
+    group_by(.data[[cluster_column]], Marker) %>%
+    summarise(
+      n_cells = n(),
+      mean_expr = mean(Expression, na.rm = TRUE),
+      median_expr = median(Expression, na.rm = TRUE),
+      sd_expr = sd(Expression, na.rm = TRUE),
+      q25 = quantile(Expression, 0.25, na.rm = TRUE),
+      q75 = quantile(Expression, 0.75, na.rm = TRUE),
+      min_expr = min(Expression, na.rm = TRUE),
+      max_expr = max(Expression, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(.data[[cluster_column]], Marker)
+  
+  # Calculate relative expression (z-scores across clusters for each marker)
+  cat("Computing z-scores...\n")
+  
+  mfi_zscore <- mfi_summary %>%
+    group_by(Marker) %>%
+    mutate(
+      mean_zscore = scale(mean_expr)[,1],
+      median_zscore = scale(median_expr)[,1]
+    ) %>%
+    ungroup()
+  
+  # Create cluster signatures (top markers per cluster)
+  cat("Creating cluster signatures...\n")
+  
+  cluster_signatures <- mfi_zscore %>%
+    group_by(.data[[cluster_column]]) %>%
+    arrange(desc(mean_zscore)) %>%
+    slice_head(n = 5) %>%
+    summarise(
+      top_markers = paste(Marker, collapse = ", "),
+      signature_score = round(mean(mean_zscore), 2),
+      .groups = "drop"
+    )
+  
+  # FIXED: More robust cluster overview creation
+  cat("Creating cluster overview...\n")
+  
+  cluster_overview <- safe_count(analysis_data, cluster_column, "n_cells") %>%
+    mutate(percentage = round(n_cells / sum(n_cells) * 100, 1)) %>%
+    left_join(cluster_signatures, by = cluster_column)
+  
+  cat("\nCluster MFI analysis complete!\n")
+  cat("Clusters analyzed:", n_distinct(analysis_data[[cluster_column]]), "\n")
+  cat("Markers analyzed:", length(marker_names), "\n")
+  
+  cat("\nCluster overview:\n")
+  # Force proper printing
+  overview_df <- as.data.frame(cluster_overview)
+  print(overview_df)
+  
+  return(list(
+    mfi_summary = mfi_summary,
+    mfi_zscore = mfi_zscore,
+    cluster_signatures = cluster_signatures,
+    cluster_overview = cluster_overview,
+    cluster_column = cluster_column
+  ))
+}
+
+# ============================================================================
+# CLUSTER VISUALIZATION FUNCTIONS
+# ============================================================================
+
+create_cluster_umap_plot <- function(clustered_data, cluster_column = "ClusterID",
+                                     title = NULL, show_percentages = TRUE) {
+  
+  if (is.null(title)) {
+    title <- paste("UMAP with", str_replace(cluster_column, "Cluster", ""), "Clusters")
+  }
+  
+  # Clean data structure first
+  clustered_data <- safe_tibble_operations(clustered_data)
+  
+  # FIXED: Use safe_count instead of dplyr count()
+  cluster_stats <- safe_count(clustered_data, cluster_column, "n_cells") %>%
+    mutate(
+      percentage = round(n_cells / sum(n_cells) * 100, 1),
+      label = if (show_percentages) {
+        paste0(.data[[cluster_column]], "\n(", percentage, "%)")
+      } else {
+        as.character(.data[[cluster_column]])
+      }
+    )
+  
+  # Add labels to data - convert to data frame first to avoid S4/tibble issues
+  plot_data <- as.data.frame(clustered_data) %>%
+    as_tibble() %>%
+    left_join(cluster_stats %>% select(all_of(cluster_column), label), 
+              by = cluster_column)
+  
+  # Create color palette
+  n_clusters <- n_distinct(clustered_data[[cluster_column]])
+  
+  if (n_clusters <= 12) {
+    colors <- RColorBrewer::brewer.pal(min(n_clusters, 11), "Set3")
+    if (n_clusters == 12) colors <- c(colors, "#FF1493")  # Add pink for 12th cluster
+  } else {
+    colors <- rainbow(n_clusters, alpha = 0.8)
+  }
+  
+  p <- ggplot(plot_data, aes(x = UMAP1, y = UMAP2, color = .data[[cluster_column]])) +
+    geom_point(size = 0.5, alpha = 0.7) +
+    scale_color_manual(values = colors, name = "Cluster") +
+    labs(
+      title = title,
+      subtitle = paste("Total cells:", scales::comma(nrow(clustered_data)), 
+                       "| Clusters:", n_clusters)
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text = element_blank(),
+      axis.ticks = element_blank(), 
+      panel.grid = element_blank(),
+      plot.title = element_text(hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5),
+      legend.position = "right"
+    ) +
+    guides(color = guide_legend(override.aes = list(size = 3, alpha = 1)))
+  
+  return(p)
+}
+
+create_cluster_heatmap <- function(mfi_analysis, cluster_column = "ClusterID",
+                                   value_type = "mean_zscore", 
+                                   title = NULL) {
+  
+  if (is.null(title)) {
+    title <- paste("Cluster Expression Heatmap (", str_replace(value_type, "_", " "), ")", sep = "")
+  }
+  
+  # Prepare data for heatmap
+  heatmap_data <- mfi_analysis$mfi_zscore %>%
+    select(all_of(c(cluster_column, "Marker", value_type))) %>%
+    pivot_wider(names_from = Marker, values_from = all_of(value_type)) %>%
+    column_to_rownames(cluster_column) %>%
+    as.matrix()
+  
+  # Convert to long format for ggplot
+  heatmap_long <- heatmap_data %>%
+    as_tibble(rownames = "Cluster") %>%
+    pivot_longer(-Cluster, names_to = "Marker", values_to = "Expression") %>%
+    mutate(
+      Cluster = factor(Cluster, levels = rownames(heatmap_data)),
+      Marker = factor(Marker, levels = colnames(heatmap_data))
+    )
+  
+  # Create heatmap
+  p <- ggplot(heatmap_long, aes(x = Marker, y = Cluster, fill = Expression)) +
+    geom_tile() +
+    scale_fill_gradient2(
+      low = "blue", mid = "white", high = "red",
+      midpoint = 0, name = str_replace(value_type, "_", "\n")
+    ) +
+    labs(title = title) +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title = element_text(hjust = 0.5),
+      panel.grid = element_blank()
+    )
+  
+  return(p)
+}
+
+create_mfi_violin_plots <- function(clustered_data, marker_names, 
+                                    cluster_column = "ClusterID",
+                                    max_markers = 9) {
+  
+  # Clean data structure first
+  clustered_data <- safe_tibble_operations(clustered_data)
+  
+  # Select top markers or limit number
+  if (length(marker_names) > max_markers) {
+    cat("Too many markers for violin plots. Selecting first", max_markers, "\n")
+    selected_markers <- head(marker_names, max_markers)
+  } else {
+    selected_markers <- marker_names
+  }
+  
+  # Prepare data
+  violin_data <- clustered_data %>%
+    select(all_of(c(cluster_column, selected_markers))) %>%
+    pivot_longer(cols = all_of(selected_markers), 
+                 names_to = "Marker", values_to = "Expression")
+  
+  # Create violin plots
+  violin_plots <- map(selected_markers, function(marker) {
+    marker_data <- violin_data %>% filter(Marker == marker)
+    
+    ggplot(marker_data, aes(x = .data[[cluster_column]], y = Expression, 
+                            fill = .data[[cluster_column]])) +
+      geom_violin(alpha = 0.7, scale = "width") +
+      geom_boxplot(width = 0.1, fill = "white", alpha = 0.8) +
+      labs(
+        title = marker,
+        x = "Cluster",
+        y = "Expression"
+      ) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        plot.title = element_text(size = 10, hjust = 0.5)
+      )
+  })
+  
+  # Arrange plots
+  ncol_grid <- ceiling(sqrt(length(violin_plots)))
+  combined_plot <- wrap_plots(violin_plots, ncol = ncol_grid)
+  
+  return(combined_plot)
+}
+
+# ============================================================================
+# CLUSTER COMPARISON AND DIFFERENTIAL EXPRESSION
+# ============================================================================
+
+perform_cluster_differential_analysis <- function(mfi_analysis, 
+                                                  reference_cluster = NULL,
+                                                  min_fold_change = 1.5,
+                                                  cluster_column = "ClusterID") {
+  
+  cat("\n=== Cluster Differential Expression Analysis ===\n")
+  
+  mfi_data <- mfi_analysis$mfi_summary
+  
+  # Select reference cluster if not provided
+  if (is.null(reference_cluster)) {
+    cluster_sizes <- mfi_analysis$cluster_overview %>%
+      arrange(desc(n_cells))
+    
+    cat("Available clusters:\n")
+    iwalk(cluster_sizes[[cluster_column]], ~cat(sprintf("%d. %s (%d cells)\n", 
+                                                        .y, .x, 
+                                                        cluster_sizes$n_cells[.y])))
+    
+    ref_choice <- readline("Select reference cluster number (Enter for largest): ")
+    
+    if (ref_choice == "") {
+      reference_cluster <- cluster_sizes[[cluster_column]][1]  # Largest cluster
+    } else if (grepl("^\\d+$", ref_choice)) {
+      ref_num <- as.numeric(ref_choice)
+      if (!is.na(ref_num) && ref_num >= 1 && ref_num <= nrow(cluster_sizes)) {
+        reference_cluster <- cluster_sizes[[cluster_column]][ref_num]
+      } else {
+        reference_cluster <- cluster_sizes[[cluster_column]][1]
+      }
+    } else {
+      reference_cluster <- cluster_sizes[[cluster_column]][1]
+    }
+  }
+  
+  cat("Using reference cluster:", reference_cluster, "\n")
+  
+  # Get reference cluster expression values
+  reference_expr <- mfi_data %>%
+    filter(.data[[cluster_column]] == reference_cluster) %>%
+    select(Marker, mean_expr) %>%
+    rename(ref_mean = mean_expr)
+  
+  # Calculate fold changes and differences for all clusters
+  diff_expr <- mfi_data %>%
+    left_join(reference_expr, by = "Marker") %>%
+    mutate(
+      fold_change = mean_expr / ref_mean,
+      log2_fold_change = log2(fold_change),
+      abs_diff = abs(mean_expr - ref_mean),
+      is_upregulated = fold_change >= min_fold_change,
+      is_downregulated = fold_change <= (1/min_fold_change),
+      is_differential = is_upregulated | is_downregulated
+    ) %>%
+    arrange(.data[[cluster_column]], desc(abs(log2_fold_change)))
+  
+  # FIXED: Summarize differential markers per cluster with proper variable handling
+  cluster_diff_summary <- diff_expr %>%
+    filter(.data[[cluster_column]] != reference_cluster) %>%
+    group_by(.data[[cluster_column]]) %>%
+    summarise(
+      n_upregulated = sum(is_upregulated, na.rm = TRUE),
+      n_downregulated = sum(is_downregulated, na.rm = TRUE),
+      n_differential = sum(is_differential, na.rm = TRUE),
+      # Fix the variable access issue by using different approach
+      top_upregulated = {
+        up_markers <- Marker[is_upregulated]
+        paste(head(up_markers, 3), collapse = ", ")
+      },
+      top_downregulated = {
+        down_markers <- Marker[is_downregulated] 
+        paste(head(down_markers, 3), collapse = ", ")
+      },
+      .groups = "drop"
+    ) %>%
+    arrange(desc(n_differential))
+  
+  cat("\nDifferential expression summary (vs", reference_cluster, "):\n")
+  print(as.data.frame(cluster_diff_summary))
+  
+  return(list(
+    differential_expression = diff_expr,
+    cluster_summary = cluster_diff_summary,
+    reference_cluster = reference_cluster,
+    min_fold_change = min_fold_change
+  ))
+}
+
+# ============================================================================
+# CLUSTER DATA EXTRACTION AND EXPORT
+# ============================================================================
+
+extract_cluster_data <- function(clustered_data, target_cluster, 
+                                 cluster_column = "ClusterID") {
+  
+  cat("\n=== Cluster Data Extraction ===\n")
+  
+  # Clean data structure first
+  clustered_data <- safe_tibble_operations(clustered_data)
+  
+  if (!target_cluster %in% clustered_data[[cluster_column]]) {
+    available_clusters <- unique(clustered_data[[cluster_column]])
+    cat("Cluster not found. Available clusters:\n")
+    iwalk(available_clusters, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    cluster_choice <- readline("Enter cluster number or name: ")
+    
+    if (grepl("^\\d+$", cluster_choice)) {
+      cluster_num <- as.numeric(cluster_choice)
+      if (!is.na(cluster_num) && cluster_num >= 1 && cluster_num <= length(available_clusters)) {
+        target_cluster <- available_clusters[cluster_num]
+      } else {
+        stop("Invalid cluster selection")
+      }
+    } else if (cluster_choice %in% available_clusters) {
+      target_cluster <- cluster_choice
+    } else {
+      stop("Invalid cluster selection")
+    }
+  }
+  
+  # Extract cluster data
+  cluster_data <- clustered_data %>%
+    filter(.data[[cluster_column]] == target_cluster)
+  
+  cat("Extracted", nrow(cluster_data), "cells from", target_cluster, "\n")
+  
+  # Summary statistics for the cluster
+  numeric_cols <- names(cluster_data)[map_lgl(cluster_data, is.numeric)]
+  marker_cols <- setdiff(numeric_cols, c("UMAP1", "UMAP2"))
+  
+  if (length(marker_cols) > 0) {
+    cluster_summary <- cluster_data %>%
+      select(all_of(marker_cols)) %>%
+      summarise(across(everything(), list(
+        mean = ~mean(.x, na.rm = TRUE),
+        median = ~median(.x, na.rm = TRUE),
+        sd = ~sd(.x, na.rm = TRUE)
+      ))) %>%
+      pivot_longer(everything(), names_to = "stat", values_to = "value") %>%
+      separate(stat, into = c("marker", "statistic"), sep = "_(?=[^_]*$)") %>%
+      pivot_wider(names_from = statistic, values_from = value) %>%
+      arrange(desc(mean))
+    
+    cat("\nCluster expression summary (top markers by mean):\n")
+    print(head(as.data.frame(cluster_summary), 10))
+  }
+  
+  return(list(
+    cluster_data = cluster_data,
+    cluster_name = target_cluster,
+    n_cells = nrow(cluster_data),
+    summary_stats = if(exists("cluster_summary")) cluster_summary else NULL
+  ))
+}
+
+export_cluster_results <- function(clustering_result, mfi_analysis = NULL,
+                                   directory = "cluster_analysis", 
+                                   include_plots = TRUE) {
+  
+  cat("\n=== Exporting Cluster Results ===\n")
+  
+  if (!dir.exists(directory)) {
+    dir.create(directory, recursive = TRUE)
+    cat("Created directory:", directory, "\n")
+  }
+  
+  # Export clustered data
+  clustered_data_file <- file.path(directory, "clustered_data.csv")
+  write_csv(clustering_result$clustered_data, clustered_data_file)
+  cat("Exported clustered data to:", clustered_data_file, "\n")
+  
+  # Export cluster summary
+  summary_file <- file.path(directory, "cluster_summary.csv")
+  write_csv(clustering_result$cluster_summary, summary_file)
+  cat("Exported cluster summary to:", summary_file, "\n")
+  
+  # Export MFI analysis if available
+  if (!is.null(mfi_analysis)) {
+    mfi_file <- file.path(directory, "cluster_mfi_analysis.csv")
+    write_csv(mfi_analysis$mfi_summary, mfi_file)
+    
+    mfi_zscore_file <- file.path(directory, "cluster_mfi_zscore.csv")
+    write_csv(mfi_analysis$mfi_zscore, mfi_zscore_file)
+    
+    signatures_file <- file.path(directory, "cluster_signatures.csv")
+    write_csv(mfi_analysis$cluster_signatures, signatures_file)
+    
+    cat("Exported MFI analysis files\n")
+  }
+  
+  # Export plots if requested
+  if (include_plots && !is.null(mfi_analysis)) {
+    tryCatch({
+      # UMAP cluster plot
+      cluster_plot <- create_cluster_umap_plot(clustering_result$clustered_data)
+      ggsave(file.path(directory, "cluster_umap_plot.png"), 
+             plot = cluster_plot, width = 10, height = 8, dpi = 300)
+      
+      # MFI heatmap
+      heatmap_plot <- create_cluster_heatmap(mfi_analysis)
+      ggsave(file.path(directory, "cluster_heatmap.png"), 
+             plot = heatmap_plot, width = 12, height = 8, dpi = 300)
+      
+      cat("Exported visualization plots\n")
+      
+    }, error = function(e) {
+      cat("Warning: Could not export plots:", e$message, "\n")
+    })
+  }
+  
+  # Create analysis summary report
+  report_file <- file.path(directory, "analysis_report.txt")
+  
+  report_content <- paste0(
+    "Cluster Analysis Report\n",
+    "======================\n\n",
+    "Analysis Date: ", Sys.time(), "\n",
+    "Clustering Method: ", clustering_result$method, "\n",
+    "Total Cells: ", scales::comma(nrow(clustering_result$clustered_data)), "\n",
+    "Number of Clusters: ", clustering_result$n_clusters, "\n\n",
+    
+    "Cluster Size Distribution:\n",
+    paste(capture.output(print(clustering_result$cluster_summary)), collapse = "\n"),
+    "\n\n",
+    
+    if (!is.null(mfi_analysis)) {
+      paste0(
+        "Cluster Signatures (Top Markers):\n",
+        paste(capture.output(print(mfi_analysis$cluster_signatures)), collapse = "\n"),
+        "\n\n"
+      )
+    } else "",
+    
+    "Files Exported:\n",
+    "- clustered_data.csv: Full dataset with cluster assignments\n",
+    "- cluster_summary.csv: Cluster size and percentage summary\n",
+    if (!is.null(mfi_analysis)) {
+      paste0(
+        "- cluster_mfi_analysis.csv: Detailed MFI statistics per cluster\n",
+        "- cluster_mfi_zscore.csv: Z-scored MFI values for comparison\n",
+        "- cluster_signatures.csv: Top markers defining each cluster\n"
+      )
+    } else "",
+    if (include_plots) "- PNG plots for visualization\n" else "",
+    "\nEnd of Report\n"
+  )
+  
+  writeLines(report_content, report_file)
+  cat("Exported analysis report to:", report_file, "\n")
+  
+  cat("\nExport complete! Files saved to:", directory, "\n")
+  
+  return(invisible(directory))
+}
+
+# ============================================================================
+# MAIN CLUSTERING WORKFLOW FUNCTION
+# ============================================================================
+
+perform_clustering_analysis <- function(umap_results, method = NULL) {
+  
+  cat("\n=== Starting Clustering Analysis ===\n")
+  
+  if (!check_clustering_packages()) {
+    stop("Required packages not available. Please install missing packages.")
+  }
+  
+  # Extract necessary data from UMAP results
+  if (is.null(umap_results$final_data) || is.null(umap_results$umap_result$marker_names)) {
+    stop("Invalid UMAP results. Please run UMAP analysis first.")
+  }
+  
+  umap_data <- safe_tibble_operations(umap_results$final_data)
+  marker_names <- umap_results$umap_result$marker_names
+  
+  cat("Input data:", scales::comma(nrow(umap_data)), "cells\n")
+  cat("Available markers:", length(marker_names), "\n")
+  cat("Markers:", paste(head(marker_names, 5), collapse = ", "), 
+      if(length(marker_names) > 5) "..." else "", "\n")
+  
+  # Select clustering method if not provided
+  if (is.null(method)) {
+    method <- select_clustering_method()
+  }
+  
+  cat("Selected clustering method:", method, "\n")
+  
+  # Store in session environment
+  .clustering_session$umap_data <- umap_data
+  .clustering_session$marker_names <- marker_names
+  .clustering_session$method <- method
+  
+  # Perform clustering based on selected method
+  clustering_result <- switch(method,
+                              "flowsom" = perform_flowsom_clustering(umap_data, marker_names),
+                              "flowsom_consensus" = perform_consensus_clustering(umap_data, marker_names),
+                              "kmeans" = perform_kmeans_clustering(umap_data, marker_names),
+                              "hierarchical" = perform_hierarchical_clustering(umap_data, marker_names),
+                              "dbscan" = perform_dbscan_clustering(umap_data, marker_names),
+                              "comparison" = {
+                                cat("Multiple methods comparison not yet implemented. Using FlowSOM.\n")
+                                perform_flowsom_clustering(umap_data, marker_names)
+                              }
+  )
+  
+  if (is.null(clustering_result)) {
+    stop("Clustering failed")
+  }
+  
+  # Store clustering results
+  .clustering_session$clustering_result <- clustering_result
+  
+  # Perform MFI analysis
+  cat("\nPerforming MFI analysis...\n")
+  mfi_analysis <- analyze_cluster_mfi(clustering_result$clustered_data, marker_names)
+  .clustering_session$mfi_analysis <- mfi_analysis
+  
+  # Interactive post-clustering analysis menu
+  interactive_clustering_menu(clustering_result, mfi_analysis, marker_names)
+  
+  # Return comprehensive results
+  final_results <- list(
+    clustering_result = clustering_result,
+    mfi_analysis = mfi_analysis,
+    method = method,
+    umap_data = umap_data,
+    marker_names = marker_names
+  )
+  
+  return(final_results)
+}
+
+# ============================================================================
+# INTERACTIVE CLUSTERING ANALYSIS MENU
+# ============================================================================
+
+interactive_clustering_menu <- function(clustering_result, mfi_analysis, marker_names) {
+  
+  while (TRUE) {
+    cat("\n=== Interactive Clustering Analysis Menu ===\n")
+    cat("Method:", clustering_result$method, "\n")
+    cat("Clusters:", clustering_result$n_clusters, "\n")
+    cat("Cells:", scales::comma(nrow(clustering_result$clustered_data)), "\n\n")
+    
+    menu_options <- c(
+      "View cluster UMAP plot",
+      "View cluster MFI heatmap", 
+      "View marker expression violin plots",
+      "Perform differential expression analysis",
+      "Extract specific cluster data",
+      "Export all clustering results",
+      "Re-run clustering with different parameters",
+      "Return to main analysis"
+    )
+    
+    iwalk(menu_options, ~cat(sprintf("%d. %s\n", .y, .x)))
+    
+    choice <- readline("\nEnter choice (1-8): ")
+    
+    if (!grepl("^[1-8]$", choice)) {
+      cat("Invalid choice. Please enter 1-8.\n")
+      next
+    }
+    
+    choice_num <- as.numeric(choice)
+    
+    if (choice_num == 1) {
+      # UMAP plot
+      cluster_plot <- create_cluster_umap_plot(clustering_result$clustered_data)
+      print(cluster_plot)
+      
+      save_choice <- readline("Save this plot? (y/n): ")
+      if (tolower(save_choice) == "y") {
+        filename <- readline("Enter filename (without extension): ")
+        if (filename != "") {
+          ggsave(paste0(filename, ".png"), plot = cluster_plot, 
+                 width = 10, height = 8, dpi = 300)
+          cat("Plot saved as:", paste0(filename, ".png"), "\n")
+        }
+      }
+      
+    } else if (choice_num == 2) {
+      # MFI heatmap
+      heatmap_plot <- create_cluster_heatmap(mfi_analysis)
+      print(heatmap_plot)
+      
+      save_choice <- readline("Save this plot? (y/n): ")
+      if (tolower(save_choice) == "y") {
+        filename <- readline("Enter filename (without extension): ")
+        if (filename != "") {
+          ggsave(paste0(filename, ".png"), plot = heatmap_plot,
+                 width = 12, height = 8, dpi = 300)
+          cat("Plot saved as:", paste0(filename, ".png"), "\n")
+        }
+      }
+      
+    } else if (choice_num == 3) {
+      # Violin plots
+      violin_plot <- create_mfi_violin_plots(clustering_result$clustered_data, marker_names)
+      print(violin_plot)
+      
+      save_choice <- readline("Save this plot? (y/n): ")
+      if (tolower(save_choice) == "y") {
+        filename <- readline("Enter filename (without extension): ")
+        if (filename != "") {
+          ggsave(paste0(filename, ".png"), plot = violin_plot,
+                 width = 12, height = 10, dpi = 300)
+          cat("Plot saved as:", paste0(filename, ".png"), "\n")
+        }
+      }
+      
+    } else if (choice_num == 4) {
+      # Differential expression
+      diff_analysis <- perform_cluster_differential_analysis(mfi_analysis)
+      .clustering_session$diff_analysis <- diff_analysis
+      
+      readline("Press Enter to continue...")
+      
+    } else if (choice_num == 5) {
+      # Extract cluster data
+      available_clusters <- unique(clustering_result$clustered_data$ClusterID)
+      cat("Available clusters:\n")
+      iwalk(available_clusters, ~cat(sprintf("%d. %s\n", .y, .x)))
+      
+      cluster_choice <- readline("Enter cluster number or name: ")
+      
+      target_cluster <- NULL
+      if (grepl("^\\d+$", cluster_choice)) {
+        cluster_num <- as.numeric(cluster_choice)
+        if (!is.na(cluster_num) && cluster_num >= 1 && cluster_num <= length(available_clusters)) {
+          target_cluster <- available_clusters[cluster_num]
+        }
+      } else if (cluster_choice %in% available_clusters) {
+        target_cluster <- cluster_choice
+      }
+      
+      if (!is.null(target_cluster)) {
+        extracted_data <- extract_cluster_data(clustering_result$clustered_data, target_cluster)
+        .clustering_session$extracted_cluster <- extracted_data
+        
+        export_choice <- readline("Export this cluster data to CSV? (y/n): ")
+        if (tolower(export_choice) == "y") {
+          filename <- readline("Enter filename (without .csv extension): ")
+          if (filename == "") filename <- paste0("cluster_", target_cluster, "_data")
+          
+          write_csv(extracted_data$cluster_data, paste0(filename, ".csv"))
+          cat("Cluster data exported to:", paste0(filename, ".csv"), "\n")
+        }
+      } else {
+        cat("Invalid cluster selection\n")
+      }
+      
+    } else if (choice_num == 6) {
+      # Export all results
+      export_dir <- readline("Export directory (default: cluster_analysis): ")
+      if (export_dir == "") export_dir <- "cluster_analysis"
+      
+      export_cluster_results(clustering_result, mfi_analysis, export_dir)
+      
+    } else if (choice_num == 7) {
+      # Re-run clustering
+      cat("Re-running clustering with different parameters...\n")
+      new_method <- select_clustering_method()
+      
+      new_clustering_result <- switch(new_method,
+                                      "flowsom" = perform_flowsom_clustering(.clustering_session$umap_data, marker_names),
+                                      "flowsom_consensus" = perform_consensus_clustering(.clustering_session$umap_data, marker_names),
+                                      "kmeans" = perform_kmeans_clustering(.clustering_session$umap_data, marker_names),
+                                      "hierarchical" = perform_hierarchical_clustering(.clustering_session$umap_data, marker_names),
+                                      "dbscan" = perform_dbscan_clustering(.clustering_session$umap_data, marker_names)
+      )
+      
+      if (!is.null(new_clustering_result)) {
+        clustering_result <- new_clustering_result
+        .clustering_session$clustering_result <- clustering_result
+        
+        mfi_analysis <- analyze_cluster_mfi(clustering_result$clustered_data, marker_names)
+        .clustering_session$mfi_analysis <- mfi_analysis
+        
+        cat("Clustering re-run complete!\n")
+      }
+      
+    } else if (choice_num == 8) {
+      # Return to main
+      cat("Returning to main analysis...\n")
+      break
+    }
+  }
+  
+  return(invisible(.clustering_session))
+}
+
+# ============================================================================
+# INTEGRATION FUNCTION WITH EXISTING UMAP WORKFLOW
+# ============================================================================
+
+add_clustering_to_umap_session <- function() {
+  
+  if (length(.umap_session_plots) == 0) {
+    cat("No active UMAP session found. Please run UMAP analysis first.\n")
+    return(NULL)
+  }
+  
+  cat("\n=== Adding Clustering Analysis to UMAP Session ===\n")
+  
+  # Create mock UMAP results from session data
+  umap_results <- list(
+    final_data = .umap_session_plots$umap_data,
+    umap_result = list(marker_names = .umap_session_plots$marker_names)
+  )
+  
+  # Perform clustering analysis
+  clustering_results <- perform_clustering_analysis(umap_results)
+  
+  # Add cluster information back to UMAP session
+  if (!is.null(clustering_results$clustering_result)) {
+    .umap_session_plots$clustered_data <- clustering_results$clustering_result$clustered_data
+    .umap_session_plots$clustering_results <- clustering_results
+    
+    cat("\nClustering results added to UMAP session!\n")
+    cat("You can now create cluster-colored UMAP plots in the visualization menu.\n")
+  }
+  
+  return(clustering_results)
+}
+
+# ============================================================================
+# UTILITY AND HELPER FUNCTIONS
+# ============================================================================
+
+get_clustering_session_summary <- function() {
+  if (length(.clustering_session) == 0) {
+    cat("No active clustering session\n")
+    return(NULL)
+  }
+  
+  cat("=== Clustering Session Summary ===\n")
+  
+  if (!is.null(.clustering_session$clustering_result)) {
+    result <- .clustering_session$clustering_result
+    cat("Method:", result$method, "\n")
+    cat("Clusters:", result$n_clusters, "\n")
+    cat("Cells:", scales::comma(nrow(result$clustered_data)), "\n")
+    
+    if (!is.null(.clustering_session$mfi_analysis)) {
+      cat("MFI analysis: Available\n")
+    }
+    
+    if (!is.null(.clustering_session$diff_analysis)) {
+      cat("Differential analysis: Available\n")
+    }
+    
+    if (!is.null(.clustering_session$extracted_cluster)) {
+      cat("Extracted cluster:", .clustering_session$extracted_cluster$cluster_name, "\n")
+    }
+  }
+  
+  return(invisible(.clustering_session))
+}
+
+restart_clustering_session <- function(clustering_results) {
+  cat("Restarting clustering session with existing results...\n")
+  
+  if (is.null(clustering_results$clustering_result)) {
+    stop("Invalid clustering results object")
+  }
+  
+  .clustering_session$clustering_result <- clustering_results$clustering_result
+  .clustering_session$mfi_analysis <- clustering_results$mfi_analysis
+  .clustering_session$method <- clustering_results$method
+  .clustering_session$umap_data <- clustering_results$umap_data
+  .clustering_session$marker_names <- clustering_results$marker_names
+  
+  interactive_clustering_menu(
+    clustering_results$clustering_result,
+    clustering_results$mfi_analysis,
+    clustering_results$marker_names
+  )
+  
+  return(invisible(.clustering_session))
+}
