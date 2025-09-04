@@ -6,7 +6,7 @@ A comprehensive R package for automated flow cytometry analysis with interactive
 
 ## Overview
 
-This pipeline provides a complete workflow for flow cytometry data analysis, from FlowJo workspace import to publication-ready visualizations. It features interactive data exploration, automated congenic marker detection, statistical analysis, and advanced visualization tools including UMAP dimensionality reduction and clustering analysis.
+This pipeline provides a comprehensive workflow for flow cytometry data analysis, from importing data into the FlowJo workspace to creating publication-ready visualizations. It features interactive data exploration, automated congenic marker detection, statistical analysis, and advanced visualization tools, including UMAP dimensionality reduction and clustering analysis.
 
 ### Key Features
 
@@ -79,6 +79,9 @@ your-project/
     ├── sessions/             # Session data
     └── GatingSet/            # Saved gating sets
 ```
+### Setting Up the HERE Package
+
+**IMPORTANT**: Place your RStudio project file (`.Rproj`) in the root directory of your project. The `here` package uses this file to establish the project root for all relative file paths.Always use `here()` for file paths to ensure reproducibility across different systems.
 
 ### Automatic Setup
 
@@ -131,7 +134,7 @@ Enhanced FlowJo workspace import with intelligent keyword detection and selectio
 - **Validation**: Comprehensive data quality checks
 
 #### `setup_enhanced_project_structure()`
-Creates comprehensive folder structure for organized analysis workflow.
+Creates a comprehensive folder structure for an organized analysis workflow.
 
 **Features:**
 - **Automatic Folder Creation**: Creates all necessary directories
