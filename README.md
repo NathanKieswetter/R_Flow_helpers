@@ -2,7 +2,7 @@
 
 A comprehensive R package for automated flow cytometry analysis with interactive visualization tools, specifically designed for congenic marker analysis and engraftment studies.
 
-Full disclosure, these tools are VERY much still in development and have MANY bugs that I'm working through!
+**NB**: _Full disclosure, these tools are VERY much still in development and have MANY bugs that I'm working through!_
 
 ## Overview
 
