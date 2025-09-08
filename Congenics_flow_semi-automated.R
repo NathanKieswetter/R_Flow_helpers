@@ -5911,6 +5911,7 @@ create_mfi_heatmaps_interactive_enhanced <- function(mfi_data, auto_save = FALSE
 #===============================================================================
 # Engraftment plot of congenic markers with Save (USE)
 #===============================================================================
+
 create_engraftment_plot <- function(data, 
                                     wellid_col = "pairing_factor",
                                     group_col = "tissue_factor", 
@@ -5931,6 +5932,12 @@ create_engraftment_plot <- function(data,
                                     interactive_stats = TRUE,
                                     auto_save = FALSE) {
   
+  # Load required libraries with explicit namespacing
+  if (!requireNamespace("dplyr", quietly = TRUE)) stop("dplyr package required")
+  if (!requireNamespace("ggplot2", quietly = TRUE)) stop("ggplot2 package required")
+  if (!requireNamespace("tidyr", quietly = TRUE)) stop("tidyr package required")
+  if (!requireNamespace("rlang", quietly = TRUE)) stop("rlang package required")
+  
   # Check if required columns exist
   required_cols <- c(wellid_col, group_col, marker_col, freq_col)
   missing_cols <- required_cols[!required_cols %in% names(data)]
@@ -5941,6 +5948,13 @@ create_engraftment_plot <- function(data,
   }
   
   # Interactive statistical method selection
+  comparison_type <- "pairwise"
+  control_group <- NULL
+  
+  # Add variables to store the user's choices
+  show_all_p_values <- FALSE # Default to showing only significant ones
+  show_numeric_p_values <- FALSE # Default to showing asterisks
+  
   if(interactive_stats && add_stats) {
     cat("\n=== Statistical Analysis Options ===\n")
     cat("1: Paired t-test (recommended for engraftment data)\n")
@@ -6002,11 +6016,42 @@ create_engraftment_plot <- function(data,
           cat(paste("Selected control group:", control_group, "\n"))
         }
       }
+      
+      # === RESTORED PROMPT: Ask whether to show all p-values or just significant ones ===
+      cat("\n=== P-Value Display Options ===\n")
+      cat("1: Show all p-values\n")
+      cat("2: Show only significant p-values (p < 0.05)\n")
+      
+      p_val_choice <- as.integer(readline(prompt = "Select display option (enter number): "))
+      
+      if(is.na(p_val_choice) || p_val_choice < 1 || p_val_choice > 2) {
+        cat("Invalid selection - defaulting to showing significant p-values only.\n")
+      } else if (p_val_choice == 1) {
+        show_all_p_values <- TRUE
+        cat("Selected: Show all p-values\n")
+      } else {
+        show_all_p_values <- FALSE
+        cat("Selected: Show only significant p-values\n")
+      }
+      
+      # === NEW PROMPT: Ask whether to show numerical or symbolic p-values ===
+      cat("\n=== P-Value Format Options ===\n")
+      cat("1: Show numeric p-values (e.g., p = 0.045)\n")
+      cat("2: Show significance asterisks (e.g., * for p < 0.05)\n")
+      
+      p_format_choice <- as.integer(readline(prompt = "Select format option (enter number): "))
+      
+      if(is.na(p_format_choice) || p_format_choice < 1 || p_format_choice > 2) {
+        cat("Invalid selection - defaulting to significance asterisks.\n")
+      } else if (p_format_choice == 1) {
+        show_numeric_p_values <- TRUE
+        cat("Selected: Show numeric p-values\n")
+      } else {
+        show_numeric_p_values <- FALSE
+        cat("Selected: Show significance asterisks\n")
+      }
+      # === END NEW PROMPT ===
     }
-  } else {
-    # Non-interactive mode
-    comparison_type <- "pairwise"
-    control_group <- NULL
   }
   
   # Interactive selection of normalization tissue
@@ -6051,9 +6096,9 @@ create_engraftment_plot <- function(data,
   
   # Process the data to calculate engraftment ratios
   congenic_engraftment <- data %>%
-    select(all_of(c(wellid_col, group_col, marker_col, freq_col))) %>%
+    dplyr::select(dplyr::all_of(c(wellid_col, group_col, marker_col, freq_col))) %>%
     # Extract the first letter from pairing_factor to create matching groups
-    mutate(
+    dplyr::mutate(
       well_letter = substr(.data[[wellid_col]], 1, 1)
     )
   
@@ -6069,21 +6114,21 @@ create_engraftment_plot <- function(data,
     # Create a lookup table for normalization frequencies
     norm_lookup <- congenic_engraftment %>%
       dplyr::filter(.data[[group_col]] == normalization_tissue) %>%
-      select(all_of(c(marker_col, "well_letter", freq_col)))
+      dplyr::select(dplyr::all_of(c(marker_col, "well_letter", freq_col)))
     
     # Rename the frequency column to norm_freq
     names(norm_lookup)[names(norm_lookup) == freq_col] <- "norm_freq"
     
     # Join normalization frequencies with the main data
     congenic_engraftment <- congenic_engraftment %>%
-      left_join(norm_lookup, by = c(marker_col, "well_letter")) %>%
+      dplyr::left_join(norm_lookup, by = c(marker_col, "well_letter")) %>%
       # Check for missing normalization values
       dplyr::filter(!is.na(norm_freq)) %>%
-      mutate(
+      dplyr::mutate(
         normalized_freq = ifelse(norm_freq == 0, .data[[freq_col]], .data[[freq_col]] / norm_freq)
       ) %>%
-      select(all_of(c(wellid_col, group_col, marker_col)), normalized_freq) %>%
-      pivot_wider(names_from = all_of(marker_col), values_from = normalized_freq)
+      dplyr::select(dplyr::all_of(c(wellid_col, group_col, marker_col)), normalized_freq) %>%
+      tidyr::pivot_wider(names_from = dplyr::all_of(marker_col), values_from = normalized_freq)
     
     # Update plot labels for normalized data
     y_label <- paste0("Log2(ratio KO:WT normalized to ", normalization_tissue, ")")
@@ -6091,9 +6136,9 @@ create_engraftment_plot <- function(data,
     
   } else {
     congenic_engraftment <- congenic_engraftment %>%
-      ungroup() %>%
-      select(all_of(c(wellid_col, group_col, marker_col, freq_col))) %>%
-      pivot_wider(names_from = all_of(marker_col), values_from = all_of(freq_col))
+      dplyr::ungroup() %>%
+      dplyr::select(dplyr::all_of(c(wellid_col, group_col, marker_col, freq_col))) %>%
+      tidyr::pivot_wider(names_from = dplyr::all_of(marker_col), values_from = dplyr::all_of(freq_col))
     
     # Update plot labels for non-normalized data
     y_label <- "Log2(ratio KO:WT - raw frequencies)"
@@ -6102,12 +6147,12 @@ create_engraftment_plot <- function(data,
   
   # Calculate engraftment ratio
   congenic_engraftment <- congenic_engraftment %>%
-    mutate(
+    dplyr::mutate(
       engraftment_ratio = log2(.data[[ko_marker]] / .data[[wt_marker]])
     ) %>%
     # Filter out infinite values
     dplyr::filter(is.finite(engraftment_ratio)) %>%
-    select(all_of(c(wellid_col, group_col)), engraftment_ratio)
+    dplyr::select(dplyr::all_of(c(wellid_col, group_col)), engraftment_ratio)
   
   # Check if we have data after processing
   if(nrow(congenic_engraftment) == 0) {
@@ -6116,11 +6161,11 @@ create_engraftment_plot <- function(data,
   
   # Calculate summary statistics
   summary_stats <- congenic_engraftment %>%
-    group_by(across(all_of(group_col))) %>%
-    summarise(
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_col))) %>%
+    dplyr::summarise(
       mean_val = mean(engraftment_ratio, na.rm = TRUE),
-      sd_val = sd(engraftment_ratio, na.rm = TRUE),
-      n = n(),
+      sd_val = stats::sd(engraftment_ratio, na.rm = TRUE),
+      n = dplyr::n(),
       sem_val = sd_val / sqrt(n),
       .groups = 'drop'
     )
@@ -6128,7 +6173,7 @@ create_engraftment_plot <- function(data,
   # Rename the grouping column for consistency
   names(summary_stats)[1] <- group_col
   
-  # Create factor levels with normalization group first, then order by mean if requested
+  # Create factor levels
   all_groups <- unique(summary_stats[[group_col]])
   
   if(use_normalization && normalization_tissue %in% all_groups) {
@@ -6155,72 +6200,294 @@ create_engraftment_plot <- function(data,
   
   # Apply factor levels to both summary stats and original data
   summary_stats <- summary_stats %>%
-    mutate(!!sym(group_col) := factor(.data[[group_col]], levels = factor_levels))
+    dplyr::mutate(!!rlang::sym(group_col) := factor(.data[[group_col]], levels = factor_levels))
   
   congenic_engraftment <- congenic_engraftment %>%
-    mutate(!!sym(group_col) := factor(.data[[group_col]], levels = factor_levels))
+    dplyr::mutate(!!rlang::sym(group_col) := factor(.data[[group_col]], levels = factor_levels))
   
-  # Calculate error bar positions based on bar direction
+  # Calculate error bar positions
   summary_stats <- summary_stats %>%
-    mutate(
+    dplyr::mutate(
       error_ymin = ifelse(mean_val >= 0, mean_val, mean_val - sem_val),
       error_ymax = ifelse(mean_val >= 0, mean_val + sem_val, mean_val)
     )
   
-  # Perform statistical tests if requested (abbreviated for space)
+  # Perform statistical tests if requested
   stat_results <- NULL
+  sig_data <- NULL
+  
   if(add_stats && nrow(summary_stats) > 1) {
-    # Statistical testing logic would go here
-    # Using your existing statistical test implementations
+    
+    cat("\n=== DEBUG: Starting statistical testing ===\n")
+    cat("add_stats:", add_stats, "\n")
+    cat("stat_method:", stat_method, "\n")
+    cat("Number of summary groups:", nrow(summary_stats), "\n")
+    
+    # Prepare data for statistical testing
+    stat_data <- congenic_engraftment %>%
+      dplyr::filter(!is.na(engraftment_ratio) & is.finite(engraftment_ratio)) %>%
+      dplyr::select(dplyr::all_of(c(wellid_col, group_col)), engraftment_ratio) %>%
+      dplyr::rename(
+        well_id = dplyr::all_of(wellid_col),
+        group = dplyr::all_of(group_col),
+        value = engraftment_ratio
+      ) %>%
+      # Add pairing information for paired tests
+      dplyr::mutate(
+        pair_id = substr(well_id, 1, 1)  # Extract letter (A, B, C, etc.)
+      )
+    
+    cat("Stat data dimensions:", nrow(stat_data), "x", ncol(stat_data), "\n")
+    cat("Unique groups:", paste(unique(stat_data$group), collapse = ", "), "\n")
+    cat("Unique pairs:", paste(unique(stat_data$pair_id), collapse = ", "), "\n")
+    
+    # Check if we have enough data for statistics
+    group_counts <- stat_data %>% 
+      dplyr::count(group) %>%
+      dplyr::filter(n >= 2)
+    
+    cat("Groups with >=2 observations:\n")
+    print(group_counts)
+    
+    if(nrow(group_counts) >= 2) {
+      
+      # Filter to only include groups with enough data
+      stat_data <- stat_data %>%
+        dplyr::filter(group %in% group_counts$group)
+      
+      cat("Entering statistical testing block...\n")
+      
+      tryCatch({
+        if(stat_method == "paired_t_test") {
+          
+          cat("Performing paired t-tests...\n")
+          
+          if(comparison_type == "pairwise") {
+            groups <- unique(stat_data$group)
+            cat("Groups for pairwise comparison:", paste(groups, collapse = ", "), "\n")
+            stat_results <- data.frame()
+            
+            for(i in 1:(length(groups)-1)) {
+              for(j in (i+1):length(groups)) {
+                group1 <- groups[i]
+                group2 <- groups[j]
+                
+                cat("Comparing", group1, "vs", group2, "\n")
+                
+                # Get data for both groups
+                data1 <- stat_data %>% dplyr::filter(group == group1)
+                data2 <- stat_data %>% dplyr::filter(group == group2)
+                
+                cat("  Group1 n =", nrow(data1), ", Group2 n =", nrow(data2), "\n")
+                
+                # Check if we have matching pairs
+                common_pairs <- intersect(data1$pair_id, data2$pair_id)
+                cat("  Common pairs:", paste(common_pairs, collapse = ", "), "\n")
+                
+                if(length(common_pairs) >= 3) { # Need at least 3 pairs
+                  # Match pairs and perform paired t-test
+                  matched_data1 <- data1 %>% 
+                    dplyr::filter(pair_id %in% common_pairs) %>%
+                    dplyr::arrange(pair_id)
+                  matched_data2 <- data2 %>% 
+                    dplyr::filter(pair_id %in% common_pairs) %>%
+                    dplyr::arrange(pair_id)
+                  
+                  cat("  Matched pairs - Group1:", nrow(matched_data1), ", Group2:", nrow(matched_data2), "\n")
+                  
+                  test_result <- stats::t.test(matched_data1$value, matched_data2$value, 
+                                               paired = TRUE)
+                  
+                  cat("  T-test p-value:", test_result$p.value, "\n")
+                  
+                  stat_results <- rbind(stat_results, data.frame(
+                    group1 = group1,
+                    group2 = group2,
+                    p = test_result$p.value,
+                    method = "Paired t-test",
+                    stringsAsFactors = FALSE
+                  ))
+                } else {
+                  cat("  Not enough common pairs (need >=3, have", length(common_pairs), ")\n")
+                }
+              }
+            }
+            
+          } else if(comparison_type == "vs_control" && !is.null(control_group)) {
+            
+            cat("Performing vs control comparisons with control group:", control_group, "\n")
+            
+            # Compare all groups to control
+            control_data <- stat_data %>% dplyr::filter(group == control_group)
+            other_groups <- setdiff(unique(stat_data$group), control_group)
+            
+            cat("Control group data n =", nrow(control_data), "\n")
+            cat("Other groups:", paste(other_groups, collapse = ", "), "\n")
+            
+            stat_results <- data.frame()
+            
+            for(test_group in other_groups) {
+              cat("Comparing", test_group, "vs", control_group, "\n")
+              
+              test_data <- stat_data %>% dplyr::filter(group == test_group)
+              common_pairs <- intersect(control_data$pair_id, test_data$pair_id)
+              
+              cat("  Test group n =", nrow(test_data), "\n")
+              cat("  Common pairs:", paste(common_pairs, collapse = ", "), "\n")
+              
+              if(length(common_pairs) >= 3) {
+                matched_control <- control_data %>% 
+                  dplyr::filter(pair_id %in% common_pairs) %>%
+                  dplyr::arrange(pair_id)
+                matched_test <- test_data %>% 
+                  dplyr::filter(pair_id %in% common_pairs) %>%
+                  dplyr::arrange(pair_id)
+                
+                cat("  Matched pairs - Control:", nrow(matched_control), ", Test:", nrow(matched_test), "\n")
+                
+                test_result <- stats::t.test(matched_test$value, matched_control$value, 
+                                             paired = TRUE)
+                
+                cat("  T-test p-value:", test_result$p.value, "\n")
+                
+                stat_results <- rbind(stat_results, data.frame(
+                  group1 = test_group,
+                  group2 = control_group,
+                  p = test_result$p.value,
+                  method = "Paired t-test vs control",
+                  stringsAsFactors = FALSE
+                ))
+              } else {
+                cat("  Not enough common pairs (need >=3, have", length(common_pairs), ")\n")
+              }
+            }
+          }
+          
+          cat("Statistical results before p-adjustment:\n")
+          print(stat_results)
+          
+          # Apply multiple testing correction
+          if(nrow(stat_results) > 0) {
+            stat_results$p.adj <- stats::p.adjust(stat_results$p, method = "bonferroni")
+            cat("Statistical results after p-adjustment:\n")
+            print(stat_results)
+          }
+          
+        } else if(stat_method == "t_test") {
+          cat("Performing unpaired t-tests...\n")
+          # Unpaired t-test code here...
+          
+        } else if(stat_method == "anova") {
+          cat("Performing ANOVA...\n")
+          # ANOVA code here...
+        }
+        
+      }, error = function(e) {
+        cat("ERROR in statistical testing:", e$message, "\n")
+        stat_results <- NULL
+      })
+    } else {
+      cat("Not enough groups for statistical testing\n")
+    }
+    
+    # === P-VALUE DISPLAY LOGIC ===
+    if(!is.null(stat_results) && is.data.frame(stat_results) && nrow(stat_results) > 0) {
+      
+      # Filter based on 'show_all_p_values' choice
+      if(!show_all_p_values) {
+        stat_results <- dplyr::filter(stat_results, p.adj < 0.05)
+      }
+      
+      # Format based on 'show_numeric_p_values' choice
+      if(show_numeric_p_values) {
+        sig_data <- stat_results %>%
+          dplyr::mutate(
+            p_display = paste("p =", formatC(p.adj, format = "g", digits = 2)),
+            group1 = as.character(group1),
+            group2 = as.character(group2)
+          )
+      } else {
+        sig_data <- stat_results %>%
+          dplyr::mutate(
+            p_display = dplyr::case_when(
+              p.adj < 0.001 ~ "***",
+              p.adj < 0.01 ~ "**", 
+              p.adj < 0.05 ~ "*",
+              TRUE ~ ""
+            ),
+            group1 = as.character(group1),
+            group2 = as.character(group2)
+          )
+      }
+    }
+    # === END P-VALUE DISPLAY LOGIC ===
   }
   
   # Create base plot
-  p <- ggplot(summary_stats, aes(x = .data[[group_col]], y = mean_val)) +
-    geom_col(aes(fill = .data[[group_col]]), alpha = 0.8, 
-             color = "black", linewidth = 0.3) +
-    geom_errorbar(aes(ymin = error_ymin, ymax = error_ymax), 
-                  width = 0.3, color = "black", linewidth = 0.3) +
-    geom_jitter(data = congenic_engraftment, 
-                aes(x = .data[[group_col]], y = engraftment_ratio), 
-                size = 2, alpha = 0.7, width = 0.2, height = 0,
-                inherit.aes = FALSE) +
-    labs(
+  p <- ggplot2::ggplot(summary_stats, ggplot2::aes(x = .data[[group_col]], y = mean_val)) +
+    ggplot2::geom_col(ggplot2::aes(fill = .data[[group_col]]), alpha = 0.8, 
+                      color = "black", linewidth = 0.3) +
+    ggplot2::geom_errorbar(ggplot2::aes(ymin = error_ymin, ymax = error_ymax), 
+                           width = 0.3, color = "black", linewidth = 0.3) +
+    ggplot2::geom_jitter(data = congenic_engraftment, 
+                         ggplot2::aes(x = .data[[group_col]], y = engraftment_ratio), 
+                         size = 2, alpha = 0.7, width = 0.2, height = 0,
+                         inherit.aes = FALSE) +
+    ggplot2::labs(
       title = plot_title,
       x = x_label,
       y = y_label,
       caption = caption_text
     ) +
-    theme_minimal() +
-    theme(
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
       legend.position = "none",
-      panel.grid = element_blank(),
-      axis.line = element_line(color = "black", linewidth = 0.3),
-      panel.border = element_blank(),
-      plot.title = element_text(hjust = 0.5)
+      panel.grid = ggplot2::element_blank(),
+      axis.line = ggplot2::element_line(color = "black", linewidth = 0.3),
+      panel.border = ggplot2::element_blank(),
+      plot.title = ggplot2::element_text(hjust = 0.5)
     ) +
-    geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5)
+    ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5)
   
-  # Return plot and optionally statistical results
+  # Add fill colors if provided
+  if(!is.null(fill_colors)) {
+    p <- p + ggplot2::scale_fill_manual(values = fill_colors)
+  }
+  
+  # Add statistical annotations if available
+  if(!is.null(sig_data) && nrow(sig_data) > 0) {
+    
+    cat("\n=== DEBUG: Adding", nrow(sig_data), "annotations to plot ===\n")
+    # Calculate y positions for significance bars
+    max_y <- max(summary_stats$error_ymax, na.rm = TRUE)
+    y_step <- (max_y - min(summary_stats$error_ymin, na.rm = TRUE)) * 0.1
+    
+    # Add significance annotations manually
+    for(i in 1:nrow(sig_data)) {
+      y_pos <- max_y + (i * y_step)
+      
+      group1_pos <- which(levels(summary_stats[[group_col]]) == sig_data$group1[i])
+      group2_pos <- which(levels(summary_stats[[group_col]]) == sig_data$group2[i])
+      
+      p <- p + 
+        ggplot2::annotate("segment", 
+                          x = group1_pos, xend = group2_pos,
+                          y = y_pos, yend = y_pos,
+                          color = "black", linewidth = 0.3) +
+        ggplot2::annotate("text", 
+                          x = (group1_pos + group2_pos) / 2,
+                          y = y_pos + y_step * 0.3,
+                          label = sig_data$p_display[i], # This now works because p_display is created
+                          size = 3)
+    }
+  }
+  
+  # Return results
   result <- list(plot = p)
   
   if(add_stats && !is.null(stat_results)) {
     result$statistics <- stat_results
     result$summary_stats <- summary_stats
-  }
-  
-  # Interactive save option
-  if(!auto_save) {
-    suggested_name <- "engraftment_plot"
-    interactive_save_plot(if(is.list(result)) result$plot else result, suggested_name, "engraftment")
-    
-    # Save statistics if available
-    if(is.list(result) && "statistics" %in% names(result) && !is.null(result$statistics)) {
-      stats_save_choice <- menu(c("Save statistics", "Don't save statistics"), 
-                                title = "Save engraftment statistics?")
-      if(stats_save_choice == 1) {
-        interactive_save_dataframe(result$statistics, "engraftment_statistics", "statistics")
-      }
-    }
   }
   
   # If only plot requested, return just the plot
@@ -6230,6 +6497,7 @@ create_engraftment_plot <- function(data,
     return(result)
   }
 }
+
 
 # ============================================================================
 # UPDATED ANALYSIS FUNCTIONS USING STANDARDIZED FACTORS
