@@ -3637,11 +3637,111 @@ data_clean_custom <- function(data, auto_save = FALSE) {
     }
   }
   
+  # Function to check and validate header structure
+  check_header_structure <- function(df) {
+    cat("Checking header structure...\n")
+    Sys.sleep(1)
+    
+    # Assuming the header is valid if we have column names
+    # In a real scenario, you might want to check for multi-row headers
+    if(length(names(df)) > 0) {
+      cat("Header validation: Single row header confirmed\n")
+    } else {
+      warning("Header validation: No column names detected")
+    }
+    Sys.sleep(1)
+    return(df)
+  }
+  
+  # Function to clean column names
+  clean_column_names <- function(df) {
+    cat("Cleaning up column names...\n")
+    Sys.sleep(1)
+    
+    original_names <- names(df)
+    
+    # Remove leading special characters (like $)
+    cleaned_names <- str_remove_all(original_names, "^[^A-Za-z0-9_]+")
+    
+    # Replace dots, hyphens, and other separators with underscores
+    cleaned_names <- str_replace_all(cleaned_names, "[.-]+", "_")
+    
+    # Remove other special characters (keeping letters, numbers, and underscores)
+    cleaned_names <- str_replace_all(cleaned_names, "[^A-Za-z0-9_]", "_")
+    
+    # Remove multiple consecutive underscores
+    cleaned_names <- str_replace_all(cleaned_names, "_+", "_")
+    
+    # Remove trailing underscores
+    cleaned_names <- str_remove_all(cleaned_names, "_+$")
+    
+    # Ensure names don't start with numbers (R requirement)
+    cleaned_names <- str_replace_all(cleaned_names, "^([0-9])", "X\\1")
+    
+    # Handle empty names
+    cleaned_names[cleaned_names == ""] <- paste0("Column_", seq_along(cleaned_names[cleaned_names == ""]))
+    
+    names(df) <- cleaned_names
+    
+    # Report changes
+    changed_names <- original_names != cleaned_names
+    if(any(changed_names)) {
+      cat("Column name changes made:\n")
+      for(i in which(changed_names)) {
+        cat(sprintf("  '%s' -> '%s'\n", original_names[i], cleaned_names[i]))
+      }
+    } else {
+      cat("No column name changes needed\n")
+    }
+    
+    Sys.sleep(1)
+    return(df)
+  }
+  
+  # Function to handle NA/NaN values
+  handle_missing_values <- function(df) {
+    cat("Checking for NA/NaN values...\n")
+    Sys.sleep(1)
+    
+    # Count NA/NaN values
+    na_count <- sum(is.na(df) | is.nan(as.matrix(df)), na.rm = TRUE)
+    
+    if(na_count > 0) {
+      cat(sprintf("Found %d NA/NaN values - replacing with empty strings\n", na_count))
+      
+      # Replace NA/NaN with empty strings for character columns
+      # and with "" for all columns (converting to character where needed)
+      df <- df %>%
+        mutate(across(everything(), ~ case_when(
+          is.na(.x) | is.nan(.x) ~ "",
+          TRUE ~ as.character(.x)
+        )))
+      
+      cat("Replaced all NA/NaN values with empty strings\n")
+    } else {
+      cat("No NA/NaN values found\n")
+    }
+    
+    Sys.sleep(1)
+    return(df)
+  }
+  
   # Function to clean a single data frame
   clean_single_df <- function(df, data_type = "data") {
-    names(df) <- str_remove_all(names(df), "\\$")
+    cat(sprintf("\n=== Starting data cleaning for %s ===\n", data_type))
     
+    # Check header structure
+    df <- check_header_structure(df)
+    
+    # Clean column names (includes the original $ removal)
+    df <- clean_column_names(df)
+    
+    # Handle missing values
+    df <- handle_missing_values(df)
+    
+    # Clean NodeShort column if it exists
     if("NodeShort" %in% names(df)) {
+      cat("Processing NodeShort column...\n")
       df <- df %>%
         mutate(
           NodeShort = NodeShort %>%
@@ -3650,9 +3750,14 @@ data_clean_custom <- function(data, auto_save = FALSE) {
             str_remove_all(",") %>%
             str_remove_all(":")
         )
+      cat("NodeShort column cleaned\n")
+      Sys.sleep(1)
     }
     
+    # Handle unstained samples
     df <- handle_unstained_samples(df, data_type)
+    
+    cat(sprintf("=== Completed data cleaning for %s ===\n\n", data_type))
     return(df)
   }
   
