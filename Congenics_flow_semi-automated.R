@@ -3578,6 +3578,7 @@ assign_metadata_menu_enhanced <- function(df, include_factor_definition = TRUE) 
 #============================================================================
 # Data Cleanup Functions
 #============================================================================
+
 data_clean_custom <- function(data, auto_save = FALSE) {
   
   # Function to handle unstained sample detection and removal
@@ -3590,9 +3591,9 @@ data_clean_custom <- function(data, auto_save = FALSE) {
     pattern <- paste(unstained_patterns, collapse = "|")
     
     unstained_rows <- df %>%
-      mutate(row_id = row_number()) %>%
-      dplyr::filter(str_detect(tolower(Sample), pattern)) %>%
-      pull(row_id)
+      dplyr::mutate(row_id = dplyr::row_number()) %>%
+      dplyr::filter(stringr::str_detect(tolower(Sample), pattern)) %>%
+      dplyr::pull(row_id)
     
     if(length(unstained_rows) == 0) {
       return(df)
@@ -3603,11 +3604,11 @@ data_clean_custom <- function(data, auto_save = FALSE) {
       cat("\n=== Unstained Samples Detected in", data_type, "===\n")
       cat(paste("Found", length(unstained_rows), "unstained sample(s)\n"))
       
-      unstained_data <- df %>% slice(unstained_rows)
+      unstained_data <- df %>% dplyr::slice(unstained_rows)
       if("NodeShort" %in% names(df)) {
-        print(unstained_data %>% select(Sample, NodeShort) %>% head(10))
+        print(unstained_data %>% dplyr::select(Sample, NodeShort) %>% utils::head(10))
       } else {
-        print(unstained_data %>% select(Sample) %>% head(10))
+        print(unstained_data %>% dplyr::select(Sample) %>% utils::head(10))
       }
       
       action_options <- c(
@@ -3615,7 +3616,7 @@ data_clean_custom <- function(data, auto_save = FALSE) {
         "Keep unstained samples in ALL datasets"
       )
       
-      user_choice <- menu(action_options, title = "What would you like to do with unstained samples?")
+      user_choice <- utils::menu(action_options, title = "What would you like to do with unstained samples?")
       
       # Store decision globally
       .unstained_decision <<- if(user_choice == 1) "remove" else "keep"
@@ -3629,7 +3630,7 @@ data_clean_custom <- function(data, auto_save = FALSE) {
     
     # Apply the stored decision
     if(.unstained_decision == "remove") {
-      df_cleaned <- df %>% slice(-unstained_rows)
+      df_cleaned <- df %>% dplyr::slice(-unstained_rows)
       cat("Removed", length(unstained_rows), "unstained samples from", data_type, "\n")
       return(df_cleaned)
     } else {
@@ -3637,10 +3638,85 @@ data_clean_custom <- function(data, auto_save = FALSE) {
     }
   }
   
+  # Function to handle low count samples
+  handle_low_count_samples <- function(df, data_type = "data") {
+    # Check if both required columns exist
+    if(!all(c("ParentCount", "Subpop") %in% names(df))) {
+      cat("ParentCount and/or Subpop columns not found - skipping low count check\n")
+      Sys.sleep(0.5)
+      return(df)
+    }
+    
+    cat("Checking for low count samples (ParentCount < 10 AND Subpop < 10)...\n")
+    Sys.sleep(0.5)
+    
+    # Convert columns to numeric if they aren't already
+    df <- df %>%
+      dplyr::mutate(
+        ParentCount = as.numeric(ParentCount),
+        Subpop = as.numeric(Subpop)
+      )
+    
+    # Identify rows with both ParentCount and Subpop < 10
+    low_count_rows <- df %>%
+      dplyr::mutate(row_id = dplyr::row_number()) %>%
+      dplyr::filter(ParentCount < 10 & Subpop < 10, !is.na(ParentCount), !is.na(Subpop)) %>%
+      dplyr::pull(row_id)
+    
+    if(length(low_count_rows) == 0) {
+      cat("No low count samples found\n")
+      Sys.sleep(0.5)
+      return(df)
+    }
+    
+    # Only show interactive prompt for the first dataset
+    if(!exists(".low_count_decision", envir = .GlobalEnv)) {
+      cat("\n=== Low Count Samples Detected in", data_type, "===\n")
+      cat(paste("Found", length(low_count_rows), "sample(s) with ParentCount < 10 AND Subpop < 10\n"))
+      cat("\nPlease review these samples:\n")
+      cat("A) Check if these samples belong in the dataset\n")
+      cat("B) Check their gating\n\n")
+      
+      # Display the problematic rows
+      low_count_data <- df %>% 
+        dplyr::slice(low_count_rows) %>%
+        dplyr::select(dplyr::any_of(c("Sample", "WELLID", "NodeShort", "ParentCount", "Subpop")))
+      
+      print(low_count_data)
+      
+      cat("\n")
+      action_options <- c(
+        "Remove low count samples from ALL datasets",
+        "Keep low count samples in ALL datasets"
+      )
+      
+      user_choice <- utils::menu(action_options, title = "What would you like to do with low count samples?")
+      
+      # Store decision globally
+      .low_count_decision <<- if(user_choice == 1) "remove" else "keep"
+      
+      if(.low_count_decision == "remove") {
+        cat("Will remove low count samples from all datasets\n")
+      } else {
+        cat("Will keep low count samples in all datasets\n")
+      }
+    }
+    
+    # Apply the stored decision
+    if(.low_count_decision == "remove") {
+      df_cleaned <- df %>% dplyr::slice(-low_count_rows)
+      cat("Removed", length(low_count_rows), "low count samples from", data_type, "\n")
+      return(df_cleaned)
+    } else {
+      cat("Kept", length(low_count_rows), "low count samples in", data_type, "\n")
+      return(df)
+    }
+  }
+  
   # Function to check and validate header structure
   check_header_structure <- function(df) {
     cat("Checking header structure...\n")
-    Sys.sleep(1)
+    Sys.sleep(0.5)
     
     # Assuming the header is valid if we have column names
     # In a real scenario, you might want to check for multi-row headers
@@ -3649,34 +3725,34 @@ data_clean_custom <- function(data, auto_save = FALSE) {
     } else {
       warning("Header validation: No column names detected")
     }
-    Sys.sleep(1)
+    Sys.sleep(0.5)
     return(df)
   }
   
   # Function to clean column names
   clean_column_names <- function(df) {
     cat("Cleaning up column names...\n")
-    Sys.sleep(1)
+    Sys.sleep(0.5)
     
     original_names <- names(df)
     
     # Remove leading special characters (like $)
-    cleaned_names <- str_remove_all(original_names, "^[^A-Za-z0-9_]+")
+    cleaned_names <- stringr::str_remove_all(original_names, "^[^A-Za-z0-9_]+")
     
     # Replace dots, hyphens, and other separators with underscores
-    cleaned_names <- str_replace_all(cleaned_names, "[.-]+", "_")
+    cleaned_names <- stringr::str_replace_all(cleaned_names, "[.-]+", "_")
     
     # Remove other special characters (keeping letters, numbers, and underscores)
-    cleaned_names <- str_replace_all(cleaned_names, "[^A-Za-z0-9_]", "_")
+    cleaned_names <- stringr::str_replace_all(cleaned_names, "[^A-Za-z0-9_]", "_")
     
     # Remove multiple consecutive underscores
-    cleaned_names <- str_replace_all(cleaned_names, "_+", "_")
+    cleaned_names <- stringr::str_replace_all(cleaned_names, "_+", "_")
     
     # Remove trailing underscores
-    cleaned_names <- str_remove_all(cleaned_names, "_+$")
+    cleaned_names <- stringr::str_remove_all(cleaned_names, "_+$")
     
     # Ensure names don't start with numbers (R requirement)
-    cleaned_names <- str_replace_all(cleaned_names, "^([0-9])", "X\\1")
+    cleaned_names <- stringr::str_replace_all(cleaned_names, "^([0-9])", "X\\1")
     
     # Handle empty names
     cleaned_names[cleaned_names == ""] <- paste0("Column_", seq_along(cleaned_names[cleaned_names == ""]))
@@ -3694,14 +3770,14 @@ data_clean_custom <- function(data, auto_save = FALSE) {
       cat("No column name changes needed\n")
     }
     
-    Sys.sleep(1)
+    Sys.sleep(0.5)
     return(df)
   }
   
   # Function to handle NA/NaN values
   handle_missing_values <- function(df) {
     cat("Checking for NA/NaN values...\n")
-    Sys.sleep(1)
+    Sys.sleep(0.5)
     
     # Count NA/NaN values
     na_count <- sum(is.na(df) | is.nan(as.matrix(df)), na.rm = TRUE)
@@ -3712,7 +3788,7 @@ data_clean_custom <- function(data, auto_save = FALSE) {
       # Replace NA/NaN with empty strings for character columns
       # and with "" for all columns (converting to character where needed)
       df <- df %>%
-        mutate(across(everything(), ~ case_when(
+        dplyr::mutate(dplyr::across(dplyr::everything(), ~ dplyr::case_when(
           is.na(.x) | is.nan(.x) ~ "",
           TRUE ~ as.character(.x)
         )))
@@ -3722,7 +3798,7 @@ data_clean_custom <- function(data, auto_save = FALSE) {
       cat("No NA/NaN values found\n")
     }
     
-    Sys.sleep(1)
+    Sys.sleep(0.5)
     return(df)
   }
   
@@ -3743,33 +3819,39 @@ data_clean_custom <- function(data, auto_save = FALSE) {
     if("NodeShort" %in% names(df)) {
       cat("Processing NodeShort column...\n")
       df <- df %>%
-        mutate(
+        dplyr::mutate(
           NodeShort = NodeShort %>%
-            str_remove(".*:") %>%
-            str_remove_all(" ") %>%
-            str_remove_all(",") %>%
-            str_remove_all(":")
+            stringr::str_remove(".*:") %>%
+            stringr::str_remove_all(" ") %>%
+            stringr::str_remove_all(",") %>%
+            stringr::str_remove_all(":")
         )
       cat("NodeShort column cleaned\n")
-      Sys.sleep(1)
+      Sys.sleep(0.5)
     }
     
     # Handle unstained samples
     df <- handle_unstained_samples(df, data_type)
     
+    # Handle low count samples (NEW FUNCTIONALITY)
+    df <- handle_low_count_samples(df, data_type)
+    
     cat(sprintf("=== Completed data cleaning for %s ===\n\n", data_type))
     return(df)
   }
   
-  # Clear any existing decision at the start
+  # Clear any existing decisions at the start
   if(exists(".unstained_decision", envir = .GlobalEnv)) {
     rm(.unstained_decision, envir = .GlobalEnv)
+  }
+  if(exists(".low_count_decision", envir = .GlobalEnv)) {
+    rm(.low_count_decision, envir = .GlobalEnv)
   }
   
   # Check if input is a list
   if(is.list(data) && !is.data.frame(data)) {
     # Apply cleaning function to each element in the list
-    cleaned_data <- imap(data, ~ {
+    cleaned_data <- purrr::imap(data, ~ {
       if(is.data.frame(.x)) {
         data_type <- if(.y == "counts") "counts data" else if(.y == "mfi") "MFI data" else .y
         clean_single_df(.x, data_type)
@@ -3778,15 +3860,24 @@ data_clean_custom <- function(data, auto_save = FALSE) {
       }
     })
     
-    # Clean up the global decision variable
+    # Clean up the global decision variables
     if(exists(".unstained_decision", envir = .GlobalEnv)) {
       rm(.unstained_decision, envir = .GlobalEnv)
+    }
+    if(exists(".low_count_decision", envir = .GlobalEnv)) {
+      rm(.low_count_decision, envir = .GlobalEnv)
+    }
+    if(exists(".samples_to_remove", envir = .GlobalEnv)) {
+      rm(.samples_to_remove, envir = .GlobalEnv)
+    }
+    if(exists(".unstained_samples_to_remove", envir = .GlobalEnv)) {
+      rm(.unstained_samples_to_remove, envir = .GlobalEnv)
     }
     
     # Interactive save option
     if(!auto_save) {
       cat("\n=== Save Cleaned Data ===\n")
-      save_choice <- menu(c("Save cleaned data", "Don't save"), title = "Save cleaned datasets?")
+      save_choice <- utils::menu(c("Save cleaned data", "Don't save"), title = "Save cleaned datasets?")
       
       if(save_choice == 1) {
         if("counts" %in% names(cleaned_data)) {
@@ -3803,15 +3894,18 @@ data_clean_custom <- function(data, auto_save = FALSE) {
   } else if(is.data.frame(data)) {
     result <- clean_single_df(data, "single dataset")
     
-    # Clean up the global decision variable
+    # Clean up the global decision variables
     if(exists(".unstained_decision", envir = .GlobalEnv)) {
       rm(.unstained_decision, envir = .GlobalEnv)
+    }
+    if(exists(".low_count_decision", envir = .GlobalEnv)) {
+      rm(.low_count_decision, envir = .GlobalEnv)
     }
     
     # Interactive save option
     if(!auto_save) {
       cat("\n=== Save Cleaned Data ===\n")
-      save_choice <- menu(c("Save cleaned data", "Don't save"), title = "Save cleaned dataset?")
+      save_choice <- utils::menu(c("Save cleaned data", "Don't save"), title = "Save cleaned dataset?")
       
       if(save_choice == 1) {
         interactive_save_dataframe(result, "cleaned_data", "processed")
@@ -3825,122 +3919,6 @@ data_clean_custom <- function(data, auto_save = FALSE) {
   }
 }
 
-#=============================================================================
-# Plotting helper functions
-#=============================================================================
-# Helper function to create individual subgroup plots
-create_subgroup_plot <- function(df, test_type = "t_test", facet_var = "tissue_factor") {
-  # Check if we have enough data for statistical testing
-  if (length(unique(df$congenics)) < 2) {
-    warning(paste("Subgroup has less than 2 'congenics' levels for comparison. Skipping statistical test."))
-    stat_test_results <- NULL
-  } else {
-    # Perform statistical test based on test_type and facet_var
-    if (facet_var == "NodeShort") {
-      # When faceting by NodeShort, group by NodeShort for stats
-      stat_test_results <- df %>%
-        group_by(NodeShort) %>%
-        dplyr::filter(n_distinct(congenics) == 2) %>%
-        {
-          if (test_type == "t_test") {
-            t_test(., Freq ~ congenics, paired = TRUE)
-          } else if (test_type == "wilcox_test") {
-            wilcox_test(., Freq ~ congenics, paired = TRUE)
-          }
-        } %>%
-        add_xy_position(x = "congenics") %>%
-        mutate(p.format = scales::pvalue(p, accuracy = 0.001, add_p = TRUE))
-    } else {
-      # When faceting by tissue_factor or no faceting, group by tissue_factor
-      stat_test_results <- df %>%
-        group_by(tissue_factor) %>%
-        dplyr::filter(n_distinct(congenics) == 2) %>%
-        {
-          if (test_type == "t_test") {
-            t_test(., Freq ~ congenics, paired = TRUE)
-          } else if (test_type == "wilcox_test") {
-            wilcox_test(., Freq ~ congenics, paired = TRUE)
-          }
-        } %>%
-        add_xy_position(x = "congenics") %>%
-        mutate(p.format = scales::pvalue(p, accuracy = 0.001, add_p = TRUE))
-    }
-  }
-  
-  # Calculate y-axis limits
-  max_freq <- max(df$Freq, na.rm = TRUE)
-  max_y_position <- if (!is.null(stat_test_results) && nrow(stat_test_results) > 0) {
-    max(max_freq, stat_test_results$y.position, na.rm = TRUE)
-  } else {
-    max_freq
-  }
-  upper_y_limit <- max_y_position * 1.2
-  
-  # Create the base plot
-  p <- ggplot(df, aes(x = congenics, y = Freq, group = pairing_factor)) +
-    geom_line(color = "black", linewidth = 0.4, alpha = 0.7, show.legend = FALSE) +
-    geom_point(shape = 21, fill = "white", color = "black", size = 3, show.legend = FALSE)
-  
-  # Add faceting if requested
-  if (facet_var == "tissue_factor") {
-    p <- p + facet_wrap(~ tissue_factor, scales = "free_y", strip.position = "top")
-  } else if (facet_var == "NodeShort") {
-    p <- p + facet_wrap(~ NodeShort, scales = "free_y", strip.position = "top")
-  }
-  
-  # Dynamic title and y-axis label based on faceting
-  if (facet_var == "tissue_factor") {
-    # When faceting by tissue, title should show the NodeShort
-    plot_title <- paste("Cell Population:", unique(df$NodeShort))
-    y_label <- paste0(unique(df$NodeShort), " (%)")
-  } else if (facet_var == "NodeShort") {
-    # When faceting by NodeShort, title should show the tissue
-    plot_title <- paste("Tissue:", unique(df$tissue_factor))
-    y_label <- "Cell Frequency (%)"
-  } else {
-    # No faceting
-    plot_title <- paste("Subgroup:", unique(df$NodeShort))
-    y_label <- paste0(unique(df$NodeShort), " (%)")
-  }
-  
-  # Continue with plot formatting
-  p <- p +
-    scale_y_continuous(
-      limits = c(0, upper_y_limit),
-      expand = expansion(mult = c(0.02, 0.05))
-    ) +
-    labs(
-      title = plot_title,
-      x = "Congenic Marker",
-      y = y_label
-    ) +
-    theme_minimal(base_size = 14) +
-    theme(
-      strip.text = element_text(face = "bold"),
-      plot.title = element_text(hjust = 0.5),
-      panel.grid.major = element_blank(),
-      panel.grid.minor = element_blank(),
-      axis.line.x = element_line(color = "black", linewidth = 0.4),
-      axis.line.y = element_line(color = "black", linewidth = 0.4),
-      panel.border = element_blank(),
-      panel.background = element_blank(),
-      axis.text.x = element_text(angle = 0, hjust = 0.5),
-      strip.placement = "outside"
-    )
-  
-  # Add statistical annotations if available
-  if (!is.null(stat_test_results) && nrow(stat_test_results) > 0) {
-    p <- p + stat_pvalue_manual(
-      stat_test_results,
-      label = "p.format",
-      tip.length = 0,
-      bracket.size = 0.5,
-      hide.ns = FALSE
-    )
-  }
-  
-  return(p)
-}
 #===============================================================================
 # Main Paired compariosn plots interactive function
 #===============================================================================
@@ -6867,7 +6845,6 @@ create_paired_comparison_plots_enhanced <- function(data,
 
 # ============================================================================
 # ENHANCED INTERACTIVE UMAP ANALYSIS FOR FLOW CYTOMETRY DATA
-# Fixed version with sample exclusion and streamlined workflow
 # ============================================================================
 
 get_all_populations <- function(gs) {
