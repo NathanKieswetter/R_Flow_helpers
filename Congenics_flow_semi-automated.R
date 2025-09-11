@@ -4678,6 +4678,285 @@ check_group_data <- function(group_data, group_name, min_n = 2) {
 
 # ===== FIXED STATISTICAL TEST FUNCTIONS =====
 
+# ===== STATISTICAL TESTING FUNCTIONS =====
+
+select_statistical_test_interactive <- function(mfi_data, selected_congenics, selected_markers) {
+  base::cat("\n", base::paste(base::rep("=", 70), collapse = ""), "\n")
+  base::cat("STATISTICAL TESTING OPTIONS\n")
+  base::cat(base::paste(base::rep("=", 70), collapse = ""), "\n")
+  
+  n_groups <- base::length(selected_congenics)
+  
+  base::cat("Number of congenic groups selected:", n_groups, "\n")
+  base::cat("Groups:", base::paste(selected_congenics, collapse = ", "), "\n\n")
+  
+  if (n_groups < 2) {
+    base::cat("⚠️  Statistical testing requires at least 2 groups.\n")
+    base::cat("Please select more congenics in the previous step.\n")
+    return(base::list(perform_stats = FALSE))
+  }
+  
+  base::cat("Available statistical tests:\n")
+  base::cat("1. No statistical testing (heatmap only)\n")
+  base::cat("2. Show data distribution and recommendations\n")
+  
+  if (n_groups == 2) {
+    base::cat("3. Unpaired t-test (independent samples)\n")
+    base::cat("4. Paired t-test (matched samples)\n") 
+    base::cat("5. Mann-Whitney U test (non-parametric, unpaired)\n")
+    base::cat("6. Wilcoxon signed-rank test (non-parametric, paired)\n")
+  } else {
+    base::cat("3. One-way ANOVA (parametric)\n")
+    base::cat("4. Kruskal-Wallis test (non-parametric)\n")
+    base::cat("5. Repeated measures ANOVA (paired design)\n")
+    base::cat("6. Friedman test (non-parametric, paired)\n")
+  }
+  
+  while (TRUE) {
+    choice <- base::readline(base::paste("\nChoose statistical test (1-6): "))
+    
+    if (choice == "1") {
+      return(base::list(perform_stats = FALSE))
+    } else if (choice == "2") {
+      show_data_distribution(mfi_data, selected_congenics, selected_markers)
+      base::cat("\nPress Enter to continue...")
+      base::readline()
+      next
+    } else if (choice == "3") {
+      if (n_groups == 2) {
+        return(configure_two_group_test("t.test", "unpaired", selected_congenics, mfi_data))
+      } else {
+        return(configure_multi_group_test("anova", selected_congenics, mfi_data))
+      }
+    } else if (choice == "4") {
+      if (n_groups == 2) {
+        return(configure_two_group_test("t.test", "paired", selected_congenics, mfi_data))
+      } else {
+        return(configure_multi_group_test("kruskal", selected_congenics, mfi_data))
+      }
+    } else if (choice == "5") {
+      if (n_groups == 2) {
+        return(configure_two_group_test("mannwhitney", "unpaired", selected_congenics, mfi_data))
+      } else {
+        return(configure_multi_group_test("rm_anova", selected_congenics, mfi_data))
+      }
+    } else if (choice == "6") {
+      if (n_groups == 2) {
+        return(configure_two_group_test("wilcoxon", "paired", selected_congenics, mfi_data))
+      } else {
+        return(configure_multi_group_test("friedman", selected_congenics, mfi_data))
+      }
+    } else {
+      base::cat("Invalid choice. Please enter a number between 1 and 6.\n")
+    }
+  }
+}
+
+configure_two_group_test <- function(test_type, pairing, selected_congenics, mfi_data) {
+  base::cat(base::sprintf("\n--- Configuring %s (%s) ---\n", 
+                          base::switch(test_type,
+                                       "t.test" = "T-test",
+                                       "mannwhitney" = "Mann-Whitney U test",
+                                       "wilcoxon" = "Wilcoxon signed-rank test"),
+                          pairing))
+  
+  tissue_col <- "tissue_factor"  # Default tissue column
+  sig_display <- select_significance_display()
+  alpha <- get_alpha_level()
+  
+  pairing_var <- NULL
+  if (pairing == "paired") {
+    base::cat("\nFor paired analysis, samples need to be matched.\n")
+    base::cat("Common pairing variables: Sample, NodeShort, Subject_ID, etc.\n")
+    pairing_var <- base::readline("Enter column name for pairing (enter default: 'pairing_factor'): ")
+    if (pairing_var == "") pairing_var <- "Sample"
+  }
+  
+  return(base::list(
+    perform_stats = TRUE,
+    test_type = test_type,
+    pairing = pairing,
+    pairing_var = pairing_var,
+    alpha = alpha,
+    sig_display = sig_display,
+    groups = selected_congenics,
+    post_hoc = FALSE,
+    tissue_col = tissue_col
+  ))
+}
+
+configure_multi_group_test <- function(test_type, selected_congenics, mfi_data) {
+  base::cat(base::sprintf("\n--- Configuring %s ---\n", 
+                          base::switch(test_type,
+                                       "anova" = "One-way ANOVA",
+                                       "kruskal" = "Kruskal-Wallis test", 
+                                       "rm_anova" = "Repeated measures ANOVA",
+                                       "friedman" = "Friedman test")))
+  
+  tissue_col <- "tissue_factor"  # Default tissue column
+  sig_display <- select_significance_display()
+  alpha <- get_alpha_level()
+  
+  post_hoc <- FALSE
+  if (test_type %in% c("anova", "kruskal")) {
+    base::cat("\nPost-hoc testing options:\n")
+    base::cat("1. No post-hoc tests\n")
+    base::cat("2. Perform pairwise comparisons\n")
+    
+    ph_choice <- base::readline("Choose post-hoc option (1-2): ")
+    if (ph_choice == "2") {
+      post_hoc <- TRUE
+      base::cat("Will perform pairwise comparisons with multiple comparison correction.\n")
+    }
+  }
+  
+  pairing_var <- NULL
+  if (test_type %in% c("rm_anova", "friedman")) {
+    base::cat("\nFor repeated measures analysis, samples need to be matched.\n")
+    base::cat("Common pairing variables: Sample, NodeShort, Subject_ID, etc.\n")
+    pairing_var <- base::readline("Enter column name for pairing (default: 'Sample'): ")
+    if (pairing_var == "") pairing_var <- "Sample"
+  }
+  
+  return(base::list(
+    perform_stats = TRUE,
+    test_type = test_type,
+    pairing_var = pairing_var,
+    alpha = alpha,
+    sig_display = sig_display,
+    groups = selected_congenics,
+    post_hoc = post_hoc,
+    tissue_col = tissue_col
+  ))
+}
+
+select_significance_display <- function() {
+  base::cat("\nSignificance display options:\n")
+  base::cat("1. P-values (exact numbers, e.g., 0.032)\n")
+  base::cat("2. Significance stars (*, **, ***)\n")
+  base::cat("3. Both p-values and stars\n")
+  base::cat("4. No significance overlay (stats in separate output)\n")
+  
+  while (TRUE) {
+    choice <- base::readline("Choose display option (1-4): ")
+    
+    if (choice == "1") {
+      return("p_values")
+    } else if (choice == "2") {
+      return("stars")
+    } else if (choice == "3") {
+      return("both")
+    } else if (choice == "4") {
+      return("none")
+    } else {
+      base::cat("Invalid choice. Please enter 1-4.\n")
+    }
+  }
+}
+
+get_alpha_level <- function() {
+  base::cat("\nSignificance level options:\n")
+  base::cat("1. α = 0.05 (standard)\n")
+  base::cat("2. α = 0.01 (strict)\n")
+  base::cat("3. α = 0.001 (very strict)\n")
+  base::cat("4. Custom alpha level\n")
+  
+  while (TRUE) {
+    choice <- base::readline("Choose significance level (1-4): ")
+    
+    if (choice == "1") {
+      return(0.05)
+    } else if (choice == "2") {
+      return(0.01)
+    } else if (choice == "3") {
+      return(0.001)
+    } else if (choice == "4") {
+      custom_alpha <- base::readline("Enter custom alpha (e.g., 0.025): ")
+      alpha_val <- base::as.numeric(custom_alpha)
+      if (!base::is.na(alpha_val) && alpha_val > 0 && alpha_val < 1) {
+        return(alpha_val)
+      } else {
+        base::cat("Invalid alpha value. Using default 0.05.\n")
+        return(0.05)
+      }
+    } else {
+      base::cat("Invalid choice. Please enter 1-4.\n")
+    }
+  }
+}
+
+perform_statistical_analysis <- function(mfi_data, selected_congenics, selected_markers, stats_config) {
+  if (!stats_config$perform_stats) {
+    return(NULL)
+  }
+  
+  base::cat("\nPerforming statistical analysis...\n")
+  base::cat("Test type:", stats_config$test_type, "\n")
+  
+  filtered_data <- mfi_data %>%
+    dplyr::filter(congenics %in% selected_congenics,
+                  marker %in% selected_markers,
+                  !base::is.na(MFI))
+  
+  if (base::nrow(filtered_data) == 0) {
+    base::warning("No data available for statistical analysis")
+    return(NULL)
+  }
+  
+  unique_tissues <- base::unique(filtered_data$tissue_factor)
+  base::cat("Performing tests within each tissue separately:\n")
+  base::cat("Tissues:", base::paste(unique_tissues, collapse = ", "), "\n")
+  
+  results_list <- base::list()
+  
+  for (current_tissue in unique_tissues) {
+    base::cat(base::sprintf("\nProcessing tissue: %s\n", current_tissue))
+    
+    tissue_data <- filtered_data %>% dplyr::filter(tissue_factor == current_tissue)
+    
+    if (base::nrow(tissue_data) == 0) {
+      base::warning(base::paste("No data for tissue:", current_tissue))
+      next
+    }
+    
+    for (current_marker in selected_markers) {
+      marker_tissue_data <- tissue_data %>% dplyr::filter(marker == current_marker)
+      
+      if (base::nrow(marker_tissue_data) < 2) {
+        base::warning(base::paste("Insufficient data for marker:", current_marker, "in tissue:", current_tissue))
+        next
+      }
+      
+      combo_id <- base::paste(current_tissue, current_marker, sep = "_")
+      
+      test_result <- base::switch(stats_config$test_type,
+                                  "t.test" = perform_t_test(marker_tissue_data, stats_config),
+                                  "mannwhitney" = perform_mannwhitney_test(marker_tissue_data, stats_config),
+                                  "wilcoxon" = perform_wilcoxon_test(marker_tissue_data, stats_config),
+                                  "anova" = perform_anova_test(marker_tissue_data, stats_config),
+                                  "kruskal" = perform_kruskal_test(marker_tissue_data, stats_config),
+                                  "rm_anova" = perform_rm_anova_test(marker_tissue_data, stats_config),
+                                  "friedman" = perform_friedman_test(marker_tissue_data, stats_config))
+      
+      if (!base::is.null(test_result)) {
+        test_result$tissue <- current_tissue
+        test_result$marker <- current_marker
+        results_list[[combo_id]] <- test_result
+        
+        base::cat(base::sprintf("  - %s: p = %.4f\n", current_marker, test_result$p_value))
+      }
+    }
+  }
+  
+  stats_summary <- compile_stats_summary(results_list, stats_config)
+  
+  return(base::list(
+    individual_results = results_list,
+    summary = stats_summary,
+    config = stats_config
+  ))
+}
+
 perform_t_test <- function(marker_data, stats_config) {
   # Validate data first
   marker_data <- validate_mfi_data(marker_data, "t-test")
@@ -5005,6 +5284,108 @@ perform_kruskal_test <- function(marker_data, stats_config) {
   })
   
   return(test_result)
+}
+
+compile_stats_summary <- function(results_list, stats_config) {
+  if (base::length(results_list) == 0) {
+    return(NULL)
+  }
+  
+  summary_df <- purrr::map_dfr(results_list, function(result) {
+    base::data.frame(
+      tissue = base::as.character(result$tissue),
+      marker = base::as.character(result$marker),
+      test_name = result$test_name,
+      p_value = result$p_value,
+      significant = result$p_value < stats_config$alpha,
+      stars = dplyr::case_when(
+        result$p_value < 0.001 ~ "***",
+        result$p_value < 0.01 ~ "**", 
+        result$p_value < 0.05 ~ "*",
+        TRUE ~ ""
+      ),
+      stringsAsFactors = FALSE
+    )
+  }, .id = "tissue_marker_combo")
+  
+  summary_df <- summary_df %>%
+    dplyr::mutate(
+      p_formatted = dplyr::case_when(
+        p_value < 0.001 ~ "< 0.001",
+        p_value < 0.01 ~ base::sprintf("%.3f", p_value),
+        TRUE ~ base::sprintf("%.3f", p_value)
+      )
+    )
+  
+  return(summary_df)
+}
+
+display_stats_summary <- function(stats_results) {
+  if (base::is.null(stats_results) || base::is.null(stats_results$summary)) {
+    return()
+  }
+  
+  base::cat("\n", base::paste(base::rep("=", 70), collapse = ""), "\n")
+  base::cat("STATISTICAL TESTING RESULTS (BY TISSUE)\n")
+  base::cat(base::paste(base::rep("=", 70), collapse = ""), "\n")
+  
+  summary_df <- stats_results$summary
+  config <- stats_results$config
+  
+  base::cat("Test performed:", summary_df$test_name[1], "\n")
+  base::cat("Significance level: α =", config$alpha, "\n")
+  base::cat("Total tissue-marker combinations tested:", base::nrow(summary_df), "\n")
+  
+  n_significant <- base::sum(summary_df$significant)
+  base::cat("Significant results:", n_significant, "/", base::nrow(summary_df), 
+            base::sprintf("(%.1f%%)\n", n_significant/base::nrow(summary_df)*100))
+  
+  base::cat("\n--- Summary by Tissue ---\n")
+  tissue_summary <- summary_df %>%
+    dplyr::group_by(tissue) %>%
+    dplyr::summarise(
+      total_tests = dplyr::n(),
+      significant_tests = base::sum(significant),
+      pct_significant = base::round(base::mean(significant) * 100, 1),
+      .groups = "drop"
+    )
+  
+  for (i in 1:base::nrow(tissue_summary)) {
+    row <- tissue_summary[i, ]
+    base::cat(base::sprintf("%-20s: %d/%d significant (%.1f%%)\n", 
+                            row$tissue, row$significant_tests, row$total_tests, row$pct_significant))
+  }
+  
+  base::cat("\n--- Detailed Results by Tissue ---\n")
+  
+  summary_display <- summary_df %>%
+    dplyr::arrange(tissue, p_value) %>%
+    dplyr::mutate(
+      result_summary = dplyr::case_when(
+        significant ~ base::paste0("✓ ", p_formatted, " ", stars),
+        TRUE ~ base::paste0("  ", p_formatted, " ", stars)
+      )
+    )
+  
+  current_tissue <- ""
+  for (i in 1:base::nrow(summary_display)) {
+    row <- summary_display[i, ]
+    
+    if (row$tissue != current_tissue) {
+      base::cat(base::sprintf("\n%s:\n", row$tissue))
+      current_tissue <- row$tissue
+    }
+    
+    base::cat(base::sprintf("  %-23s %s\n", row$marker, row$result_summary))
+  }
+  
+  if (base::nrow(summary_df) > 1) {
+    base::cat("\n⚠️  Note: Multiple comparisons performed across tissues and markers.\n")
+    base::cat("   Consider adjusting for multiple testing if performing many comparisons.\n")
+  }
+  
+  base::cat("\nLegend: *** p < 0.001, ** p < 0.01, * p < 0.05\n")
+  base::cat("Each test was performed independently within each tissue.\n")
 }
 
 # ===== ENHANCED DATA DISTRIBUTION ANALYSIS =====
@@ -6536,6 +6917,8 @@ create_engraftment_plot <- function(data,
     return(result)
   }
 }
+
+
 
 
 # ============================================================================
