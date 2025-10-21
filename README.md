@@ -8,7 +8,7 @@ A comprehensive R package for automated flow cytometry analysis with interactive
 
 This pipeline provides a comprehensive workflow for flow cytometry data analysis, from importing data into the FlowJo workspace to creating publication-ready visualizations. It features interactive data exploration, automated detection of congenic markers, statistical analysis, and advanced visualization tools, including UMAP dimensionality reduction and clustering.
 
-**NB**: This is a data analysis toolkit that requires **fully compensated and gated data**. 
+**VERY NB**: This is a data analysis toolkit that requires **fully compensated and gated data**. 
 
 ### Key Features
 
