@@ -38,7 +38,8 @@ cran_packages <- c(
   "umap",
   "cluster",
   "factoextra",
-  "patchwork"
+  "patchwork",
+  "uwot"
 )
 
 bioc_packages <- c(
@@ -325,7 +326,9 @@ preview_fcs_keywords <- function(fcs_path, sample_limit = 5) {
     
     tryCatch({
       # Read FCS file
-      fcs_data <- flowCore::read.FCS(file_path, transformation = FALSE)
+      fcs_data <- flowCore::read.FCS(file_path, 
+                                     transformation = FALSE,
+                                     truncate_max_range = FALSE)
       
       # Extract keywords
       keywords <- flowCore::keyword(fcs_data)
@@ -971,6 +974,969 @@ select_keywords_interactive <- function(fcs_path, sample_limit = 5) {
   
   return(selected_keywords)
 }
+
+# ============================================================================
+# INTERACTIVE GATE MANAGEMENT FOR FLOWWORKSPACE GATING SETS
+# ============================================================================
+# Functions for adding, combining, and managing gates interactively
+# All original gates remain unchanged with proper recompute steps
+
+# Required packages
+library(flowWorkspace)
+library(flowCore)
+library(dplyr)
+library(ggcyto)
+
+# MAIN INTERACTIVE GATE MANAGEMENT FUNCTION
+
+manage_gates_interactive <- function(gs, verbose = TRUE) {
+  
+  cat("\n=== Interactive Gate Management System ===\n")
+  cat("Working with GatingSet containing", length(gs), "samples\n\n")
+  
+  # Store original gating tree for reference
+  original_nodes <- flowWorkspace::gs_get_pop_paths(gs)
+  
+  while(TRUE) {
+    cat("\n=== Gate Management Options ===\n")
+    cat("1. View current gating structure\n")
+    cat("2. Add new gate to existing parent\n")
+    cat("3. Combine existing gates (Boolean)\n")
+    cat("4. Add gate with daughter populations\n")
+    cat("5. View gate statistics\n")
+    cat("6. Plot specific gate\n")
+    cat("7. Recompute all gates\n")
+    cat("8. View gating tree\n")
+    cat("9. Save current GatingSet\n")
+    cat("0. Exit\n")
+    
+    choice <- readline(prompt = "Enter your choice (0-9): ")
+    
+    if(choice == "0") {
+      cat("Exiting gate management...\n")
+      break
+    }
+    
+    switch(choice,
+           "1" = view_gating_structure(gs),
+           "2" = add_new_gate_interactive(gs),
+           "3" = combine_gates_interactive(gs),
+           "4" = add_gate_with_daughters_interactive(gs),
+           "5" = view_gate_statistics(gs),
+           "6" = plot_gate_interactive(gs),
+           "7" = recompute_gatingset(gs),
+           "8" = plot_gating_tree(gs),
+           "9" = save_gatingset_interactive(gs),
+           cat("Invalid choice. Please try again.\n")
+    )
+  }
+  
+  return(gs)
+}
+
+# VIEW GATING STRUCTURE
+
+view_gating_structure <- function(gs) {
+  cat("\n=== Current Gating Structure ===\n")
+  
+  nodes <- flowWorkspace::gs_get_pop_paths(gs)
+  
+  # Create hierarchical display
+  for(i in seq_along(nodes)) {
+    node <- nodes[i]
+    depth <- length(strsplit(node, "/")[[1]]) - 1
+    indent <- paste(rep("  ", depth), collapse = "")
+    alias <- basename(node)
+    
+    # Get population count for first sample
+    count <- flowWorkspace::gs_pop_get_count(gs[[1]], node)
+    
+    cat(sprintf("%s%s [%d cells in sample 1]\n", indent, alias, count))
+  }
+  
+  cat("\nTotal nodes:", length(nodes), "\n")
+  
+  # Option to see detailed info
+  show_details <- readline(prompt = "\nShow detailed node information? (y/n): ")
+  
+  if(tolower(show_details) == "y") {
+    cat("\n=== Detailed Node Information ===\n")
+    for(node in nodes) {
+      cat("\nNode:", node, "\n")
+      cat("  Alias:", basename(node), "\n")
+      
+      # Get gate info
+      gate <- flowWorkspace::gs_pop_get_gate(gs[[1]], node)
+      if(!is.null(gate)) {
+        cat("  Gate type:", class(gate)[1], "\n")
+        params <- flowCore::parameters(gate)
+        if(length(params) > 0) {
+          cat("  Parameters:", paste(params, collapse = ", "), "\n")
+        }
+      }
+      
+      # Get parent
+      parent <- flowWorkspace::gs_pop_get_parent(gs[[1]], node)
+      cat("  Parent:", ifelse(parent == "root", "root", basename(parent)), "\n")
+      
+      # Get children
+      children <- flowWorkspace::gs_pop_get_children(gs[[1]], node)
+      if(length(children) > 0) {
+        cat("  Children:", paste(basename(children), collapse = ", "), "\n")
+      }
+    }
+  }
+  
+  invisible(NULL)
+}
+
+# ADD NEW GATE
+
+add_new_gate_interactive <- function(gs) {
+  cat("\n=== Add New Gate ===\n")
+  
+  # Display available parent nodes
+  nodes <- flowWorkspace::gs_get_pop_paths(gs)
+  cat("\nAvailable parent nodes:\n")
+  for(i in seq_along(nodes)) {
+    cat(sprintf("%d. %s\n", i, nodes[i]))
+  }
+  
+  parent_idx <- as.numeric(readline(prompt = "\nSelect parent node number: "))
+  
+  if(!parent_idx %in% seq_along(nodes)) {
+    cat("Invalid selection.\n")
+    return(invisible(gs))
+  }
+  
+  parent_node <- nodes[parent_idx]
+  cat("Selected parent:", parent_node, "\n")
+  
+  # Get gate name
+  gate_name <- readline(prompt = "Enter new gate name: ")
+  
+  if(gate_name == "") {
+    cat("Gate name cannot be empty.\n")
+    return(invisible(gs))
+  }
+  
+  # Select gate type
+  cat("\nGate types:\n")
+  cat("1. Rectangle gate\n")
+  cat("2. Polygon gate\n")
+  cat("3. Ellipsoid gate\n")
+  cat("4. Quadrant gate\n")
+  cat("5. Boolean gate (combination)\n")
+  
+  gate_type <- readline(prompt = "Select gate type (1-5): ")
+  
+  # Get parameters for gate
+  params <- get_gate_parameters_interactive(gs, parent_node, gate_type)
+  
+  if(is.null(params)) {
+    cat("Gate creation cancelled.\n")
+    return(invisible(gs))
+  }
+  
+  # Create and add the gate
+  tryCatch({
+    
+    # Create gate based on type
+    gate <- create_gate_from_params(gate_type, params)
+    
+    # Add to GatingSet
+    flowWorkspace::gs_pop_add(gs, gate, 
+                              parent = parent_node, 
+                              name = gate_name)
+    
+    # Recompute
+    cat("Recomputing gates...\n")
+    flowWorkspace::recompute(gs, gate_name)
+    
+    # Show results
+    count <- flowWorkspace::gs_pop_get_count(gs[[1]], 
+                                             file.path(parent_node, gate_name))
+    cat(sprintf("\nGate '%s' added successfully!\n", gate_name))
+    cat(sprintf("Population count (sample 1): %d cells\n", count))
+    
+  }, error = function(e) {
+    cat("Error adding gate:", e$message, "\n")
+  })
+  
+  invisible(gs)
+}
+
+# GET GATE PARAMETERS
+
+get_gate_parameters_interactive <- function(gs, parent_node, gate_type) {
+  
+  # Get available parameters
+  gh <- gs[[1]]
+  parent_data <- flowWorkspace::gh_pop_get_data(gh, parent_node)
+  available_params <- flowCore::colnames(parent_data)
+  
+  # Remove non-fluorescent parameters
+  fluor_params <- available_params[!available_params %in% c("Time", "FSC-A", "FSC-H", 
+                                                            "SSC-A", "SSC-H")]
+  
+  cat("\nAvailable parameters:\n")
+  for(i in seq_along(fluor_params)) {
+    cat(sprintf("%d. %s\n", i, fluor_params[i]))
+  }
+  
+  params <- list()
+  
+  if(gate_type %in% c("1", "2", "3")) {  # Rectangle, Polygon, Ellipsoid
+    
+    # Get X parameter
+    x_idx <- as.numeric(readline(prompt = "Select X parameter number: "))
+    if(!x_idx %in% seq_along(fluor_params)) {
+      return(NULL)
+    }
+    params$x_param <- fluor_params[x_idx]
+    
+    # Get Y parameter
+    y_idx <- as.numeric(readline(prompt = "Select Y parameter number: "))
+    if(!y_idx %in% seq_along(fluor_params)) {
+      return(NULL)
+    }
+    params$y_param <- fluor_params[y_idx]
+    
+    # Get gate boundaries
+    if(gate_type == "1") {  # Rectangle
+      params$x_min <- as.numeric(readline(prompt = "Enter X minimum: "))
+      params$x_max <- as.numeric(readline(prompt = "Enter X maximum: "))
+      params$y_min <- as.numeric(readline(prompt = "Enter Y minimum: "))
+      params$y_max <- as.numeric(readline(prompt = "Enter Y maximum: "))
+      
+    } else if(gate_type == "2") {  # Polygon
+      n_points <- as.numeric(readline(prompt = "Number of polygon points (minimum 3): "))
+      if(n_points < 3) {
+        cat("Polygon requires at least 3 points.\n")
+        return(NULL)
+      }
+      
+      x_coords <- numeric(n_points)
+      y_coords <- numeric(n_points)
+      
+      for(i in 1:n_points) {
+        x_coords[i] <- as.numeric(readline(prompt = sprintf("Point %d X coordinate: ", i)))
+        y_coords[i] <- as.numeric(readline(prompt = sprintf("Point %d Y coordinate: ", i)))
+      }
+      
+      params$x_coords <- x_coords
+      params$y_coords <- y_coords
+      
+    } else if(gate_type == "3") {  # Ellipsoid
+      params$center_x <- as.numeric(readline(prompt = "Enter ellipse center X: "))
+      params$center_y <- as.numeric(readline(prompt = "Enter ellipse center Y: "))
+      params$major_axis <- as.numeric(readline(prompt = "Enter major axis length: "))
+      params$minor_axis <- as.numeric(readline(prompt = "Enter minor axis length: "))
+      params$angle <- as.numeric(readline(prompt = "Enter rotation angle (degrees, 0-360): "))
+    }
+    
+  } else if(gate_type == "4") {  # Quadrant
+    
+    # Get parameters
+    x_idx <- as.numeric(readline(prompt = "Select X parameter number: "))
+    if(!x_idx %in% seq_along(fluor_params)) {
+      return(NULL)
+    }
+    params$x_param <- fluor_params[x_idx]
+    
+    y_idx <- as.numeric(readline(prompt = "Select Y parameter number: "))
+    if(!y_idx %in% seq_along(fluor_params)) {
+      return(NULL)
+    }
+    params$y_param <- fluor_params[y_idx]
+    
+    # Get quadrant boundaries
+    params$x_boundary <- as.numeric(readline(prompt = "Enter X boundary value: "))
+    params$y_boundary <- as.numeric(readline(prompt = "Enter Y boundary value: "))
+    
+  } else if(gate_type == "5") {  # Boolean
+    
+    # Get existing gates for combination
+    all_nodes <- flowWorkspace::gs_get_pop_paths(gs)
+    cat("\nAvailable gates for combination:\n")
+    for(i in seq_along(all_nodes)) {
+      cat(sprintf("%d. %s\n", i, all_nodes[i]))
+    }
+    
+    n_gates <- as.numeric(readline(prompt = "How many gates to combine? "))
+    params$gates_to_combine <- character(n_gates)
+    
+    for(i in 1:n_gates) {
+      gate_idx <- as.numeric(readline(prompt = sprintf("Select gate %d number: ", i)))
+      if(!gate_idx %in% seq_along(all_nodes)) {
+        return(NULL)
+      }
+      params$gates_to_combine[i] <- all_nodes[gate_idx]
+    }
+    
+    # Get combination operator
+    cat("\nCombination operators:\n")
+    cat("1. AND (&)\n")
+    cat("2. OR (|)\n")
+    cat("3. NOT (!)\n")
+    
+    op_choice <- readline(prompt = "Select operator (1-3): ")
+    params$operator <- switch(op_choice,
+                              "1" = "&",
+                              "2" = "|",
+                              "3" = "!",
+                              "&")
+  }
+  
+  return(params)
+}
+
+# CREATE GATE FROM PARAMETERS
+
+create_gate_from_params <- function(gate_type, params) {
+  
+  gate <- NULL
+  
+  if(gate_type == "1") {  # Rectangle gate
+    
+    gate <- flowCore::rectangleGate(
+      filterId = "rect_gate",
+      .gate = matrix(c(params$x_min, params$x_max,
+                       params$y_min, params$y_max),
+                     ncol = 2,
+                     dimnames = list(c("min", "max"),
+                                     c(params$x_param, params$y_param)))
+    )
+    
+  } else if(gate_type == "2") {  # Polygon gate
+    
+    gate_matrix <- cbind(params$x_coords, params$y_coords)
+    colnames(gate_matrix) <- c(params$x_param, params$y_param)
+    
+    gate <- flowCore::polygonGate(
+      filterId = "poly_gate",
+      .gate = gate_matrix
+    )
+    
+  } else if(gate_type == "3") {  # Ellipsoid gate
+    
+    # Create covariance matrix for ellipse
+    angle_rad <- params$angle * pi / 180
+    cos_a <- cos(angle_rad)
+    sin_a <- sin(angle_rad)
+    
+    # Rotation matrix
+    R <- matrix(c(cos_a, -sin_a, sin_a, cos_a), ncol = 2)
+    
+    # Scale matrix
+    S <- diag(c(params$major_axis^2, params$minor_axis^2))
+    
+    # Covariance matrix
+    cov_mat <- R %*% S %*% t(R)
+    colnames(cov_mat) <- c(params$x_param, params$y_param)
+    rownames(cov_mat) <- c(params$x_param, params$y_param)
+    
+    # Mean vector with names
+    mean_vec <- c(params$center_x, params$center_y)
+    names(mean_vec) <- c(params$x_param, params$y_param)
+    
+    gate <- flowCore::ellipsoidGate(
+      filterId = "ellipse_gate",
+      .gate = cov_mat,
+      mean = mean_vec
+    )
+    
+  } else if(gate_type == "4") {  # Quadrant gate
+    
+    # Create named vector for quadrant gate
+    gate_vals <- c(params$x_boundary, params$y_boundary)
+    names(gate_vals) <- c(params$x_param, params$y_param)
+    
+    gate <- flowCore::quadGate(
+      filterId = "quad_gate",
+      .gate = gate_vals
+    )
+    
+  } else if(gate_type == "5") {  # Boolean gate
+    
+    # Create boolean combination
+    gate_refs <- params$gates_to_combine
+    
+    if(length(gate_refs) == 1 && params$operator == "!") {
+      # NOT gate
+      gate <- flowCore::booleanFilter(
+        paste0("!", gate_refs[1]),
+        filterId = "bool_gate"
+      )
+    } else {
+      # AND/OR combination
+      bool_expr <- paste(gate_refs, collapse = paste0(" ", params$operator, " "))
+      gate <- flowCore::booleanFilter(
+        bool_expr,
+        filterId = "bool_gate"
+      )
+    }
+  }
+  
+  return(gate)
+}
+
+# COMBINE GATES
+
+combine_gates_interactive <- function(gs) {
+  cat("\n=== Combine Existing Gates ===\n")
+  
+  nodes <- flowWorkspace::gs_get_pop_paths(gs)
+  
+  cat("\nAvailable gates:\n")
+  for(i in seq_along(nodes)) {
+    cat(sprintf("%d. %s\n", i, nodes[i]))
+  }
+  
+  # Get gates to combine
+  n_gates <- as.numeric(readline(prompt = "\nHow many gates to combine? "))
+  
+  if(n_gates < 2) {
+    cat("Need at least 2 gates to combine.\n")
+    return(invisible(gs))
+  }
+  
+  gates_to_combine <- character(n_gates)
+  
+  for(i in 1:n_gates) {
+    gate_idx <- as.numeric(readline(prompt = sprintf("Select gate %d number: ", i)))
+    if(!gate_idx %in% seq_along(nodes)) {
+      cat("Invalid selection.\n")
+      return(invisible(gs))
+    }
+    gates_to_combine[i] <- nodes[gate_idx]
+  }
+  
+  cat("\nGates to combine:\n")
+  cat(paste("-", gates_to_combine), sep = "\n")
+  
+  # Get combination operator
+  cat("\n=== Combination Type ===\n")
+  cat("1. AND (&) - cells must be in ALL gates\n")
+  cat("2. OR (|) - cells in ANY of the gates\n")
+  cat("3. XOR - cells in exactly one gate\n")
+  
+  op_choice <- readline(prompt = "Select combination type (1-3): ")
+  
+  operator <- switch(op_choice,
+                     "1" = "&",
+                     "2" = "|",
+                     "3" = "xor",
+                     "&")
+  
+  # Get new gate name
+  new_gate_name <- readline(prompt = "Enter name for combined gate: ")
+  
+  if(new_gate_name == "") {
+    cat("Gate name cannot be empty.\n")
+    return(invisible(gs))
+  }
+  
+  # Get parent for new gate
+  cat("\nSelect parent for combined gate:\n")
+  for(i in seq_along(nodes)) {
+    cat(sprintf("%d. %s\n", i, nodes[i]))
+  }
+  
+  parent_idx <- as.numeric(readline(prompt = "Select parent node number: "))
+  
+  if(!parent_idx %in% seq_along(nodes)) {
+    cat("Invalid selection.\n")
+    return(invisible(gs))
+  }
+  
+  parent_node <- nodes[parent_idx]
+  
+  # Create boolean gate
+  tryCatch({
+    
+    if(operator == "xor") {
+      # XOR requires special handling
+      bool_expr <- create_xor_expression(gates_to_combine)
+    } else {
+      # Simple AND/OR
+      bool_expr <- paste(gates_to_combine, collapse = paste0(" ", operator, " "))
+    }
+    
+    bool_gate <- flowCore::booleanFilter(bool_expr, filterId = new_gate_name)
+    
+    # Add to GatingSet
+    flowWorkspace::gs_pop_add(gs, bool_gate, 
+                              parent = parent_node,
+                              name = new_gate_name)
+    
+    # Recompute
+    cat("Recomputing gates...\n")
+    flowWorkspace::recompute(gs, new_gate_name)
+    
+    # Show results
+    count <- flowWorkspace::gs_pop_get_count(gs[[1]], 
+                                             file.path(parent_node, new_gate_name))
+    cat(sprintf("\nCombined gate '%s' created successfully!\n", new_gate_name))
+    cat(sprintf("Population count (sample 1): %d cells\n", count))
+    
+  }, error = function(e) {
+    cat("Error creating combined gate:", e$message, "\n")
+  })
+  
+  invisible(gs)
+}
+
+# Helper for XOR expression
+create_xor_expression <- function(gates) {
+  if(length(gates) == 2) {
+    return(sprintf("(%s & !%s) | (!%s & %s)", 
+                   gates[1], gates[2], gates[1], gates[2]))
+  } else {
+    # For more than 2 gates, XOR means exactly one is true
+    expr_parts <- character()
+    for(i in seq_along(gates)) {
+      other_gates <- gates[-i]
+      part <- sprintf("(%s & %s)", 
+                      gates[i], 
+                      paste0("!", other_gates, collapse = " & "))
+      expr_parts <- c(expr_parts, part)
+    }
+    return(paste(expr_parts, collapse = " | "))
+  }
+}
+
+# ADD GATE WITH DAUGHTERS
+
+add_gate_with_daughters_interactive <- function(gs) {
+  cat("\n=== Add Gate with Daughter Populations ===\n")
+  
+  # First add the parent gate
+  cat("\nStep 1: Define the parent gate\n")
+  
+  # Display available parent nodes
+  nodes <- flowWorkspace::gs_get_pop_paths(gs)
+  cat("\nAvailable parent nodes:\n")
+  for(i in seq_along(nodes)) {
+    cat(sprintf("%d. %s\n", i, nodes[i]))
+  }
+  
+  parent_idx <- as.numeric(readline(prompt = "\nSelect parent node number: "))
+  
+  if(!parent_idx %in% seq_along(nodes)) {
+    cat("Invalid selection.\n")
+    return(invisible(gs))
+  }
+  
+  parent_node <- nodes[parent_idx]
+  cat("Selected parent:", parent_node, "\n")
+  
+  # Get parent gate name
+  parent_gate_name <- readline(prompt = "Enter parent gate name: ")
+  
+  if(parent_gate_name == "") {
+    cat("Gate name cannot be empty.\n")
+    return(invisible(gs))
+  }
+  
+  # Get gate type for parent
+  cat("\nParent gate type:\n")
+  cat("1. Rectangle gate\n")
+  cat("2. Polygon gate\n")
+  cat("3. Ellipsoid gate\n")
+  
+  gate_type <- readline(prompt = "Select gate type (1-3): ")
+  
+  # Get parameters for parent gate
+  params <- get_gate_parameters_interactive(gs, parent_node, gate_type)
+  
+  if(is.null(params)) {
+    cat("Gate creation cancelled.\n")
+    return(invisible(gs))
+  }
+  
+  # Create and add parent gate
+  tryCatch({
+    
+    parent_gate <- create_gate_from_params(gate_type, params)
+    
+    flowWorkspace::gs_pop_add(gs, parent_gate,
+                              parent = parent_node,
+                              name = parent_gate_name)
+    
+    flowWorkspace::recompute(gs, parent_gate_name)
+    
+    cat(sprintf("\nParent gate '%s' added successfully!\n", parent_gate_name))
+    
+    # Now add daughter gates
+    cat("\nStep 2: Add daughter populations\n")
+    
+    n_daughters <- as.numeric(readline(prompt = "How many daughter gates to add? "))
+    
+    if(n_daughters > 0) {
+      
+      new_parent_path <- file.path(parent_node, parent_gate_name)
+      
+      for(i in 1:n_daughters) {
+        cat(sprintf("\n=== Daughter Gate %d ===\n", i))
+        
+        daughter_name <- readline(prompt = "Enter daughter gate name: ")
+        
+        if(daughter_name == "") {
+          cat("Skipping empty gate name.\n")
+          next
+        }
+        
+        # Select daughter gate type
+        cat("\nDaughter gate type:\n")
+        cat("1. Rectangle gate\n")
+        cat("2. Polygon gate\n")
+        cat("3. Ellipsoid gate\n")
+        cat("4. Quadrant gate (creates 4 populations)\n")
+        
+        d_gate_type <- readline(prompt = "Select gate type (1-4): ")
+        
+        # Get parameters for daughter gate
+        d_params <- get_gate_parameters_interactive(gs, new_parent_path, d_gate_type)
+        
+        if(!is.null(d_params)) {
+          
+          daughter_gate <- create_gate_from_params(d_gate_type, d_params)
+          
+          if(d_gate_type == "4") {
+            # Quadrant gate creates 4 populations
+            flowWorkspace::gs_pop_add(gs, daughter_gate,
+                                      parent = new_parent_path,
+                                      names = c(paste0(daughter_name, "_++"),
+                                                paste0(daughter_name, "_+-"),
+                                                paste0(daughter_name, "_-+"),
+                                                paste0(daughter_name, "_--")))
+          } else {
+            flowWorkspace::gs_pop_add(gs, daughter_gate,
+                                      parent = new_parent_path,
+                                      name = daughter_name)
+          }
+          
+          flowWorkspace::recompute(gs, daughter_name)
+          
+          cat(sprintf("Daughter gate '%s' added successfully!\n", daughter_name))
+        }
+      }
+    }
+    
+    # Final recompute to ensure consistency
+    cat("\nPerforming final recompute...\n")
+    flowWorkspace::recompute(gs)
+    
+    cat("\nGate hierarchy created successfully!\n")
+    
+  }, error = function(e) {
+    cat("Error adding gates:", e$message, "\n")
+  })
+  
+  invisible(gs)
+}
+
+# VIEW GATE STATISTICS
+
+view_gate_statistics <- function(gs) {
+  cat("\n=== Gate Statistics ===\n")
+  
+  # Get statistics for all samples
+  stats <- flowWorkspace::gs_pop_get_stats(gs)
+  
+  # Aggregate by population
+  pop_stats <- stats %>%
+    dplyr::group_by(pop) %>%
+    dplyr::summarise(
+      mean_count = mean(count, na.rm = TRUE),
+      sd_count = sd(count, na.rm = TRUE),
+      min_count = min(count, na.rm = TRUE),
+      max_count = max(count, na.rm = TRUE),
+      mean_percent = mean(percent, na.rm = TRUE),
+      sd_percent = sd(percent, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(pop)
+  
+  # Display statistics
+  print(as.data.frame(pop_stats))
+  
+  # Option to see per-sample statistics
+  show_samples <- readline(prompt = "\nShow per-sample statistics? (y/n): ")
+  
+  if(tolower(show_samples) == "y") {
+    
+    nodes <- flowWorkspace::gs_get_pop_paths(gs)
+    cat("\nAvailable populations:\n")
+    for(i in seq_along(nodes)) {
+      cat(sprintf("%d. %s\n", i, nodes[i]))
+    }
+    
+    pop_idx <- as.numeric(readline(prompt = "Select population number: "))
+    
+    if(pop_idx %in% seq_along(nodes)) {
+      pop_name <- nodes[pop_idx]
+      
+      pop_specific <- stats %>%
+        dplyr::filter(pop == pop_name) %>%
+        dplyr::select(sample, pop, count, percent) %>%
+        dplyr::arrange(sample)
+      
+      cat(sprintf("\nStatistics for %s:\n", pop_name))
+      print(as.data.frame(pop_specific))
+    }
+  }
+  
+  invisible(NULL)
+}
+
+# PLOT GATE
+
+plot_gate_interactive <- function(gs) {
+  cat("\n=== Plot Gate ===\n")
+  
+  nodes <- flowWorkspace::gs_get_pop_paths(gs)
+  
+  cat("\nAvailable gates:\n")
+  for(i in seq_along(nodes)) {
+    cat(sprintf("%d. %s\n", i, nodes[i]))
+  }
+  
+  gate_idx <- as.numeric(readline(prompt = "\nSelect gate to plot: "))
+  
+  if(!gate_idx %in% seq_along(nodes)) {
+    cat("Invalid selection.\n")
+    return(invisible(NULL))
+  }
+  
+  gate_name <- nodes[gate_idx]
+  
+  # Select sample
+  sample_names <- flowWorkspace::sampleNames(gs)
+  
+  if(length(sample_names) > 1) {
+    cat("\nAvailable samples:\n")
+    for(i in seq_along(sample_names)) {
+      cat(sprintf("%d. %s\n", i, sample_names[i]))
+    }
+    
+    sample_idx <- as.numeric(readline(prompt = "Select sample (or 0 for all): "))
+    
+    if(sample_idx == 0) {
+      sample_to_plot <- sample_names
+    } else if(sample_idx %in% seq_along(sample_names)) {
+      sample_to_plot <- sample_names[sample_idx]
+    } else {
+      sample_to_plot <- sample_names[1]
+    }
+  } else {
+    sample_to_plot <- sample_names[1]
+  }
+  
+  # Create plot
+  tryCatch({
+    
+    if(length(sample_to_plot) == 1) {
+      p <- ggcyto::ggcyto(gs[[sample_to_plot]], 
+                          aes(x = "FSC-A", y = "SSC-A")) +
+        ggcyto::geom_hex(bins = 128) +
+        ggcyto::geom_gate(gate_name) +
+        ggcyto::geom_stats() +
+        ggcyto::theme_minimal() +
+        labs(title = sprintf("Gate: %s\nSample: %s", 
+                             basename(gate_name), 
+                             sample_to_plot))
+    } else {
+      p <- ggcyto::ggcyto(gs[sample_to_plot], 
+                          aes(x = "FSC-A", y = "SSC-A")) +
+        ggcyto::geom_hex(bins = 64) +
+        ggcyto::geom_gate(gate_name) +
+        ggcyto::facet_wrap(~name, ncol = 3) +
+        ggcyto::theme_minimal() +
+        labs(title = sprintf("Gate: %s", basename(gate_name)))
+    }
+    
+    print(p)
+    
+  }, error = function(e) {
+    cat("Error plotting gate:", e$message, "\n")
+    cat("Attempting alternative plot...\n")
+    
+    # Try simple plot
+    gh <- gs[[sample_to_plot[1]]]
+    data <- flowWorkspace::gh_pop_get_data(gh, gate_name)
+    
+    if(ncol(data) >= 2) {
+      plot(exprs(data)[,1:2], 
+           main = sprintf("Gate: %s", basename(gate_name)),
+           pch = ".", col = rgb(0,0,0,0.3))
+    }
+  })
+  
+  invisible(NULL)
+}
+
+# RECOMPUTE GATINGSET
+
+recompute_gatingset <- function(gs) {
+  cat("\n=== Recomputing GatingSet ===\n")
+  
+  cat("This will recompute all gates to ensure consistency.\n")
+  confirm <- readline(prompt = "Continue? (y/n): ")
+  
+  if(tolower(confirm) == "y") {
+    cat("Recomputing...\n")
+    
+    tryCatch({
+      flowWorkspace::recompute(gs)
+      cat("Recomputation complete!\n")
+      
+      # Show updated statistics
+      stats <- flowWorkspace::gs_pop_get_stats(gs)
+      n_pops <- length(unique(stats$pop))
+      n_samples <- length(unique(stats$sample))
+      
+      cat(sprintf("Updated: %d populations across %d samples\n", 
+                  n_pops, n_samples))
+      
+    }, error = function(e) {
+      cat("Error during recomputation:", e$message, "\n")
+    })
+  }
+  
+  invisible(gs)
+}
+
+# PLOT GATING TREE
+
+plot_gating_tree <- function(gs) {
+  cat("\n=== Plotting Gating Tree ===\n")
+  
+  tryCatch({
+    
+    # Get the gating hierarchy
+    gh <- gs[[1]]
+    
+    # Plot the tree
+    plot(gh)
+    
+    cat("Gating tree displayed.\n")
+    
+    # Option to save
+    save_tree <- readline(prompt = "\nSave tree to file? (y/n): ")
+    
+    if(tolower(save_tree) == "y") {
+      filename <- readline(prompt = "Enter filename (without extension): ")
+      
+      if(filename != "") {
+        pdf(paste0(filename, "_gating_tree.pdf"), width = 12, height = 8)
+        plot(gh)
+        dev.off()
+        cat(sprintf("Tree saved to %s_gating_tree.pdf\n", filename))
+      }
+    }
+    
+  }, error = function(e) {
+    cat("Error plotting tree:", e$message, "\n")
+    
+    # Alternative: text representation
+    cat("\nShowing text representation instead:\n")
+    view_gating_structure(gs)
+  })
+  
+  invisible(NULL)
+}
+
+# SAVE GATINGSET
+
+save_gatingset_interactive <- function(gs) {
+  cat("\n=== Save GatingSet ===\n")
+  
+  save_path <- readline(prompt = "Enter save path (directory): ")
+  
+  if(save_path == "") {
+    save_path <- paste0("gatingset_", format(Sys.Date(), "%Y%m%d"))
+  }
+  
+  cat(sprintf("Saving to: %s\n", save_path))
+  
+  tryCatch({
+    
+    flowWorkspace::save_gs(gs, path = save_path)
+    cat("GatingSet saved successfully!\n")
+    cat(sprintf("To reload, use: gs <- flowWorkspace::load_gs('%s')\n", save_path))
+    
+  }, error = function(e) {
+    cat("Error saving GatingSet:", e$message, "\n")
+  })
+  
+  invisible(NULL)
+}
+
+# EXAMPLE USAGE
+
+# To use this system:
+# 1. Load your GatingSet
+# gs <- flowWorkspace::load_gs("path/to/your/gatingset")
+
+# 2. Launch the interactive manager
+# gs <- manage_gates_interactive(gs)
+
+# The function returns the modified GatingSet, preserving all changes
+# Original gates remain intact, with new gates properly added and recomputed
+
+cat("\n=== Interactive Gate Management System Loaded ===\n")
+cat("To use: gs <- manage_gates_interactive(your_gatingset)\n")
+cat("This will preserve all original gates while allowing additions.\n\n")
+
+
+# ============================================================================
+# SAVE GATINGSET
+# ============================================================================
+
+save_gatingset_interactive <- function(gs) {
+  cat("\n=== Save GatingSet ===\n")
+  
+  save_path <- readline(prompt = "Enter save path (directory): ")
+  
+  if(save_path == "") {
+    save_path <- paste0("gatingset_", format(Sys.Date(), "%Y%m%d"))
+  }
+  
+  cat(sprintf("Saving to: %s\n", save_path))
+  
+  tryCatch({
+    
+    flowWorkspace::save_gs(gs, path = save_path)
+    cat("GatingSet saved successfully!\n")
+    cat(sprintf("To reload, use: gs <- flowWorkspace::load_gs('%s')\n", save_path))
+    
+  }, error = function(e) {
+    cat("Error saving GatingSet:", e$message, "\n")
+  })
+  
+  invisible(NULL)
+}
+
+# ============================================================================
+# EXAMPLE USAGE
+# ============================================================================
+
+# To use this system:
+# 1. Load your GatingSet
+# gs <- flowWorkspace::load_gs("path/to/your/gatingset")
+
+# 2. Launch the interactive manager
+# gs <- manage_gates_interactive(gs)
+
+# The function returns the modified GatingSet, preserving all changes
+# Original gates remain intact, with new gates properly added and recomputed
+
+cat("\n=== Interactive Gate Management System Loaded ===\n")
+cat("To use: gs <- manage_gates_interactive(your_gatingset)\n")
+cat("This will preserve all original gates while allowing additions.\n\n")
+
 
 # ============================================================================
 # FUNCTIONS TO ADD METADATA TO EXISTING GATING SET
@@ -5836,19 +6802,70 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method, aggregat
   
   # Create cell function that shows both values and significance
   cell_function <- NULL
-  if (show_cell_values || !is.null(sig_matrix)) {
+  if (show_cell_values || (!is.null(stats_results) && !is.null(stats_config) && 
+                           stats_config$sig_display != "none")) {
+    
+    # Build lookup: for each tissue, which column index is the FIRST congenic?
+    # And what's the significance for each marker in that tissue?
+    tissue_first_col <- base::list()
+    tissue_sig <- base::list()
+    
+    for (tissue in unique_tissues) {
+      tissue_cols <- tissue_groups[[tissue]]
+      # Find column indices for this tissue
+      col_indices <- base::which(base::colnames(heatmap_matrix) %in% tissue_cols)
+      if (base::length(col_indices) >= 2) {
+        tissue_first_col[[tissue]] <- base::min(col_indices)
+      }
+      
+      # Get significance for this tissue
+      if (!is.null(stats_results) && !is.null(stats_results$summary)) {
+        tissue_summary <- stats_results$summary %>%
+          dplyr::filter(tissue == !!tissue)
+        
+        sig_vec <- base::rep("", base::nrow(heatmap_matrix))
+        base::names(sig_vec) <- base::rownames(heatmap_matrix)
+        
+        for (row_i in base::seq_len(base::nrow(tissue_summary))) {
+          marker <- tissue_summary$marker[row_i]
+          if (marker %in% base::names(sig_vec) && tissue_summary$significant[row_i]) {
+            sig_text <- base::switch(stats_config$sig_display,
+                                     "p_values" = tissue_summary$p_formatted[row_i],
+                                     "stars" = tissue_summary$stars[row_i],
+                                     "both" = base::paste(tissue_summary$p_formatted[row_i], 
+                                                          tissue_summary$stars[row_i]),
+                                     "")
+            sig_vec[marker] <- sig_text
+          }
+        }
+        tissue_sig[[tissue]] <- sig_vec
+      }
+    }
+    
     cell_function <- function(j, i, x, y, width, height, fill) {
       # Show cell values if requested
       if (show_cell_values && !is.na(scaled_result$matrix[i, j])) {
         grid::grid.text(base::sprintf("%.2f", scaled_result$matrix[i, j]), 
-                        x, y - grid::unit(2, "mm"), gp = grid::gpar(fontsize = 8))
+                        x, y, gp = grid::gpar(fontsize = 7))
       }
       
-      # Show significance annotations
-      if (!is.null(sig_matrix) && sig_matrix[i, j] != "") {
-        y_pos <- if (show_cell_values) y + grid::unit(2, "mm") else y
-        grid::grid.text(sig_matrix[i, j], 
-                        x, y_pos, gp = grid::gpar(fontsize = 7, fontface = "bold", col = "black"))
+      # Show significance centered between paired columns
+      if (!is.null(stats_config) && stats_config$sig_display != "none") {
+        for (tissue in base::names(tissue_first_col)) {
+          if (j == tissue_first_col[[tissue]]) {
+            marker_name <- base::rownames(heatmap_matrix)[i]
+            if (!is.null(tissue_sig[[tissue]]) && 
+                marker_name %in% base::names(tissue_sig[[tissue]]) &&
+                tissue_sig[[tissue]][marker_name] != "") {
+              
+              # Center between first and second column of this tissue block
+              x_center <- x + width * 0.5
+              grid::grid.text(tissue_sig[[tissue]][marker_name], 
+                              x_center, y, 
+                              gp = grid::gpar(fontsize = 8, fontface = "bold", col = "black"))
+            }
+          }
+        }
       }
     }
   }
@@ -5892,8 +6909,9 @@ create_single_heatmap_with_stats <- function(heatmap_matrix, title, scale_method
   scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, legend_suffix, 
                                         log_base, percentile_range)
   
-  # Create cell-level significance annotations if available
-  sig_matrix <- NULL
+  # ===== GET SIGNIFICANCE VALUES FOR THIS TISSUE =====
+  sig_values <- NULL
+  
   if (!is.null(stats_results) && !is.null(stats_config) && 
       stats_config$sig_display != "none") {
     
@@ -5901,35 +6919,37 @@ create_single_heatmap_with_stats <- function(heatmap_matrix, title, scale_method
                                                          title, stats_config)
     
     if (!is.null(sig_annotations) && base::length(sig_annotations) > 0) {
-      # Create a matrix for cell annotations (for separate heatmaps, we show significance on all cells for significant markers)
-      sig_matrix <- base::matrix("", nrow = base::nrow(heatmap_matrix), ncol = base::ncol(heatmap_matrix))
-      base::rownames(sig_matrix) <- base::rownames(heatmap_matrix)
-      base::colnames(sig_matrix) <- base::colnames(heatmap_matrix)
+      sig_values <- base::rep("", base::nrow(heatmap_matrix))
+      base::names(sig_values) <- base::rownames(heatmap_matrix)
       
-      # Fill in significance for markers that have significant results
       for (marker in base::names(sig_annotations)) {
-        if (marker %in% base::rownames(sig_matrix) && sig_annotations[marker] != "") {
-          sig_matrix[marker, ] <- sig_annotations[marker]
+        if (marker %in% base::names(sig_values) && sig_annotations[marker] != "") {
+          sig_values[marker] <- sig_annotations[marker]
         }
       }
     }
   }
   
-  # Create cell function that shows both values and significance
+  # ===== CELL FUNCTION WITH CENTERED SIGNIFICANCE =====
   cell_function <- NULL
-  if (show_cell_values || !is.null(sig_matrix)) {
+  if (show_cell_values || !is.null(sig_values)) {
+    
+    n_cols <- base::ncol(heatmap_matrix)
+    
     cell_function <- function(j, i, x, y, width, height, fill) {
       # Show cell values if requested
       if (show_cell_values && !is.na(scaled_result$matrix[i, j])) {
         grid::grid.text(base::sprintf("%.2f", scaled_result$matrix[i, j]), 
-                        x, y - grid::unit(2, "mm"), gp = grid::gpar(fontsize = 8))
+                        x, y, gp = grid::gpar(fontsize = 8))
       }
       
-      # Show significance annotations
-      if (!is.null(sig_matrix) && sig_matrix[i, j] != "") {
-        y_pos <- if (show_cell_values) y + grid::unit(2, "mm") else y
-        grid::grid.text(sig_matrix[i, j], 
-                        x, y_pos, gp = grid::gpar(fontsize = 8, fontface = "bold", col = "black"))
+      # Show significance CENTERED between columns (only draw once, on first column)
+      if (!is.null(sig_values) && j == 1 && n_cols == 2 && sig_values[i] != "") {
+        # Center between column 1 and column 2
+        x_center <- x + width * 0.5
+        grid::grid.text(sig_values[i], 
+                        x_center, y, 
+                        gp = grid::gpar(fontsize = 9, fontface = "bold", col = "black"))
       }
     }
   }
@@ -7183,7 +8203,7 @@ create_paired_comparison_plots_enhanced <- function(data,
 
 
 # ============================================================================
-# ENHANCED INTERACTIVE UMAP ANALYSIS FOR FLOW CYTOMETRY DATA
+# ENHANCED INTERACTIVE UMAP ANALYSIS FOR FLOW CYTOMETRY DATA ----
 # ============================================================================
 
 get_all_populations <- function(gs) {
@@ -7621,15 +8641,19 @@ select_markers_for_umap <- function(gs) {
   exclude_regex <- paste0("(?i)", paste(exclude_patterns, collapse = "|"))
   
   potential_markers <- lookup %>%
-    dplyr::filter(!str_detect(colname, exclude_regex)) %>%
-    dplyr::filter(!str_detect(marker, exclude_regex))
+    dplyr::filter(!stringr::str_detect(colname, exclude_regex)) %>%
+    dplyr::filter(!stringr::str_detect(marker, exclude_regex))
   
   comp_channels <- potential_markers %>%
-    dplyr::filter(str_detect(colname, "(?i)comp")) %>%
-    pull(colname)
+    dplyr::filter(stringr::str_detect(colname, "(?i)comp")) %>%
+    dplyr::pull(colname)
   
   while(TRUE) {
-    cat("\n=== Marker Selection for UMAP Analysis ===\n")
+    cat("\n=== Marker Selection for UMAP Calculation ===\n")
+    cat("NOTE: ALL markers will be retained in the data.\n")
+    cat("This selection determines which markers are used to CALCULATE the UMAP.\n")
+    cat("You can overlay any marker on the UMAP later, even if not used for calculation.\n\n")
+    
     cat("Available markers:", nrow(potential_markers), "\n")
     if(length(comp_channels) > 0) {
       cat("Compensated channels found:", length(comp_channels), "\n")
@@ -7638,7 +8662,7 @@ select_markers_for_umap <- function(gs) {
     cat("\nRecommendation: Use compensated channels for best results\n")
     
     cat("\nOptions:\n")
-    cat("1. Select specific markers/channels\n")
+    cat("1. Select specific markers/channels for UMAP calculation\n")
     cat("2. Use all compensated channels (recommended)\n")
     cat("3. Use all available channels\n")
     cat("4. Preview marker distributions\n")
@@ -7650,7 +8674,7 @@ select_markers_for_umap <- function(gs) {
            "1" = {
              choices <- paste0(potential_markers$colname, " :: ", potential_markers$marker)
              sel <- select.list(choices, multiple = TRUE, 
-                                title = "Select markers for UMAP (Cancel to go back)")
+                                title = "Select markers for UMAP CALCULATION (all markers will be retained)")
              
              if(length(sel) == 0) {
                cat("No markers selected.\n")
@@ -7666,19 +8690,20 @@ select_markers_for_umap <- function(gs) {
                next
              }
              
-             selected_channels <- map_chr(sel, ~str_split(.x, " :: ")[[1]][1])
-             selected_markers <- map_chr(sel, ~str_split(.x, " :: ")[[1]][2])
+             selected_channels <- purrr::map_chr(sel, ~stringr::str_split(.x, " :: ")[[1]][1])
+             selected_markers <- purrr::map_chr(sel, ~stringr::str_split(.x, " :: ")[[1]][2])
              
-             cat(sprintf("Selected %d markers:\n", length(selected_channels)))
-             iwalk(selected_channels, ~cat(sprintf("  %d. %s (%s)\n", .y, 
-                                                   selected_markers[.y], .x)))
+             cat(sprintf("Selected %d markers for UMAP calculation:\n", length(selected_channels)))
+             purrr::iwalk(selected_channels, ~cat(sprintf("  %d. %s (%s)\n", .y, 
+                                                          selected_markers[.y], .x)))
              
              confirm <- readline("Confirm selection? (y/n): ")
              if(tolower(confirm) == "y") {
                return(list(
                  channels = selected_channels,
                  markers = selected_markers,
-                 lookup = potential_markers %>% dplyr::filter(colname %in% selected_channels)
+                 lookup = potential_markers %>% dplyr::filter(colname %in% selected_channels),
+                 all_markers_lookup = potential_markers  # Return ALL markers
                ))
              }
            },
@@ -7691,25 +8716,26 @@ select_markers_for_umap <- function(gs) {
              
              selected_lookup <- potential_markers %>% dplyr::filter(colname %in% comp_channels)
              
-             cat(sprintf("Using %d compensated channels:\n", nrow(selected_lookup)))
-             iwalk(selected_lookup$colname, ~cat(sprintf("  %d. %s (%s)\n", .y, 
-                                                         selected_lookup$marker[.y], .x)))
+             cat(sprintf("Using %d compensated channels for UMAP calculation:\n", nrow(selected_lookup)))
+             purrr::iwalk(selected_lookup$colname, ~cat(sprintf("  %d. %s (%s)\n", .y, 
+                                                                selected_lookup$marker[.y], .x)))
              
              confirm <- readline("Confirm compensated channels? (y/n): ")
              if(tolower(confirm) == "y") {
                return(list(
                  channels = selected_lookup$colname,
                  markers = selected_lookup$marker,
-                 lookup = selected_lookup
+                 lookup = selected_lookup,
+                 all_markers_lookup = potential_markers
                ))
              }
            },
            
            "3" = {
-             cat(sprintf("Using all %d available channels:\n", nrow(potential_markers)))
+             cat(sprintf("Using all %d available channels for UMAP calculation:\n", nrow(potential_markers)))
              cat("First 10 markers:\n")
-             iwalk(head(potential_markers$marker, 10), 
-                   ~cat(sprintf("  %d. %s\n", .y, .x)))
+             purrr::iwalk(head(potential_markers$marker, 10), 
+                          ~cat(sprintf("  %d. %s\n", .y, .x)))
              if(nrow(potential_markers) > 10) {
                cat(sprintf("  ... and %d more\n", nrow(potential_markers) - 10))
              }
@@ -7719,7 +8745,8 @@ select_markers_for_umap <- function(gs) {
                return(list(
                  channels = potential_markers$colname,
                  markers = potential_markers$marker,
-                 lookup = potential_markers
+                 lookup = potential_markers,
+                 all_markers_lookup = potential_markers
                ))
              }
            },
@@ -7731,9 +8758,9 @@ select_markers_for_umap <- function(gs) {
              
              cat("\nSample of available markers:\n")
              sample_markers <- potential_markers %>% 
-               slice_sample(n = min(20, nrow(potential_markers)))
-             iwalk(sample_markers$marker, 
-                   ~cat(sprintf("  %s (%s)\n", .x, sample_markers$colname[.y])))
+               dplyr::slice_sample(n = min(20, nrow(potential_markers)))
+             purrr::iwalk(sample_markers$marker, 
+                          ~cat(sprintf("  %s (%s)\n", .x, sample_markers$colname[.y])))
              
              cat("\nPress Enter to continue...")
              readline()
@@ -7797,6 +8824,79 @@ get_population_event_counts <- function(gs, node, selected_samples = NULL) {
   return(event_summary)
 }
 
+
+# Helper function to determine which sub-population (CD45.1, CD45.1.2, CD45.2) each cell belongs to
+
+determine_cell_congenics <- function(gh, parent_node) {
+  
+  # Get all paths in the gating hierarchy
+  all_paths <- flowWorkspace::gs_get_pop_paths(gh)
+  
+  # Find DIRECT children only (one level down from parent)
+  parent_escaped <- gsub("([.()])", "\\\\\\1", parent_node)
+  child_pattern <- paste0("^", parent_escaped, "/CD45\\.[0-9.]+$")
+  
+  child_nodes <- all_paths[grepl(child_pattern, all_paths)]
+  
+  # Debug: show what we found
+  cat("    Found", length(child_nodes), "direct CD45 child populations\n")
+  if(length(child_nodes) > 0) {
+    cat("    Populations:", paste(basename(child_nodes), collapse = ", "), "\n")
+  }
+  
+  if(length(child_nodes) == 0) {
+    # No CD45 sub-populations, return parent node name
+    parent_data <- flowWorkspace::gh_pop_get_data(gh, parent_node)
+    return(rep(basename(parent_node), nrow(parent_data)))
+  }
+  
+  # Get indices of parent population (relative to root)
+  parent_indices_bool <- flowWorkspace::gh_pop_get_indices(gh, parent_node)
+  parent_indices <- which(parent_indices_bool)
+  
+  # Get data from parent
+  parent_data <- flowWorkspace::gh_pop_get_data(gh, parent_node)
+  n_cells <- nrow(parent_data)
+  
+  # Initialize congenics vector
+  congenics <- rep("Unassigned", n_cells)
+  
+  cat("    Parent has", n_cells, "cells\n")
+  
+  # For each child node, get indices and assign congenics
+  for(child_node in child_nodes) {
+    tryCatch({
+      # Get boolean indices for cells in this population (relative to root)
+      child_indices_bool <- flowWorkspace::gh_pop_get_indices(gh, child_node)
+      child_indices <- which(child_indices_bool)
+      
+      # Find which parent cells are in this child population
+      # This maps child indices (relative to root) to parent indices (1 to n_cells)
+      parent_cell_positions <- match(child_indices, parent_indices)
+      parent_cell_positions <- parent_cell_positions[!is.na(parent_cell_positions)]
+      
+      # Extract congenics from node name
+      node_name <- basename(child_node)
+      
+      # Assign congenics to matching cells
+      congenics[parent_cell_positions] <- node_name
+      
+      cat("    Assigned", length(parent_cell_positions), "cells to", node_name, "\n")
+      
+    }, error = function(e) {
+      cat("    Warning: Could not get indices for", child_node, ":", e$message, "\n")
+    })
+  }
+  
+  # Report how many cells are still unassigned
+  n_unassigned <- sum(congenics == "Unassigned")
+  if(n_unassigned > 0) {
+    cat("    WARNING:", n_unassigned, "cells remain unassigned\n")
+  }
+  
+  return(congenics)
+}
+
 extract_single_cell_data <- function(gs, node, selected_markers, 
                                      selected_samples = NULL,
                                      keywords = c("pairing_factor", "tissue_factor"),
@@ -7849,24 +8949,40 @@ extract_single_cell_data <- function(gs, node, selected_markers,
       
       expr_data <- if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
       
-      available_channels <- intersect(selected_markers$channels, colnames(expr_data))
+      all_available_channels <- intersect(selected_markers$all_markers_lookup$colname, colnames(expr_data))
       
-      if(length(available_channels) == 0) {
-        cat("  No selected channels found, skipping\n")
-        return(tibble())
+      if(length(all_available_channels) == 0) {
+        cat("  No channels found, skipping\n")
+        return(tibble::tibble())
       }
       
-      cell_data <- as_tibble(expr_data[, available_channels, drop = FALSE])
+      # Extract ALL markers, not just those selected for UMAP
+      cell_data <- tibble::as_tibble(expr_data[, all_available_channels, drop = FALSE])
+      
+      cat("  Extracted", length(all_available_channels), "marker channels\n")
+      
+      # Determine congenics for each cell based on sub-population membership
+      tryCatch({
+        cell_congenics <- determine_cell_congenics(gh, node)
+        cat("  Extracted congenics information for cells\n")
+      }, error = function(e) {
+        cat("  Could not determine congenics, using node name\n")
+        cell_congenics <- rep(basename(node), nrow(cell_data))
+      })
       
       if(nrow(cell_data) > max_cells_per_sample) {
-        cell_data <- slice_sample(cell_data, n = max_cells_per_sample)
+        # Subsample but keep congenics aligned
+        subsample_indices <- sample(nrow(cell_data), max_cells_per_sample)
+        cell_data <- cell_data[subsample_indices, ]
+        cell_congenics <- cell_congenics[subsample_indices]
         cat("  Subsampled to", max_cells_per_sample, "cells\n")
       }
       
       cell_data <- cell_data %>%
-        mutate(
+        dplyr::mutate(
           Sample = sample_name,
           CellID = paste0(sample_name, "_", row_number()),
+          congenics = cell_congenics,
           .before = 1
         )
       
@@ -7883,9 +8999,11 @@ extract_single_cell_data <- function(gs, node, selected_markers,
     stop("No single-cell data extracted. Check node selection and markers.")
   }
   
-  marker_lookup <- selected_markers$lookup %>%
-    select(colname, marker) %>%
-    deframe()
+  marker_lookup <- selected_markers$all_markers_lookup %>%
+    dplyr::select(colname, marker) %>%
+    tibble::deframe()
+  
+  cat("Renaming", length(marker_lookup), "channels to marker names\n")
   
   for(channel in names(marker_lookup)) {
     if(channel %in% names(all_data)) {
@@ -7915,9 +9033,14 @@ compute_umap_embedding <- function(single_cell_data,
                                    n_neighbors = 15, 
                                    min_dist = 0.1, 
                                    n_components = 2,
-                                   transform_data = "asinh") {
+                                   transform_data = "asinh",
+                                   markers_for_umap = NULL) {
   
-  cat("Computing UMAP embedding...\n")
+  cat("Computing UMAP embedding using uwot package...\n")
+  
+  if (!requireNamespace("uwot", quietly = TRUE)) {
+    stop("uwot package required. Install with: install.packages('uwot')")
+  }
   
   metadata_cols <- c("Sample", "CellID")
   if(!is.null(single_cell_data$sample_metadata)) {
@@ -7925,13 +9048,29 @@ compute_umap_embedding <- function(single_cell_data,
   }
   
   all_cols <- names(single_cell_data$data)
-  numeric_cols <- all_cols[map_lgl(all_cols, ~is.numeric(single_cell_data$data[[.x]]))]
-  marker_cols <- setdiff(numeric_cols, metadata_cols)
+  numeric_cols <- all_cols[purrr::map_lgl(all_cols, ~is.numeric(single_cell_data$data[[.x]]))]
+  all_marker_cols <- setdiff(numeric_cols, metadata_cols)
   
-  cat("Using", length(marker_cols), "markers:", paste(marker_cols, collapse = ", "), "\n")
+  # Determine which markers to use for UMAP computation
+  if (is.null(markers_for_umap)) {
+    markers_for_umap <- all_marker_cols
+  }
   
+  cat("Total markers in dataset:", length(all_marker_cols), "\n")
+  cat("Markers used for UMAP calculation:", length(markers_for_umap), "\n")
+  cat("UMAP markers:", paste(markers_for_umap, collapse = ", "), "\n")
+  
+  if (length(setdiff(all_marker_cols, markers_for_umap)) > 0) {
+    unused_markers <- setdiff(all_marker_cols, markers_for_umap)
+    cat("Markers retained but NOT used for UMAP:", length(unused_markers), "\n")
+    cat("Unused markers:", paste(head(unused_markers, 10), collapse = ", "))
+    if (length(unused_markers) > 10) cat(", ...")
+    cat("\n")
+  }
+  
+  # Extract matrix for UMAP computation (only selected markers)
   umap_matrix <- single_cell_data$data %>%
-    select(all_of(marker_cols)) %>%
+    dplyr::select(all_of(markers_for_umap)) %>%
     as.matrix()
   
   cat("Data range before transformation: [", min(umap_matrix, na.rm = TRUE), ", ", 
@@ -7942,6 +9081,7 @@ compute_umap_embedding <- function(single_cell_data,
     cat("Warning:", n_na, "NA values found in data. These will be handled.\n")
   }
   
+  # Apply transformation
   if(transform_data == "asinh") {
     umap_matrix <- asinh(umap_matrix / 5)
     cat("Applied asinh transformation (cofactor = 5)\n")
@@ -7991,7 +9131,7 @@ compute_umap_embedding <- function(single_cell_data,
         if(is.na(median_val)) median_val <- 0
         
         umap_matrix[is.nan(col_data) | is.infinite(col_data), i] <- median_val
-        cat("Replaced problematic values in", marker_cols[i], "with median:", median_val, "\n")
+        cat("Replaced problematic values in", markers_for_umap[i], "with median:", median_val, "\n")
       }
     }
   }
@@ -8005,28 +9145,36 @@ compute_umap_embedding <- function(single_cell_data,
         if(is.na(median_val)) median_val <- 0
         
         umap_matrix[is.na(col_data), i] <- median_val
-        cat("Replaced NA values in", marker_cols[i], "with median:", median_val, "\n")
+        cat("Replaced NA values in", markers_for_umap[i], "with median:", median_val, "\n")
       }
     }
   }
   
   cat("Data range after transformation: [", min(umap_matrix), ", ", max(umap_matrix), "]\n")
   
-  # UMAP configuration
-  umap_config <- umap.defaults
-  umap_config$n_neighbors <- n_neighbors
-  umap_config$min_dist <- min_dist
-  umap_config$n_components <- n_components
-  umap_config$random_state <- 42
+  # Run UMAP using uwot
+  cat("Running UMAP with uwot package:\n")
+  cat("  n_neighbors =", n_neighbors, "\n")
+  cat("  min_dist =", min_dist, "\n")
+  cat("  n_components =", n_components, "\n")
+  cat("  seed = 7777777\n")
   
-  # Compute UMAP
-  cat("Running UMAP with", n_neighbors, "neighbors and", min_dist, "min_dist...\n")
+  # Set seed for reproducibility
+  set.seed(7777777)
   
   tryCatch({
-    umap_result <- umap(umap_matrix, config = umap_config)
+    umap_result <- uwot::umap(
+      X = umap_matrix,
+      n_neighbors = n_neighbors,
+      min_dist = min_dist,
+      n_components = n_components,
+      metric = "euclidean",
+      ret_model = FALSE,
+      verbose = TRUE
+    )
   }, error = function(e) {
     cat("UMAP failed with error:", e$message, "\n")
-    cat("This might be due to data scaling issues. Trying with scaled data...\n")
+    cat("Trying with scaled data...\n")
     
     # Try with scaled data as fallback
     umap_matrix_scaled <- scale(umap_matrix)
@@ -8036,31 +9184,52 @@ compute_umap_embedding <- function(single_cell_data,
       umap_matrix_scaled[is.nan(umap_matrix_scaled)] <- 0
     }
     
-    umap_result <- umap(umap_matrix_scaled, config = umap_config)
+    # Set seed again for fallback
+    set.seed(7777777)
+    
+    umap_result <- uwot::umap(
+      X = umap_matrix_scaled,
+      n_neighbors = n_neighbors,
+      min_dist = min_dist,
+      n_components = n_components,
+      metric = "euclidean",
+      ret_model = FALSE,
+      verbose = TRUE
+    )
     cat("UMAP successful with scaled data\n")
     return(umap_result)
   }) -> umap_result
   
-  # Add UMAP coordinates to original data
+  # Add UMAP coordinates to original data (keeping ALL markers)
   umap_data <- single_cell_data$data %>%
-    mutate(
-      UMAP1 = umap_result$layout[,1],
-      UMAP2 = umap_result$layout[,2]
+    dplyr::mutate(
+      UMAP1 = umap_result[, 1],
+      UMAP2 = umap_result[, 2]
     )
   
   if(n_components > 2) {
     for(i in 3:n_components) {
-      umap_data[[paste0("UMAP", i)]] <- umap_result$layout[,i]
+      umap_data[[paste0("UMAP", i)]] <- umap_result[, i]
     }
   }
   
   cat("UMAP computation complete!\n")
+  cat("Final dataset contains:\n")
+  cat("  - UMAP coordinates:", n_components, "dimensions\n")
+  cat("  - Markers used for UMAP:", length(markers_for_umap), "\n")
+  cat("  - Total markers retained:", length(all_marker_cols), "\n")
   
   return(list(
     data = umap_data,
     embedding = umap_result,
-    marker_names = marker_cols,
-    config = umap_config,
+    marker_names = all_marker_cols,  # ALL markers
+    markers_used_for_umap = markers_for_umap,  # Only markers used for UMAP
+    markers_not_used = setdiff(all_marker_cols, markers_for_umap),
+    config = list(
+      n_neighbors = n_neighbors,
+      min_dist = min_dist,
+      n_components = n_components
+    ),
     transformation = transform_data
   ))
 }
@@ -8169,15 +9338,20 @@ select_from_menu <- function(options, title, allow_multiple = FALSE, show_previe
   }
 }
 
-# Parse selection input (handles ranges, comma-separated values)
+# Parse selection input (handles ranges, comma-separated, and space-separated values)
 parse_selection <- function(input, max_value) {
   tryCatch({
-    parts <- str_trim(str_split(input, ",")[[1]])
+    # Replace commas with spaces, then split by whitespace
+    input_cleaned <- stringr::str_replace_all(input, ",", " ")
+    parts <- stringr::str_trim(stringr::str_split(input_cleaned, "\\s+")[[1]])
+    parts <- parts[parts != ""]  # Remove empty strings
+    
     indices <- numeric(0)
     
     for (part in parts) {
-      if (str_detect(part, "-")) {
-        range_parts <- as.numeric(str_split(part, "-")[[1]])
+      if (stringr::str_detect(part, "-")) {
+        # Handle ranges like "5-8"
+        range_parts <- as.numeric(stringr::str_split(part, "-")[[1]])
         if (length(range_parts) == 2 && all(!is.na(range_parts))) {
           start_idx <- range_parts[1]
           end_idx <- range_parts[2]
@@ -8185,7 +9359,8 @@ parse_selection <- function(input, max_value) {
             indices <- c(indices, start_idx:end_idx)
           }
         }
-      } else if (str_detect(part, "^\\d+$")) {
+      } else if (stringr::str_detect(part, "^\\d+$")) {
+        # Handle single numbers
         idx <- as.numeric(part)
         if (!is.na(idx) && idx >= 1 && idx <= max_value) {
           indices <- c(indices, idx)
@@ -8845,6 +10020,64 @@ interactive_visualization_menu <- function() {
 # FIXED EXTERNAL METADATA IMPORT WITH PROPER DUPLICATE HANDLING
 # ============================================================================
 
+# Helper function to convert long-format MFI data to sample-level metadata
+aggregate_to_sample_level <- function(metadata_df, sample_col) {
+  
+  cat("\n=== Aggregating to Sample-Level Metadata ===\n")
+  
+  # Check if this looks like long-format data (multiple rows per sample)
+  sample_counts <- table(metadata_df[[sample_col]])
+  max_rows_per_sample <- max(sample_counts)
+  
+  if (max_rows_per_sample > 1) {
+    cat("Detected long-format data:", max_rows_per_sample, "rows per sample\n")
+    cat("Aggregating to sample level...\n")
+    
+    # Identify metadata columns (non-numeric, non-marker columns)
+    numeric_cols <- names(metadata_df)[purrr::map_lgl(metadata_df, is.numeric)]
+    
+    # Exclude MFI/expression columns and marker identifiers
+    exclude_patterns <- c("MFI", "colname", "marker", "^Comp-", "Node")
+    metadata_cols <- setdiff(
+      names(metadata_df), 
+      c(numeric_cols, sample_col)
+    )
+    
+    # Further filter to exclude marker-related columns
+    metadata_cols <- metadata_cols[!sapply(metadata_cols, function(col) {
+      any(sapply(exclude_patterns, function(pattern) {
+        grepl(pattern, col, ignore.case = TRUE)
+      }))
+    })]
+    
+    cat("Identified metadata columns:", paste(metadata_cols, collapse = ", "), "\n")
+    
+    # Aggregate to sample level - take first value for each metadata column
+    sample_level_metadata <- metadata_df %>%
+      dplyr::select(all_of(c(sample_col, metadata_cols))) %>%
+      dplyr::group_by(.data[[sample_col]]) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup()
+    
+    cat("Aggregated from", nrow(metadata_df), "rows to", 
+        nrow(sample_level_metadata), "unique samples\n")
+    
+    # Show sample of aggregated data
+    cat("\nSample-level metadata preview:\n")
+    print(head(sample_level_metadata, 5))
+    
+    return(sample_level_metadata)
+    
+  } else {
+    cat("Data already at sample level (one row per sample)\n")
+    return(metadata_df)
+  }
+}
+
+# ============================================================================
+# ROBUST EXTERNAL METADATA IMPORT (OPTIONAL)
+# ============================================================================
+
 import_external_metadata <- function(gs) {
   cat("\n=== External Metadata Import ===\n")
   cat("This function will help you import and merge external metadata\n")
@@ -8868,8 +10101,8 @@ import_external_metadata <- function(gs) {
       file_path <- readline("Enter CSV file path: ")
       if(file.exists(file_path)) {
         tryCatch({
-          metadata <- read_csv(file_path, show_col_types = FALSE)
-          metadata <- as_tibble(metadata)
+          metadata <- readr::read_csv(file_path, show_col_types = FALSE)
+          metadata <- tibble::as_tibble(metadata)
           cat("Successfully loaded CSV with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
         }, error = function(e) {
           cat("Error loading CSV:", e$message, "\n")
@@ -8886,7 +10119,7 @@ import_external_metadata <- function(gs) {
       objects_list <- ls(envir = .GlobalEnv)
       data_objects <- objects_list[sapply(objects_list, function(x) {
         obj <- get(x, envir = .GlobalEnv)
-        is.data.frame(obj) || is_tibble(obj)
+        is.data.frame(obj) || tibble::is_tibble(obj)
       })]
       
       if(length(data_objects) == 0) {
@@ -8895,7 +10128,7 @@ import_external_metadata <- function(gs) {
       }
       
       cat("Data frame objects:\n")
-      iwalk(data_objects, ~cat(sprintf("%d. %s\n", .y, .x)))
+      purrr::iwalk(data_objects, ~cat(sprintf("%d. %s\n", .y, .x)))
       
       obj_choice <- readline("Enter object name or number: ")
       
@@ -8915,7 +10148,7 @@ import_external_metadata <- function(gs) {
       }
       
       metadata_obj <- get(selected_obj, envir = .GlobalEnv)
-      metadata <- as_tibble(metadata_obj)
+      metadata <- tibble::as_tibble(metadata_obj)
       cat("Using object '", selected_obj, "' with", nrow(metadata), "rows and", ncol(metadata), "columns\n")
       
     } else if(choice == "3") {
@@ -8930,7 +10163,7 @@ import_external_metadata <- function(gs) {
       # Ensure metadata is a proper data frame/tibble
       if(!is.data.frame(metadata)) {
         tryCatch({
-          metadata <- as_tibble(metadata)
+          metadata <- tibble::as_tibble(metadata)
         }, error = function(e) {
           cat("Error converting to tibble:", e$message, "\n")
           next
@@ -8944,7 +10177,7 @@ import_external_metadata <- function(gs) {
       # Sample ID Column Selection
       cat("Sample ID Column Selection:\n")
       cat("Available columns:\n")
-      iwalk(names(metadata), ~cat(sprintf("%d. %s\n", .y, .x)))
+      purrr::iwalk(names(metadata), ~cat(sprintf("%d. %s\n", .y, .x)))
       
       sample_col_choice <- readline("Enter column number/name for Sample ID: ")
       
@@ -8963,8 +10196,10 @@ import_external_metadata <- function(gs) {
         next
       }
       
-      # FIXED: Removed duplicate checking logic
-      # In flow cytometry, having the same sample metadata repeated is expected and normal
+      # CRITICAL: Aggregate to sample level if needed (handles long-format MFI data)
+      metadata <- aggregate_to_sample_level(metadata, sample_col)
+      
+      # Get sample names after aggregation
       metadata_samples <- metadata[[sample_col]]
       
       # Simple validation: check for data quality issues
@@ -8985,37 +10220,20 @@ import_external_metadata <- function(gs) {
         cat("Warning:", empty_samples, "empty sample names found\n")
       }
       
-      # If there are repeated sample names with identical metadata, deduplicate to sample level
-      unique_samples <- unique(metadata_samples)
-      if(length(unique_samples) < length(metadata_samples)) {
-        cat("Note: Found repeated sample names in metadata (", length(metadata_samples), 
-            "rows ->", length(unique_samples), "unique samples)\n")
-        cat("This is normal for single-cell data. Deduplicating to sample-level metadata.\n")
-        
-        # Convert to standard data frame to avoid Bioconductor S4 object issues
-        tryCatch({
-          # Force conversion to standard data types
-          metadata <- as.data.frame(metadata)
-          metadata <- as_tibble(metadata)
-          
-          # Keep first occurrence of each sample using base R approach to avoid slice() issues
-          sample_indices <- match(unique_samples, metadata[[sample_col]])
-          metadata <- metadata[sample_indices, ]
-          
-        }, error = function(e) {
-          cat("Error during deduplication:", e$message, "\n")
-          cat("Attempting alternative deduplication method...\n")
-          
-          # Alternative approach using base R
-          unique_rows <- !duplicated(metadata[[sample_col]])
-          metadata <- metadata[unique_rows, ]
-        })
-        
-        metadata_samples <- metadata[[sample_col]]
-        cat("Deduplicated to", nrow(metadata), "unique sample entries\n")
+      # Debug: Show sample name comparison
+      cat("\n=== Sample Name Matching Diagnostic ===\n")
+      cat("Example samples from metadata:\n")
+      print(head(metadata_samples, 5))
+      cat("\nExample samples from GatingSet:\n")
+      print(head(current_samples, 5))
+      
+      # Check for common matching issues
+      if (all(grepl("_\\d+$", metadata_samples)) && !all(grepl("_\\d+$", current_samples))) {
+        cat("\nWARNING: Metadata samples have numeric suffixes that GatingSet samples may not have\n")
+        cat("You may need to clean sample names before matching\n")
       }
       
-      # Continue with sample matching
+      # Sample matching
       matched_samples <- intersect(current_samples, metadata_samples)
       unmatched_gs <- setdiff(current_samples, metadata_samples)
       unmatched_meta <- setdiff(metadata_samples, current_samples)
@@ -9032,9 +10250,9 @@ import_external_metadata <- function(gs) {
         
         # Show sample comparison for debugging
         cat("\nFirst 10 GatingSet samples:\n")
-        iwalk(head(current_samples, 10), ~cat(sprintf("  %d. '%s'\n", .y, .x)))
+        purrr::iwalk(head(current_samples, 10), ~cat(sprintf("  %d. '%s'\n", .y, .x)))
         cat("\nFirst 10 metadata samples:\n") 
-        iwalk(head(metadata_samples, 10), ~cat(sprintf("  %d. '%s'\n", .y, .x)))
+        purrr::iwalk(head(metadata_samples, 10), ~cat(sprintf("  %d. '%s'\n", .y, .x)))
         
         next
       }
@@ -9048,7 +10266,7 @@ import_external_metadata <- function(gs) {
       # Column selection
       other_cols <- setdiff(names(metadata), sample_col)
       cat("\nAvailable metadata columns to include:\n")
-      iwalk(other_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
+      purrr::iwalk(other_cols, ~cat(sprintf("%d. %s\n", .y, .x)))
       
       col_selection <- readline("Enter column numbers (space-separated) or 'all' or 'none': ")
       
@@ -9063,7 +10281,11 @@ import_external_metadata <- function(gs) {
         cat("No input provided, using all columns\n")
       } else {
         tryCatch({
-          selections <- str_trim(str_split(col_selection, "\\s+")[[1]])
+          # Handle both comma and space separated
+          col_selection_cleaned <- stringr::str_replace_all(col_selection, ",", " ")
+          selections <- stringr::str_trim(stringr::str_split(col_selection_cleaned, "\\s+")[[1]])
+          selections <- selections[selections != ""]
+          
           selected_cols <- character(0)
           
           for(sel in selections) {
@@ -9091,7 +10313,7 @@ import_external_metadata <- function(gs) {
       }
       
       cat("\nSelected metadata columns:\n")
-      iwalk(selected_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
+      purrr::iwalk(selected_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
       
       confirm <- readline("Confirm metadata column selection? (y/n): ")
       if(tolower(confirm) != "y") {
@@ -9101,10 +10323,10 @@ import_external_metadata <- function(gs) {
       
       # Create final metadata with proper structure
       final_metadata <- metadata %>%
-        select(all_of(c(sample_col, selected_cols))) %>%
-        rename(Sample = all_of(sample_col)) %>%
+        dplyr::select(all_of(c(sample_col, selected_cols))) %>%
+        dplyr::rename(Sample = all_of(sample_col)) %>%
         dplyr::filter(Sample %in% current_samples) %>%
-        as_tibble()
+        tibble::as_tibble()
       
       # Final verification - ensure no duplicates at sample level
       final_sample_check <- table(final_metadata$Sample)
@@ -9120,7 +10342,7 @@ import_external_metadata <- function(gs) {
           cat("Error removing final duplicates:", e$message, "\n")
           # Force conversion and try again
           final_metadata <- as.data.frame(final_metadata)
-          final_metadata <- as_tibble(final_metadata)
+          final_metadata <- tibble::as_tibble(final_metadata)
           unique_sample_rows <- !duplicated(final_metadata$Sample)
           final_metadata <- final_metadata[unique_sample_rows, ]
         })
@@ -9132,6 +10354,15 @@ import_external_metadata <- function(gs) {
       cat("- Column names:", paste(names(final_metadata), collapse = ", "), "\n")
       cat("- Sample-level metadata confirmed\n")
       
+      # Show distribution of key metadata columns
+      cat("\n=== Metadata Summary ===\n")
+      for(col in selected_cols) {
+        if(!is.numeric(final_metadata[[col]])) {
+          col_table <- table(final_metadata[[col]])
+          cat(col, ":", paste(names(col_table), "(", col_table, ")", collapse = ", "), "\n")
+        }
+      }
+      
       return(final_metadata)
     }
   }
@@ -9139,6 +10370,10 @@ import_external_metadata <- function(gs) {
 
 # ============================================================================
 # FIXED SECTION IN MAIN FUNCTION FOR METADATA MERGING
+# ============================================================================
+
+# ============================================================================
+# FIXED METADATA MERGING WITH PROPER CONFLICT RESOLUTION
 # ============================================================================
 
 merge_external_metadata_safely <- function(single_cell_data, external_metadata) {
@@ -9150,32 +10385,73 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
     stop("No 'Sample' column found in external metadata")
   }
   
-  # Check for column conflicts
+  # Check for column conflicts between current data and external metadata
   current_meta_cols <- setdiff(names(single_cell_data$data), 
                                c("CellID", single_cell_data$marker_names))
   ext_meta_cols <- setdiff(names(external_metadata), "Sample")
   conflicting_cols <- intersect(current_meta_cols, ext_meta_cols)
   
   if(length(conflicting_cols) > 0) {
-    cat("Column name conflicts found:", paste(conflicting_cols, collapse = ", "), "\n")
-    cat("External metadata columns will be prefixed with 'ext_'\n")
+    cat("\n=== COLUMN CONFLICT RESOLUTION ===\n")
+    cat("Found overlapping metadata columns:\n")
+    purrr::iwalk(conflicting_cols, ~cat(sprintf("  %d. %s\n", .y, .x)))
     
-    for(col in conflicting_cols) {
-      names(external_metadata)[names(external_metadata) == col] <- paste0("ext_", col)
+    cat("\nThese columns exist in BOTH GatingSet pData AND external metadata.\n")
+    cat("Which source should take priority?\n")
+    cat("1. External metadata (RECOMMENDED - your imported file)\n")
+    cat("2. GatingSet pData (from the flow cytometry file)\n")
+    cat("3. Keep both (suffix with .gatingset and .external)\n")
+    
+    priority_choice <- readline("Choose (1-3, default 1): ")
+    if(priority_choice == "") priority_choice <- "1"
+    
+    if(priority_choice == "1") {
+      # Remove conflicting columns from current data, keep external
+      cat("Prioritizing external metadata - removing GatingSet columns:", 
+          paste(conflicting_cols, collapse = ", "), "\n")
+      
+      single_cell_data$data <- single_cell_data$data %>%
+        dplyr::select(-all_of(conflicting_cols))
+      
+    } else if(priority_choice == "2") {
+      # Remove conflicting columns from external, keep GatingSet
+      cat("Prioritizing GatingSet pData - removing external columns:", 
+          paste(conflicting_cols, collapse = ", "), "\n")
+      
+      external_metadata <- external_metadata %>%
+        dplyr::select(-all_of(conflicting_cols))
+      
+      ext_meta_cols <- setdiff(names(external_metadata), "Sample")
+      
+    } else if(priority_choice == "3") {
+      # Keep both with suffixes
+      cat("Keeping both versions with suffixes\n")
+      
+      # Rename GatingSet columns
+      for(col in conflicting_cols) {
+        names(single_cell_data$data)[names(single_cell_data$data) == col] <- 
+          paste0(col, ".gatingset")
+      }
+      
+      # Rename external columns
+      for(col in conflicting_cols) {
+        names(external_metadata)[names(external_metadata) == col] <- 
+          paste0(col, ".external")
+      }
+      
+      ext_meta_cols <- setdiff(names(external_metadata), "Sample")
     }
   }
   
   original_nrow <- nrow(single_cell_data$data)
   
-  # FIXED: Check for duplicates ONLY in external metadata (sample-level duplicates)
-  # This checks if the same sample has different metadata (which would be an error)
-  cat("Checking external metadata for sample-level inconsistencies...\n")
+  # Check for duplicates ONLY in external metadata
+  cat("Checking external metadata for sample-level consistency...\n")
   
-  # Group by Sample and check if all metadata is identical for each sample
   metadata_consistency_check <- external_metadata %>%
-    group_by(Sample) %>%
-    summarise(
-      n_rows = n(),
+    dplyr::group_by(Sample) %>%
+    dplyr::summarise(
+      n_rows = dplyr::n(),
       .groups = "drop"
     ) %>%
     dplyr::filter(n_rows > 1)
@@ -9186,17 +10462,15 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
     
     cat("\nChecking if metadata is consistent across duplicate sample entries...\n")
     
-    # Check if duplicated samples have identical metadata
     problem_samples <- c()
     for(sample_id in metadata_consistency_check$Sample) {
       sample_rows <- external_metadata %>% dplyr::filter(Sample == sample_id)
       
-      # Check if all rows are identical (excluding Sample column)
       metadata_cols <- setdiff(names(sample_rows), "Sample")
       if(length(metadata_cols) > 0) {
         unique_metadata_combinations <- sample_rows %>%
-          select(all_of(metadata_cols)) %>%
-          distinct() %>%
+          dplyr::select(all_of(metadata_cols)) %>%
+          dplyr::distinct() %>%
           nrow()
         
         if(unique_metadata_combinations > 1) {
@@ -9217,30 +10491,30 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
     } else {
       cat("Duplicate sample entries have consistent metadata. Using first occurrence of each.\n")
       external_metadata <- external_metadata %>%
-        group_by(Sample) %>%
-        slice(1) %>%
-        ungroup()
+        dplyr::group_by(Sample) %>%
+        dplyr::slice(1) %>%
+        dplyr::ungroup()
       cat("Deduplicated external metadata to", nrow(external_metadata), "unique samples\n")
     }
   } else {
-    cat("No duplicate samples found in external metadata - each sample has unique metadata\n")
+    cat("No duplicate samples found in external metadata\n")
   }
   
-  # Check sample overlap between datasets
+  # Check sample overlap
   sc_samples <- unique(single_cell_data$data$Sample)
   meta_samples <- external_metadata$Sample
   
-  cat("Sample matching summary:\n")
+  cat("\nSample matching summary:\n")
   cat("- Single-cell data samples:", length(sc_samples), "\n")
   cat("- External metadata samples:", length(meta_samples), "\n")
   cat("- Overlapping samples:", length(intersect(sc_samples, meta_samples)), "\n")
   cat("- SC samples without metadata:", length(setdiff(sc_samples, meta_samples)), "\n")
   cat("- Metadata samples not in SC data:", length(setdiff(meta_samples, sc_samples)), "\n")
   
-  # Perform the join - this is a many-to-one relationship (many cells to one sample metadata)
+  # Perform the join
   tryCatch({
     merged_data <- single_cell_data$data %>%
-      left_join(external_metadata, by = "Sample", relationship = "many-to-one")
+      dplyr::left_join(external_metadata, by = "Sample", relationship = "many-to-one")
     
     if(nrow(merged_data) != original_nrow) {
       stop("Row count changed during merge (", original_nrow, "->", nrow(merged_data), 
@@ -9251,7 +10525,7 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
     
     # Check how many cells got metadata
     cells_with_metadata <- merged_data %>%
-      select(all_of(setdiff(names(external_metadata), "Sample"))) %>%
+      dplyr::select(all_of(setdiff(names(external_metadata), "Sample"))) %>%
       complete.cases() %>%
       sum()
     
@@ -9259,7 +10533,7 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
         "out of", scales::comma(nrow(merged_data)), "\n")
     
     cat("External metadata successfully merged!\n")
-    cat("Added columns:", paste(setdiff(names(external_metadata), "Sample"), collapse = ", "), "\n")
+    cat("Added/updated columns:", paste(setdiff(names(external_metadata), "Sample"), collapse = ", "), "\n")
     
     # Update the single-cell data object
     single_cell_data$data <- merged_data
@@ -9269,7 +10543,6 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
   }, error = function(e) {
     cat("Error during join operation:", conditionMessage(e), "\n")
     
-    # Provide detailed debugging information
     cat("\nDebugging information:\n")
     cat("Single-cell data samples (unique):", length(unique(single_cell_data$data$Sample)), "\n")
     cat("External metadata samples:", nrow(external_metadata), "\n")
@@ -9278,6 +10551,7 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
     stop("Join operation failed. See debugging information above.")
   })
 }
+
 # ============================================================================
 # MAIN ENHANCED FUNCTION WITH SAMPLE EXCLUSION
 # ============================================================================
@@ -9440,7 +10714,9 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
     single_cell_data = single_cell_data,
     n_neighbors = n_neighbors,
     min_dist = min_dist,
-    transform_data = transform_data
+    n_components = 2,
+    transform_data = transform_data,
+    markers_for_umap = selected_markers$markers  # Use marker NAMES, not channel names
   )
   
   # Step 8: Initialize enhanced visualization session
@@ -9822,7 +11098,7 @@ perform_flowsom_clustering <- function(umap_data, marker_names,
       nClus = n_metaclusters,
       xdim = xdim,
       ydim = ydim,
-      seed = 42
+      seed = 7777777
     )
     
     # Extract cluster assignments
@@ -9929,7 +11205,7 @@ perform_consensus_clustering <- function(umap_data, marker_names,
       pFeature = 1,
       clusterAlg = "km",
       distance = "euclidean",
-      seed = 42,
+      seed = 7777777,
       plot = NULL,  # Suppress automatic plots
       verbose = FALSE
     )
@@ -9970,7 +11246,7 @@ perform_consensus_clustering <- function(umap_data, marker_names,
     # Apply clustering to full dataset using k-means with optimal k
     cat("Applying", optimal_k, "clusters to full dataset...\n")
     
-    set.seed(42)
+    set.seed(7777777)
     full_kmeans <- kmeans(clustering_data, centers = optimal_k, nstart = 25, iter.max = 100)
     
     # Add cluster information to original data
@@ -10047,7 +11323,7 @@ perform_kmeans_clustering <- function(umap_data, marker_names,
       return(sum(scale(clustering_data, center = TRUE, scale = FALSE)^2))
     }
     
-    set.seed(42)
+    set.seed(7777777)
     kmeans_result <- kmeans(clustering_data_scaled, centers = k, nstart = 25)
     return(kmeans_result$tot.withinss)
   })
@@ -10073,7 +11349,7 @@ perform_kmeans_clustering <- function(umap_data, marker_names,
   }
   
   # Perform final k-means clustering
-  set.seed(42)
+  set.seed(7777777)
   final_kmeans <- kmeans(clustering_data_scaled, centers = elbow_k, nstart = 25, iter.max = 100)
   
   # Add cluster information to original data
