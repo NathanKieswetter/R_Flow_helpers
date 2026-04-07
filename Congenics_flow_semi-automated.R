@@ -5177,7 +5177,7 @@ create_paired_comparison_plots <- function(data, auto_save = FALSE) {
 
 
 #===============================================================================
-# Enhanced MFI heatmaps with package conflicts fixed
+# Enhanced MFI heatmaps
 #===============================================================================
 
 # Required libraries
@@ -5274,6 +5274,11 @@ select_markers_interactive <- function(mfi_data) {
     stop("No valid markers found in data")
   }
   
+  # Patterns to exclude from the "all clean markers" quick-select
+  dump_patterns <- base::c("DUMP", "LIVEDEAD", "LD", "IV",
+                           "intravenous", "live.dead", "live dead")
+  dump_regex    <- base::paste(dump_patterns, collapse = "|")
+  
   cat("\n", base::paste(base::rep("=", 70), collapse = ""), "\n")
   cat("MARKER SELECTION\n")
   cat(base::paste(base::rep("=", 70), collapse = ""), "\n")
@@ -5283,45 +5288,83 @@ select_markers_interactive <- function(mfi_data) {
     measurement_count <- mfi_data %>%
       dplyr::filter(marker == .env$marker, !is.na(congenics)) %>%
       base::nrow()
-    
     cat(base::sprintf("%2d. %s (%d measurements)\n", idx, marker, measurement_count))
   })
   
-  cat(base::sprintf("%2d. Select all markers\n", base::length(available_markers) + 1))
+  cat(base::sprintf("%2d. Select all markers\n",
+                    base::length(available_markers) + 1))
+  cat(base::sprintf("%2d. Select all markers EXCLUDING dump/viability channels\n",
+                    base::length(available_markers) + 2))
+  
+  # Show which markers would be excluded so the user can verify
+  excluded_preview <- available_markers[
+    stringr::str_detect(available_markers, stringr::regex(dump_regex, ignore_case = TRUE))
+  ]
+  if (base::length(excluded_preview) > 0) {
+    cat(base::sprintf("    (would exclude: %s)\n",
+                      base::paste(excluded_preview, collapse = ", ")))
+  } else {
+    cat("    (no markers match exclusion patterns in this dataset)\n")
+  }
   
   while (TRUE) {
-    choice <- base::readline("\nEnter marker numbers (space or comma-separated, e.g., '1 3 5' or '1,3,5') or option: ")
+    choice <- base::readline("\nEnter marker numbers (space or comma-separated) or option: ")
     
+    # --- Select all ---
     if (choice == base::as.character(base::length(available_markers) + 1)) {
       selected_markers <- available_markers
-      cat(base::sprintf("✓ Selected all %d markers\n", base::length(selected_markers)))
+      cat(base::sprintf("Selected all %d markers\n", base::length(selected_markers)))
       return(selected_markers)
     }
     
+    # --- Select all except dump/viability ---
+    if (choice == base::as.character(base::length(available_markers) + 2)) {
+      selected_markers <- available_markers[
+        !stringr::str_detect(available_markers,
+                             stringr::regex(dump_regex, ignore_case = TRUE))
+      ]
+      cat(base::sprintf(
+        "Selected %d markers (excluded %d dump/viability channel(s): %s)\n",
+        base::length(selected_markers),
+        base::length(excluded_preview),
+        if (base::length(excluded_preview) > 0)
+          base::paste(excluded_preview, collapse = ", ")
+        else
+          "none"
+      ))
+      return(selected_markers)
+    }
+    
+    # --- Manual numeric selection ---
     base::tryCatch({
       if (base::grepl("\\s", choice)) {
-        selected_indices <- base::as.numeric(stringr::str_trim(stringr::str_split(choice, "\\s+")[[1]]))
+        selected_indices <- base::as.numeric(
+          stringr::str_trim(stringr::str_split(choice, "\\s+")[[1]])
+        )
       } else {
-        selected_indices <- base::as.numeric(stringr::str_trim(stringr::str_split(choice, ",")[[1]]))
+        selected_indices <- base::as.numeric(
+          stringr::str_trim(stringr::str_split(choice, ",")[[1]])
+        )
       }
       
       selected_indices <- selected_indices[!is.na(selected_indices)]
       
-      if (base::length(selected_indices) > 0 && base::all(selected_indices >= 1 & selected_indices <= base::length(available_markers))) {
+      if (base::length(selected_indices) > 0 &&
+          base::all(selected_indices >= 1 &
+                    selected_indices <= base::length(available_markers))) {
         selected_markers <- available_markers[selected_indices]
-        cat(base::sprintf("✓ Selected %d markers: %s\n", 
-                          base::length(selected_markers), 
+        cat(base::sprintf("Selected %d marker(s): %s\n",
+                          base::length(selected_markers),
                           base::paste(selected_markers, collapse = ", ")))
         return(selected_markers)
       } else {
         cat("Invalid selection. Please enter numbers within the valid range.\n")
       }
     }, error = function(e) {
-      cat("Invalid format. Please enter space or comma-separated numbers (e.g., '1 3 5' or '1,3,5').\n")
+      cat("Invalid format. Please enter space or comma-separated numbers.\n")
     })
   }
 }
-
 # ===== SCALING FUNCTION WITH FIXED CONFLICTS =====
 
 apply_scaling_method <- function(heatmap_matrix, scale_method, legend_suffix, 
@@ -6479,7 +6522,7 @@ show_data_distribution <- function(mfi_data, selected_congenics, selected_marker
 }
 
 #===============================================================================
-# MFI Advanced Heatmap Module - Package Conflicts Fixed
+# MFI Advanced Heatmap Module -----
 #===============================================================================
 
 # ===== ADVANCED GROUPING OPTIONS =====
@@ -6517,9 +6560,9 @@ select_grouping_option <- function(mfi_data) {
         dplyr::count(tissue_factor, marker) %>%
         dplyr::group_by(tissue_factor) %>%
         dplyr::summarise(
-          n_markers = dplyr::n_distinct(marker),
-          total_measurements = base::sum(n),
-          .groups = "drop"
+          n_markers           = dplyr::n_distinct(marker),
+          total_measurements  = base::sum(n),
+          .groups             = "drop"
         )
       
       cat("\n--- Markers per Tissue ---\n")
@@ -6541,22 +6584,17 @@ select_scaling_method_interactive <- function() {
   
   cat("Available scaling methods:\n")
   cat("1. No scaling (raw MFI values)\n")
-  cat("   → Use when: Markers have similar dynamic ranges, absolute values matter\n\n")
-  
+  cat("   -> Use when: Markers have similar dynamic ranges, absolute values matter\n\n")
   cat("2. Row scaling (Z-score per marker)\n")
-  cat("   → Use when: Markers have very different expression ranges\n\n")
-  
+  cat("   -> Use when: Markers have very different expression ranges\n\n")
   cat("3. Global scaling (Z-score across all data)\n")
-  cat("   → Use when: Want to see overall patterns while preserving relative differences\n\n")
-  
+  cat("   -> Use when: Want to see overall patterns while preserving relative differences\n\n")
   cat("4. Log transformation\n")
-  cat("   → Use when: Data spans several orders of magnitude, has multiplicative effects\n\n")
-  
+  cat("   -> Use when: Data spans several orders of magnitude\n\n")
   cat("5. Square root transformation\n")
-  cat("   → Use when: Data has moderate skewness, want gentler transformation than log\n\n")
-  
+  cat("   -> Use when: Data has moderate skewness\n\n")
   cat("6. Percentile scaling\n")
-  cat("   → Use when: Want to focus on relative rankings, ignore extreme outliers\n\n")
+  cat("   -> Use when: Want to focus on relative rankings, ignore extreme outliers\n\n")
   
   while (TRUE) {
     choice <- base::readline("\nChoose scaling method (1-6): ")
@@ -6569,16 +6607,13 @@ select_scaling_method_interactive <- function() {
       return(base::list(scale_method = "global", aggregation_method = "mean"))
     } else if (choice == "4") {
       log_choice <- base::readline("Enter log base (default 2): ")
-      log_base <- base::ifelse(log_choice == "", 2, base::as.numeric(log_choice))
-      if (is.na(log_base) || log_base <= 0) {
-        cat("Invalid log base. Using default base 2.\n")
-        log_base <- 2
-      }
+      log_base   <- base::ifelse(log_choice == "", 2, base::as.numeric(log_choice))
+      if (is.na(log_base) || log_base <= 0) { cat("Invalid log base. Using 2.\n"); log_base <- 2 }
       return(base::list(scale_method = "log", aggregation_method = "mean", log_base = log_base))
     } else if (choice == "5") {
       return(base::list(scale_method = "sqrt", aggregation_method = "mean"))
     } else if (choice == "6") {
-      perc_choice <- base::readline("Enter percentile range (space or comma-separated, default '0.05 0.95'): ")
+      perc_choice <- base::readline("Enter percentile range (default '0.05 0.95'): ")
       if (perc_choice == "") {
         percentile_range <- base::c(0.05, 0.95)
       } else {
@@ -6588,19 +6623,16 @@ select_scaling_method_interactive <- function() {
           } else {
             percentile_range <- base::as.numeric(stringr::str_trim(stringr::str_split(perc_choice, ",")[[1]]))
           }
-          
-          if (base::length(percentile_range) != 2 || base::any(percentile_range < 0) || base::any(percentile_range > 1)) {
+          if (base::length(percentile_range) != 2 || base::any(percentile_range < 0) ||
+              base::any(percentile_range > 1) || percentile_range[1] >= percentile_range[2]) {
             stop("Invalid range")
-          }
-          if (percentile_range[1] >= percentile_range[2]) {
-            stop("Lower percentile must be less than upper percentile")
           }
         }, error = function(e) {
           cat("Invalid percentile range. Using default 0.05, 0.95.\n")
           percentile_range <<- base::c(0.05, 0.95)
         })
       }
-      return(base::list(scale_method = "percentile", aggregation_method = "mean", 
+      return(base::list(scale_method = "percentile", aggregation_method = "mean",
                         percentile_range = percentile_range))
     } else {
       cat("Invalid choice. Please enter 1-6.\n")
@@ -6608,391 +6640,323 @@ select_scaling_method_interactive <- function() {
   }
 }
 
-# ===== SIGNIFICANCE ANNOTATION FUNCTIONS =====
-
-create_combined_significance_matrix <- function(stats_results, selected_markers, tissues, stats_config, column_names) {
-  if (is.null(stats_results) || is.null(stats_results$summary)) {
-    cat("No stats results available for combined heatmap\n")
+create_tissue_significance_matrix <- function(stats_results, selected_markers,
+                                              current_tissue, stats_config) {
+  if (base::is.null(stats_results) || base::is.null(stats_results$summary)) {
     return(NULL)
   }
   
-  summary_df <- stats_results$summary
-  summary_df$tissue <- base::as.character(summary_df$tissue)
-  
-  cat("Creating cell-specific significance annotations\n")
-  cat("Available tissues:", base::paste(base::unique(summary_df$tissue), collapse = ", "), "\n")
-  
-  # Create a matrix to store significance for each cell
-  sig_matrix <- base::matrix("", nrow = base::length(selected_markers), ncol = base::length(column_names))
-  base::rownames(sig_matrix) <- selected_markers
-  base::colnames(sig_matrix) <- column_names
-  
-  # For each statistical test result, determine which cells should show significance
-  for (i in 1:base::nrow(summary_df)) {
-    test_result <- summary_df[i, ]
-    marker <- test_result$marker
-    tissue <- test_result$tissue
-    
-    if (!marker %in% selected_markers) next
-    
-    # Find columns that correspond to this tissue
-    tissue_columns <- column_names[base::grepl(base::paste0("^", tissue, "_"), column_names)]
-    
-    # If significant, mark the tissue columns with the significance indicator
-    if (test_result$significant) {
-      sig_text <- base::switch(stats_config$sig_display,
-                               "p_values" = test_result$p_formatted,
-                               "stars" = test_result$stars,
-                               "both" = base::paste(test_result$p_formatted, test_result$stars),
-                               "")
-      
-      # Add significance annotation to all columns for this tissue
-      for (col in tissue_columns) {
-        if (col %in% base::colnames(sig_matrix)) {
-          sig_matrix[marker, col] <- sig_text
-        }
-      }
-    }
-  }
-  
-  cat(base::sprintf("Created cell-specific annotations for %d markers across %d columns\n", 
-                    base::nrow(sig_matrix), base::ncol(sig_matrix)))
-  
-  return(sig_matrix)
-}
-
-create_tissue_significance_matrix <- function(stats_results, selected_markers, current_tissue, stats_config) {
-  if (is.null(stats_results) || is.null(stats_results$summary)) {
-    return(NULL)
-  }
-  
-  summary_df <- stats_results$summary
-  summary_df$tissue <- base::as.character(summary_df$tissue)
-  current_tissue <- base::as.character(current_tissue)
+  summary_df            <- stats_results$summary
+  summary_df$tissue     <- base::as.character(summary_df$tissue)
+  current_tissue        <- base::as.character(current_tissue)
   
   tissue_summary <- summary_df %>%
     dplyr::filter(tissue == current_tissue)
   
-  if (base::nrow(tissue_summary) == 0) {
-    return(NULL)
-  }
+  if (base::nrow(tissue_summary) == 0) return(NULL)
   
-  if (stats_config$sig_display == "p_values") {
-    annotation_values <- stats::setNames(tissue_summary$p_formatted, tissue_summary$marker)
-  } else if (stats_config$sig_display == "stars") {
-    annotation_values <- stats::setNames(tissue_summary$stars, tissue_summary$marker)
-  } else if (stats_config$sig_display == "both") {
-    annotation_values <- stats::setNames(
-      base::paste0(tissue_summary$p_formatted, " ", tissue_summary$stars), 
+  annotation_values <- switch(
+    stats_config$sig_display,
+    "p_values" = stats::setNames(tissue_summary$p_formatted, tissue_summary$marker),
+    "stars"    = stats::setNames(tissue_summary$stars,       tissue_summary$marker),
+    "both"     = stats::setNames(
+      base::paste0(tissue_summary$p_formatted, " ", tissue_summary$stars),
       tissue_summary$marker
-    )
-  } else {
+    ),
     return(NULL)
-  }
+  )
   
   return(annotation_values[base::names(annotation_values) %in% selected_markers])
 }
 
-# ===== COMBINED HEATMAP CREATION =====
+# ===== P-VALUE OVERLAY FUNCTIONS =====
 
-create_combined_heatmap_with_stats <- function(mfi_clean, scale_method, aggregation_method,
-                                               agg_fun, legend_suffix, cluster_rows, cluster_cols,
-                                               show_row_names, show_column_names, show_cell_values,
-                                               log_base, percentile_range, stats_results, stats_config) {
-  
-  cat("Creating combined heatmap for all tissues\n")
-  
-  unique_tissues <- base::sort(base::unique(mfi_clean$tissue_factor))
-  unique_congenics <- base::sort(base::unique(mfi_clean$congenics))
-  
-  cat("Tissues found:", base::paste(unique_tissues, collapse = ", "), "\n")
-  cat("Congenics found:", base::paste(unique_congenics, collapse = ", "), "\n")
-  
-  ordered_columns <- base::c()
-  tissue_groups <- base::list()
-  
-  for (tissue in unique_tissues) {
-    tissue_cols <- base::c()
-    for (congenic in unique_congenics) {
-      col_name <- base::paste(tissue, congenic, sep = "_")
-      ordered_columns <- base::c(ordered_columns, col_name)
-      tissue_cols <- base::c(tissue_cols, col_name)
-    }
-    tissue_groups[[tissue]] <- tissue_cols
+# For SEPARATE heatmaps (one tissue per heatmap; WT and KO are the only two
+# columns so column_slice = 1 fixed; x = 0.5 npc is the midpoint between them).
+# Called AFTER ComplexHeatmap::draw()
+
+overlay_mfi_pvalues <- function(drawn_ht, heatmap_name, sig_values) {
+  if (base::is.null(sig_values) || base::length(sig_values) == 0) {
+    return(invisible(NULL))
   }
   
-  heatmap_data <- mfi_clean %>%
-    dplyr::group_by(marker, tissue_factor, congenics) %>%
-    dplyr::summarise(agg_MFI = agg_fun(MFI, na.rm = TRUE), .groups = "drop") %>%
-    dplyr::mutate(tissue_congenic = base::paste(tissue_factor, congenics, sep = "_"))
+  row_ord      <- base::unlist(ComplexHeatmap::row_order(drawn_ht))
+  ht_matrix    <- drawn_ht@ht_list[[heatmap_name]]@matrix
+  marker_order <- base::rownames(ht_matrix)[row_ord]
+  n_rows       <- base::length(marker_order)
   
-  heatmap_matrix <- heatmap_data %>%
-    dplyr::select(marker, tissue_congenic, agg_MFI) %>%
-    tidyr::pivot_wider(names_from = tissue_congenic, values_from = agg_MFI) %>%
-    tibble::column_to_rownames("marker") %>%
-    base::as.matrix()
-  
-  missing_cols <- base::setdiff(ordered_columns, base::colnames(heatmap_matrix))
-  if (base::length(missing_cols) > 0) {
-    missing_matrix <- base::matrix(NA, nrow = base::nrow(heatmap_matrix), ncol = base::length(missing_cols))
-    base::colnames(missing_matrix) <- missing_cols
-    base::rownames(missing_matrix) <- base::rownames(heatmap_matrix)
-    heatmap_matrix <- base::cbind(heatmap_matrix, missing_matrix)
-  }
-  
-  heatmap_matrix <- heatmap_matrix[, ordered_columns, drop = FALSE]
-  
-  if (base::nrow(heatmap_matrix) == 0 || base::ncol(heatmap_matrix) == 0) {
-    stop("Empty combined matrix")
-  }
-  
-  cat("Matrix dimensions:", base::nrow(heatmap_matrix), "x", base::ncol(heatmap_matrix), "\n")
-  
-  col_data <- base::data.frame(
-    tissue_congenic = base::colnames(heatmap_matrix),
-    stringsAsFactors = FALSE
-  ) %>%
-    dplyr::mutate(
-      tissue = stringr::str_extract(tissue_congenic, "^[^_]+"),
-      congenic = stringr::str_extract(tissue_congenic, "[^_]+$")
-    ) %>%
-    tibble::column_to_rownames("tissue_congenic")
-  
-  if (base::length(unique_tissues) <= 11) {
-    tissue_colors <- RColorBrewer::brewer.pal(base::max(3, base::length(unique_tissues)), "Set3")[1:base::length(unique_tissues)]
-  } else {
-    tissue_colors <- grDevices::rainbow(base::length(unique_tissues))
-  }
-  base::names(tissue_colors) <- unique_tissues
-  
-  congenic_colors <- base::c("CD45.1" = "lightblue", "CD45.2" = "lightcoral", "CD45.1.2" = "lightgreen")
-  congenic_colors <- congenic_colors[base::names(congenic_colors) %in% unique_congenics]
-  if (base::length(unique_congenics) > base::length(congenic_colors)) {
-    additional_colors <- grDevices::rainbow(base::length(unique_congenics) - base::length(congenic_colors))
-    base::names(additional_colors) <- base::setdiff(unique_congenics, base::names(congenic_colors))
-    congenic_colors <- base::c(congenic_colors, additional_colors)
-  }
-  
-  tissue_splits <- base::rep(unique_tissues, each = base::length(unique_congenics))
-  base::names(tissue_splits) <- base::colnames(heatmap_matrix)
-  
-  # Create cell-level significance annotations if available
-  sig_matrix <- NULL
-  if (!is.null(stats_results) && !is.null(stats_config) && 
-      stats_config$sig_display != "none") {
-    
-    sig_matrix <- create_combined_significance_matrix(stats_results, base::rownames(heatmap_matrix), 
-                                                      unique_tissues, stats_config, base::colnames(heatmap_matrix))
-  }
-  
-  ha_col <- ComplexHeatmap::HeatmapAnnotation(
-    Tissue = col_data$tissue,
-    Congenic = col_data$congenic,
-    col = base::list(
-      Tissue = tissue_colors,
-      Congenic = congenic_colors
-    ),
-    gap = grid::unit(1, "mm"),
-    annotation_name_gp = grid::gpar(fontsize = 10),
-    which = "column"
-  )
-  
-  scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, legend_suffix, 
-                                        log_base, percentile_range)
-  
-  # Create cell function that shows both values and significance
-  cell_function <- NULL
-  if (show_cell_values || (!is.null(stats_results) && !is.null(stats_config) && 
-                           stats_config$sig_display != "none")) {
-    
-    # Build lookup: for each tissue, which column index is the FIRST congenic?
-    # And what's the significance for each marker in that tissue?
-    tissue_first_col <- base::list()
-    tissue_sig <- base::list()
-    
-    for (tissue in unique_tissues) {
-      tissue_cols <- tissue_groups[[tissue]]
-      # Find column indices for this tissue
-      col_indices <- base::which(base::colnames(heatmap_matrix) %in% tissue_cols)
-      if (base::length(col_indices) >= 2) {
-        tissue_first_col[[tissue]] <- base::min(col_indices)
-      }
-      
-      # Get significance for this tissue
-      if (!is.null(stats_results) && !is.null(stats_results$summary)) {
-        tissue_summary <- stats_results$summary %>%
-          dplyr::filter(tissue == !!tissue)
-        
-        sig_vec <- base::rep("", base::nrow(heatmap_matrix))
-        base::names(sig_vec) <- base::rownames(heatmap_matrix)
-        
-        for (row_i in base::seq_len(base::nrow(tissue_summary))) {
-          marker <- tissue_summary$marker[row_i]
-          if (marker %in% base::names(sig_vec) && tissue_summary$significant[row_i]) {
-            sig_text <- base::switch(stats_config$sig_display,
-                                     "p_values" = tissue_summary$p_formatted[row_i],
-                                     "stars" = tissue_summary$stars[row_i],
-                                     "both" = base::paste(tissue_summary$p_formatted[row_i], 
-                                                          tissue_summary$stars[row_i]),
-                                     "")
-            sig_vec[marker] <- sig_text
-          }
-        }
-        tissue_sig[[tissue]] <- sig_vec
-      }
-    }
-    
-    cell_function <- function(j, i, x, y, width, height, fill) {
-      # Show cell values if requested
-      if (show_cell_values && !is.na(scaled_result$matrix[i, j])) {
-        grid::grid.text(base::sprintf("%.2f", scaled_result$matrix[i, j]), 
-                        x, y, gp = grid::gpar(fontsize = 7))
-      }
-      
-      # Show significance centered between paired columns
-      if (!is.null(stats_config) && stats_config$sig_display != "none") {
-        for (tissue in base::names(tissue_first_col)) {
-          if (j == tissue_first_col[[tissue]]) {
-            marker_name <- base::rownames(heatmap_matrix)[i]
-            if (!is.null(tissue_sig[[tissue]]) && 
-                marker_name %in% base::names(tissue_sig[[tissue]]) &&
-                tissue_sig[[tissue]][marker_name] != "") {
-              
-              # Center between first and second column of this tissue block
-              x_center <- x + width * 0.5
-              grid::grid.text(tissue_sig[[tissue]][marker_name], 
-                              x_center, y, 
-                              gp = grid::gpar(fontsize = 8, fontface = "bold", col = "black"))
-            }
-          }
+  base::tryCatch(
+    ComplexHeatmap::decorate_heatmap_body(
+      heatmap_name,
+      row_slice    = 1,
+      column_slice = 1,
+      {
+        for (i in base::seq_len(n_rows)) {
+          marker    <- marker_order[i]
+          disp_text <- sig_values[[marker]]
+          if (base::is.null(disp_text) || base::is.na(disp_text) || disp_text == "") next
+          
+          is_sig <- base::grepl("\\*|^p\\s*[=<]", disp_text)
+          if (!is_sig) next                          # <-- skip non-significant
+          
+          grid::grid.text(
+            label = disp_text,
+            x     = grid::unit(0.5, "npc"),
+            y     = grid::unit((n_rows - i + 0.5) / n_rows, "npc"),
+            just  = "centre",
+            gp    = grid::gpar(fontsize = 8, fontface = "bold", col = "black")
+          )
         }
       }
-    }
-  }
-  
-  ht <- ComplexHeatmap::Heatmap(
-    scaled_result$matrix,
-    name = scaled_result$legend_title,
-    col = scaled_result$color_function,
-    cluster_rows = cluster_rows,
-    cluster_columns = FALSE,
-    column_split = tissue_splits,
-    column_gap = grid::unit(1, "mm"),
-    show_row_names = show_row_names,
-    show_column_names = show_column_names,
-    column_names_gp = grid::gpar(fontsize = 9, angle = 45),
-    column_title = "All Tissues Combined",
-    column_title_gp = grid::gpar(fontsize = 14, fontface = "bold"),
-    row_title = "Markers",
-    row_title_gp = grid::gpar(fontsize = 12),
-    top_annotation = ha_col,
-    heatmap_legend_param = base::list(
-      title_gp = grid::gpar(fontsize = 12),
-      labels_gp = grid::gpar(fontsize = 10)
     ),
-    cell_fun = cell_function
+    error = function(e) base::message("  p-value overlay skipped: ", e$message)
   )
   
-  cat(base::sprintf("Created combined heatmap with %d markers and %d tissue-congenic combinations\n", 
-                    base::nrow(heatmap_matrix), base::ncol(heatmap_matrix)))
-  
-  return(base::list("Combined" = ht))
+  invisible(NULL)
 }
 
-# ===== ENHANCED SINGLE HEATMAP WITH STATS =====
-
-create_single_heatmap_with_stats <- function(heatmap_matrix, title, scale_method, legend_suffix,
-                                             cluster_rows, cluster_cols, show_row_names, 
-                                             show_column_names, show_cell_values, log_base, 
-                                             percentile_range, stats_results, stats_config) {
+overlay_mfi_pvalues_combined <- function(drawn_ht, heatmap_name,
+                                         tissue_order, stats_results,
+                                         stats_config) {
+  if (base::is.null(stats_results) || base::is.null(stats_config) ||
+      stats_config$sig_display == "none") {
+    return(invisible(NULL))
+  }
   
-  scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, legend_suffix, 
+  row_ord      <- base::unlist(ComplexHeatmap::row_order(drawn_ht))
+  ht_matrix    <- drawn_ht@ht_list[[heatmap_name]]@matrix
+  marker_order <- base::rownames(ht_matrix)[row_ord]
+  n_rows       <- base::length(marker_order)
+  
+  for (slice_i in base::seq_along(tissue_order)) {
+    current_tissue  <- tissue_order[slice_i]
+    sig_annotations <- create_tissue_significance_matrix(
+      stats_results, base::rownames(ht_matrix), current_tissue, stats_config
+    )
+    if (base::is.null(sig_annotations) || base::length(sig_annotations) == 0) next
+    
+    base::tryCatch(
+      ComplexHeatmap::decorate_heatmap_body(
+        heatmap_name,
+        row_slice    = 1,
+        column_slice = slice_i,
+        {
+          for (i in base::seq_len(n_rows)) {
+            marker    <- marker_order[i]
+            disp_text <- sig_annotations[[marker]]
+            if (base::is.null(disp_text) || base::is.na(disp_text) || disp_text == "") next
+            
+            is_sig <- base::grepl("\\*|^p\\s*[=<]", disp_text)
+            if (!is_sig) next                        # <-- skip non-significant
+            
+            grid::grid.text(
+              label = disp_text,
+              x     = grid::unit(0.5, "npc"),
+              y     = grid::unit((n_rows - i + 0.5) / n_rows, "npc"),
+              just  = "centre",
+              gp    = grid::gpar(fontsize = 8, fontface = "bold", col = "black")
+            )
+          }
+        }
+      ),
+      error = function(e) base::message("  p-value overlay slice ", slice_i,
+                                        " (", current_tissue, ") skipped: ", e$message)
+    )
+  }
+  
+  invisible(NULL)
+}
+
+
+# Maps stats_config$test_type to a human-readable footnote string.
+get_stats_footnote <- function(stats_config) {
+  if (base::is.null(stats_config) || !stats_config$perform_stats) return(NULL)
+  
+  test_label <- base::switch(
+    stats_config$test_type,
+    "t.test"     = "Paired t-test",
+    "mannwhitney"= "Mann-Whitney U test (unpaired)",
+    "wilcoxon"   = "Wilcoxon signed-rank test (paired)",
+    "anova"      = "One-way ANOVA",
+    "kruskal"    = "Kruskal-Wallis test",
+    "rm_anova"   = "Repeated measures ANOVA",
+    "friedman"   = "Friedman test",
+    stats_config$test_type   # fallback: print raw string
+  )
+  
+  sig_label <- base::switch(
+    stats_config$sig_display,
+    "p_values" = "p-values shown",
+    "stars"    = base::paste0(
+      "significance symbols shown: ",
+      "* p<0.05, ** p<0.01, *** p<0.001"
+    ),
+    "both"     = base::paste0(
+      "p-values and significance symbols shown: ",
+      "* p<0.05, ** p<0.01, *** p<0.001"
+    ),
+    "none"     = NULL
+  )
+  
+  if (base::is.null(sig_label)) return(NULL)
+  
+  base::paste0(
+    "Statistical test: ", test_label,
+    " | \u03b1 = ", stats_config$alpha,
+    " | ", sig_label,
+    " | Only significant results overlaid"
+  )
+}
+
+# Dispatch wrapper: draws the heatmap then calls the correct overlay function.
+# Replaces all bare ComplexHeatmap::draw() calls in this module.
+
+draw_mfi_heatmap <- function(heatmap_item, stats_config = NULL) {
+  drawn_ht <- ComplexHeatmap::draw(heatmap_item$heatmap)
+  
+  if (base::identical(heatmap_item$type, "combined")) {
+    overlay_mfi_pvalues_combined(
+      drawn_ht,
+      heatmap_item$heatmap_name,
+      heatmap_item$tissue_order,
+      heatmap_item$stats_results,
+      heatmap_item$stats_config
+    )
+    # Use the config stored in the heatmap item for the combined case
+    active_config <- heatmap_item$stats_config
+  } else {
+    overlay_mfi_pvalues(
+      drawn_ht,
+      heatmap_item$heatmap_name,
+      heatmap_item$sig_values
+    )
+    active_config <- stats_config
+  }
+  
+  # --- Footnote ---
+  footnote <- get_stats_footnote(active_config)
+  if (!base::is.null(footnote)) {
+    grid::grid.text(
+      label = footnote,
+      x     = grid::unit(0.01, "npc"),
+      y     = grid::unit(0.01, "npc"),
+      just  = base::c("left", "bottom"),
+      gp    = grid::gpar(fontsize = 7, col = "grey40", fontface = "italic")
+    )
+  }
+  
+  invisible(drawn_ht)
+}
+
+# ===== SINGLE HEATMAP WITH STATS =====
+# Key changes vs previous version:
+#   - cell_fun no longer renders significance; it is used only for numeric
+#     cell values when show_cell_values = TRUE.
+#   - Returns a named list (heatmap, sig_values, heatmap_name, matrix, type)
+#     so draw_mfi_heatmap() can call overlay_mfi_pvalues() post-draw().
+
+create_single_heatmap_with_stats <- function(heatmap_matrix, title, scale_method,
+                                             legend_suffix, cluster_rows, cluster_cols,
+                                             show_row_names, show_column_names,
+                                             show_cell_values, log_base,
+                                             percentile_range, stats_results,
+                                             stats_config) {
+  
+  scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, legend_suffix,
                                         log_base, percentile_range)
   
-  # ===== GET SIGNIFICANCE VALUES FOR THIS TISSUE =====
+  # --- Build sig_values: named character vector (marker -> display text) ---
+  # Collected here; rendered post-draw via overlay_mfi_pvalues().
   sig_values <- NULL
   
-  if (!is.null(stats_results) && !is.null(stats_config) && 
+  if (!base::is.null(stats_results) && !base::is.null(stats_config) &&
       stats_config$sig_display != "none") {
     
-    sig_annotations <- create_tissue_significance_matrix(stats_results, base::rownames(heatmap_matrix), 
-                                                         title, stats_config)
+    sig_annotations <- create_tissue_significance_matrix(
+      stats_results, base::rownames(heatmap_matrix), title, stats_config
+    )
     
-    if (!is.null(sig_annotations) && base::length(sig_annotations) > 0) {
-      sig_values <- base::rep("", base::nrow(heatmap_matrix))
+    if (!base::is.null(sig_annotations) && base::length(sig_annotations) > 0) {
+      sig_values        <- base::rep("", base::nrow(heatmap_matrix))
       base::names(sig_values) <- base::rownames(heatmap_matrix)
       
       for (marker in base::names(sig_annotations)) {
-        if (marker %in% base::names(sig_values) && sig_annotations[marker] != "") {
+        if (marker %in% base::names(sig_values) &&
+            !base::is.null(sig_annotations[marker]) &&
+            !base::is.na(sig_annotations[marker]) &&
+            sig_annotations[marker] != "") {
           sig_values[marker] <- sig_annotations[marker]
         }
       }
     }
   }
   
-  # ===== CELL FUNCTION WITH CENTERED SIGNIFICANCE =====
+  # --- cell_fun: numeric values only (no significance here) ---
   cell_function <- NULL
-  if (show_cell_values || !is.null(sig_values)) {
-    
-    n_cols <- base::ncol(heatmap_matrix)
-    
+  if (show_cell_values) {
     cell_function <- function(j, i, x, y, width, height, fill) {
-      # Show cell values if requested
-      if (show_cell_values && !is.na(scaled_result$matrix[i, j])) {
-        grid::grid.text(base::sprintf("%.2f", scaled_result$matrix[i, j]), 
-                        x, y, gp = grid::gpar(fontsize = 8))
-      }
-      
-      # Show significance CENTERED between columns (only draw once, on first column)
-      if (!is.null(sig_values) && j == 1 && n_cols == 2 && sig_values[i] != "") {
-        # Center between column 1 and column 2
-        x_center <- x + width * 0.5
-        grid::grid.text(sig_values[i], 
-                        x_center, y, 
-                        gp = grid::gpar(fontsize = 9, fontface = "bold", col = "black"))
+      if (!base::is.na(scaled_result$matrix[i, j])) {
+        grid::grid.text(
+          base::sprintf("%.2f", scaled_result$matrix[i, j]),
+          x, y, gp = grid::gpar(fontsize = 8)
+        )
       }
     }
   }
   
   ht <- ComplexHeatmap::Heatmap(
     scaled_result$matrix,
-    name = scaled_result$legend_title,
-    col = scaled_result$color_function,
-    cluster_rows = cluster_rows,
-    cluster_columns = cluster_cols,
-    show_row_names = show_row_names,
+    name              = scaled_result$legend_title,
+    col               = scaled_result$color_function,
+    cluster_rows      = cluster_rows,
+    cluster_columns   = cluster_cols,
+    show_row_names    = show_row_names,
     show_column_names = show_column_names,
-    column_title = title,
-    column_title_gp = grid::gpar(fontsize = 14, fontface = "bold"),
-    row_title = "Markers",
-    row_title_gp = grid::gpar(fontsize = 12),
+    column_title      = title,
+    column_title_gp   = grid::gpar(fontsize = 14, fontface = "bold"),
+    row_title         = "Markers",
+    row_title_gp      = grid::gpar(fontsize = 12),
     heatmap_legend_param = base::list(
-      title_gp = grid::gpar(fontsize = 12),
+      title_gp  = grid::gpar(fontsize = 12),
       labels_gp = grid::gpar(fontsize = 10)
     ),
     cell_fun = cell_function
   )
   
-  return(base::list(heatmap = ht, matrix = scaled_result$matrix))
+  return(base::list(
+    heatmap      = ht,
+    sig_values   = sig_values,
+    heatmap_name = scaled_result$legend_title,  # must match name = above
+    matrix       = scaled_result$matrix,
+    type         = "separate"
+  ))
 }
 
-# ===== SEPARATE HEATMAPS WITH STATS =====
 
-create_separate_heatmaps_with_stats <- function(mfi_clean, scale_method, aggregation_method,
-                                                agg_fun, legend_suffix, cluster_rows, cluster_cols,
-                                                show_row_names, show_column_names, show_cell_values,
-                                                log_base, percentile_range, stats_results, stats_config) {
+# ===== SEPARATE HEATMAPS WITH STATS =====
+# Key change: stores the full result list per tissue (not $heatmap only),
+# so draw_mfi_heatmap() receives sig_values and heatmap_name alongside the
+# ComplexHeatmap object.
+
+create_separate_heatmaps_with_stats <- function(mfi_clean, scale_method,
+                                                aggregation_method, agg_fun,
+                                                legend_suffix, cluster_rows,
+                                                cluster_cols, show_row_names,
+                                                show_column_names,
+                                                show_cell_values, log_base,
+                                                percentile_range, stats_results,
+                                                stats_config) {
   
-  group_names <- base::unique(mfi_clean$tissue_factor)
-  cat("Creating separate heatmaps for", base::length(group_names), "tissue(s):", base::paste(group_names, collapse = ", "), "\n")
-  
+  group_names  <- base::unique(mfi_clean$tissue_factor)
   heatmap_list <- base::list()
+  
+  cat("Creating separate heatmaps for", base::length(group_names),
+      "tissue(s):", base::paste(group_names, collapse = ", "), "\n")
   
   for (group in group_names) {
     cat("Processing tissue:", group, "\n")
     
-    group_data <- mfi_clean %>%
-      dplyr::filter(tissue_factor == group)
+    group_data <- mfi_clean %>% dplyr::filter(tissue_factor == group)
     
     if (base::nrow(group_data) == 0) {
       base::warning(base::paste("No data found for tissue:", group))
@@ -7011,146 +6975,296 @@ create_separate_heatmaps_with_stats <- function(mfi_clean, scale_method, aggrega
       next
     }
     
-    result <- create_single_heatmap_with_stats(heatmap_matrix, base::as.character(group), scale_method, legend_suffix,
-                                               cluster_rows, cluster_cols, show_row_names, 
-                                               show_column_names, show_cell_values, log_base, 
-                                               percentile_range, stats_results, stats_config)
+    # Returns list(heatmap, sig_values, heatmap_name, matrix, type)
+    result <- create_single_heatmap_with_stats(
+      heatmap_matrix, base::as.character(group), scale_method, legend_suffix,
+      cluster_rows, cluster_cols, show_row_names, show_column_names,
+      show_cell_values, log_base, percentile_range, stats_results, stats_config
+    )
     
-    heatmap_list[[group]] <- result$heatmap
+    # Store full list — draw_mfi_heatmap() needs all fields
+    heatmap_list[[group]] <- result
     
-    cat(base::sprintf("  - Created heatmap with %d markers and %d congenics\n", 
+    cat(base::sprintf("  - Created heatmap: %d markers x %d congenics\n",
                       base::nrow(heatmap_matrix), base::ncol(heatmap_matrix)))
   }
   
   return(heatmap_list)
 }
 
-# ===== MAIN INTEGRATION FUNCTION =====
-
-create_mfi_heatmaps_with_stats <- function(mfi_data, 
-                                           selected_congenics = NULL,
-                                           selected_markers = NULL,
-                                           grouping_option = base::list(type = "separate"),
-                                           scale_method = "none",
-                                           aggregation_method = "mean",
-                                           cluster_rows = TRUE, 
-                                           cluster_cols = TRUE,
-                                           show_row_names = TRUE,
-                                           show_column_names = TRUE,
-                                           show_cell_values = FALSE,
-                                           log_base = 2,
-                                           percentile_range = base::c(0.05, 0.95),
-                                           stats_config = NULL) {
+create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
+                                               aggregation_method, agg_fun,
+                                               legend_suffix, cluster_rows,
+                                               cluster_cols, show_row_names,
+                                               show_column_names,
+                                               show_cell_values, log_base,
+                                               percentile_range, stats_results,
+                                               stats_config) {
   
-  required_cols <- base::c("marker", "MFI", "tissue_factor", "congenics", "NodeShort")
-  missing_cols <- base::setdiff(required_cols, base::names(mfi_data))
+  cat("Creating combined heatmap for all tissues\n")
+  
+  unique_tissues   <- base::sort(base::unique(mfi_clean$tissue_factor))
+  unique_congenics <- base::sort(base::unique(mfi_clean$congenics))
+  
+  cat("Tissues found:", base::paste(unique_tissues, collapse = ", "), "\n")
+  cat("Congenics found:", base::paste(unique_congenics, collapse = ", "), "\n")
+  
+  ordered_columns <- base::c()
+  tissue_groups   <- base::list()
+  
+  for (tissue in unique_tissues) {
+    tissue_cols <- base::c()
+    for (congenic in unique_congenics) {
+      col_name        <- base::paste(tissue, congenic, sep = "_")
+      ordered_columns <- base::c(ordered_columns, col_name)
+      tissue_cols     <- base::c(tissue_cols, col_name)
+    }
+    tissue_groups[[tissue]] <- tissue_cols
+  }
+  
+  heatmap_data <- mfi_clean %>%
+    dplyr::group_by(marker, tissue_factor, congenics) %>%
+    dplyr::summarise(agg_MFI = agg_fun(MFI, na.rm = TRUE), .groups = "drop") %>%
+    dplyr::mutate(tissue_congenic = base::paste(tissue_factor, congenics, sep = "_"))
+  
+  heatmap_matrix <- heatmap_data %>%
+    dplyr::select(marker, tissue_congenic, agg_MFI) %>%
+    tidyr::pivot_wider(names_from = tissue_congenic, values_from = agg_MFI) %>%
+    tibble::column_to_rownames("marker") %>%
+    base::as.matrix()
+  
+  missing_cols <- base::setdiff(ordered_columns, base::colnames(heatmap_matrix))
   if (base::length(missing_cols) > 0) {
-    stop(base::paste("Missing required columns:", base::paste(missing_cols, collapse = ', ')))
+    missing_matrix <- base::matrix(NA, nrow = base::nrow(heatmap_matrix),
+                                   ncol = base::length(missing_cols))
+    base::colnames(missing_matrix) <- missing_cols
+    base::rownames(missing_matrix) <- base::rownames(heatmap_matrix)
+    heatmap_matrix <- base::cbind(heatmap_matrix, missing_matrix)
   }
   
-  mfi_clean <- mfi_data %>%
-    dplyr::filter(!is.na(congenics))
+  heatmap_matrix <- heatmap_matrix[, ordered_columns, drop = FALSE]
   
-  if (!is.null(selected_congenics)) {
-    mfi_clean <- mfi_clean %>%
-      dplyr::filter(congenics %in% selected_congenics)
-    cat("Filtered to selected congenics:", base::paste(selected_congenics, collapse = ", "), "\n")
+  if (base::nrow(heatmap_matrix) == 0 || base::ncol(heatmap_matrix) == 0) {
+    stop("Empty combined matrix")
   }
   
-  if (!is.null(selected_markers)) {
-    mfi_clean <- mfi_clean %>%
-      dplyr::filter(marker %in% selected_markers)
-    cat("Filtered to selected markers:", base::paste(selected_markers, collapse = ", "), "\n")
+  cat("Matrix dimensions:", base::nrow(heatmap_matrix), "x",
+      base::ncol(heatmap_matrix), "\n")
+  
+  col_data <- base::data.frame(
+    tissue_congenic = base::colnames(heatmap_matrix),
+    stringsAsFactors = FALSE
+  ) %>%
+    dplyr::mutate(
+      tissue   = stringr::str_extract(tissue_congenic, "^[^_]+"),
+      congenic = stringr::str_extract(tissue_congenic, "[^_]+$")
+    ) %>%
+    tibble::column_to_rownames("tissue_congenic")
+  
+  if (base::length(unique_tissues) <= 11) {
+    tissue_colors <- RColorBrewer::brewer.pal(
+      base::max(3, base::length(unique_tissues)), "Set3"
+    )[1:base::length(unique_tissues)]
+  } else {
+    tissue_colors <- grDevices::rainbow(base::length(unique_tissues))
+  }
+  base::names(tissue_colors) <- unique_tissues
+  
+  congenic_colors <- base::c("CD45.1"   = "lightblue",
+                             "CD45.2"   = "lightcoral",
+                             "CD45.1.2" = "lightgreen")
+  congenic_colors <- congenic_colors[base::names(congenic_colors) %in% unique_congenics]
+  if (base::length(unique_congenics) > base::length(congenic_colors)) {
+    additional_colors <- grDevices::rainbow(
+      base::length(unique_congenics) - base::length(congenic_colors)
+    )
+    base::names(additional_colors) <- base::setdiff(unique_congenics,
+                                                    base::names(congenic_colors))
+    congenic_colors <- base::c(congenic_colors, additional_colors)
   }
   
-  if (base::nrow(mfi_clean) == 0) {
-    stop("No data remaining after filtering")
-  }
+  tissue_splits        <- base::rep(unique_tissues, each = base::length(unique_congenics))
+  base::names(tissue_splits) <- base::colnames(heatmap_matrix)
   
-  stats_results <- NULL
-  if (!is.null(stats_config) && stats_config$perform_stats) {
-    stats_results <- perform_statistical_analysis(mfi_clean, selected_congenics, 
-                                                  selected_markers, stats_config)
-    
-    if (!is.null(stats_results)) {
-      display_stats_summary(stats_results)
+  ha_col <- ComplexHeatmap::HeatmapAnnotation(
+    Tissue   = col_data$tissue,
+    Congenic = col_data$congenic,
+    col      = base::list(
+      Tissue   = tissue_colors,
+      Congenic = congenic_colors
+    ),
+    gap                  = grid::unit(1, "mm"),
+    annotation_name_gp   = grid::gpar(fontsize = 10),
+    which                = "column"
+  )
+  
+  scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, legend_suffix,
+                                        log_base, percentile_range)
+  
+  # --- cell_fun: numeric values only when show_cell_values = TRUE ---
+  # Significance is rendered post-draw via overlay_mfi_pvalues_combined().
+  cell_function <- NULL
+  if (show_cell_values) {
+    cell_function <- function(j, i, x, y, width, height, fill) {
+      if (!base::is.na(scaled_result$matrix[i, j])) {
+        grid::grid.text(
+          base::sprintf("%.2f", scaled_result$matrix[i, j]),
+          x, y, gp = grid::gpar(fontsize = 7)
+        )
+      }
     }
   }
   
-  agg_fun <- if (aggregation_method == "mean") base::mean else stats::median
+  ht <- ComplexHeatmap::Heatmap(
+    scaled_result$matrix,
+    name              = scaled_result$legend_title,
+    col               = scaled_result$color_function,
+    cluster_rows      = cluster_rows,
+    cluster_columns   = FALSE,
+    column_split      = tissue_splits,
+    column_gap        = grid::unit(1, "mm"),
+    show_row_names    = show_row_names,
+    show_column_names = show_column_names,
+    column_names_gp   = grid::gpar(fontsize = 9, angle = 45),
+    column_title      = "All Tissues Combined",
+    column_title_gp   = grid::gpar(fontsize = 14, fontface = "bold"),
+    row_title         = "Markers",
+    row_title_gp      = grid::gpar(fontsize = 12),
+    top_annotation    = ha_col,
+    heatmap_legend_param = base::list(
+      title_gp  = grid::gpar(fontsize = 12),
+      labels_gp = grid::gpar(fontsize = 10)
+    ),
+    cell_fun = cell_function
+  )
+  
+  cat(base::sprintf(
+    "Created combined heatmap: %d markers x %d tissue-congenic combinations\n",
+    base::nrow(heatmap_matrix), base::ncol(heatmap_matrix)
+  ))
+  
+  # Return full list; tissue_order drives column_slice iteration in
+  # overlay_mfi_pvalues_combined() — order must match column_split ordering.
+  return(base::list("Combined" = base::list(
+    heatmap      = ht,
+    heatmap_name = scaled_result$legend_title,
+    tissue_order = unique_tissues,
+    stats_results = stats_results,
+    stats_config  = stats_config,
+    matrix        = scaled_result$matrix,
+    type          = "combined"
+  )))
+}
+
+# ===== MAIN INTEGRATION FUNCTION (logic unchanged) =====
+
+create_mfi_heatmaps_with_stats <- function(mfi_data,
+                                           selected_congenics   = NULL,
+                                           selected_markers     = NULL,
+                                           grouping_option      = base::list(type = "separate"),
+                                           scale_method         = "none",
+                                           aggregation_method   = "mean",
+                                           cluster_rows         = TRUE,
+                                           cluster_cols         = TRUE,
+                                           show_row_names       = TRUE,
+                                           show_column_names    = TRUE,
+                                           show_cell_values     = FALSE,
+                                           log_base             = 2,
+                                           percentile_range     = base::c(0.05, 0.95),
+                                           stats_config         = NULL) {
+  
+  required_cols <- base::c("marker", "MFI", "tissue_factor", "congenics", "NodeShort")
+  missing_cols  <- base::setdiff(required_cols, base::names(mfi_data))
+  if (base::length(missing_cols) > 0) {
+    stop(base::paste("Missing required columns:", base::paste(missing_cols, collapse = ", ")))
+  }
+  
+  mfi_clean <- mfi_data %>% dplyr::filter(!is.na(congenics))
+  
+  if (!base::is.null(selected_congenics)) {
+    mfi_clean <- mfi_clean %>% dplyr::filter(congenics %in% selected_congenics)
+    cat("Filtered to congenics:", base::paste(selected_congenics, collapse = ", "), "\n")
+  }
+  if (!base::is.null(selected_markers)) {
+    mfi_clean <- mfi_clean %>% dplyr::filter(marker %in% selected_markers)
+    cat("Filtered to markers:", base::paste(selected_markers, collapse = ", "), "\n")
+  }
+  if (base::nrow(mfi_clean) == 0) stop("No data remaining after filtering")
+  
+  stats_results <- NULL
+  if (!base::is.null(stats_config) && stats_config$perform_stats) {
+    stats_results <- perform_statistical_analysis(
+      mfi_clean, selected_congenics, selected_markers, stats_config
+    )
+    if (!base::is.null(stats_results)) display_stats_summary(stats_results)
+  }
+  
+  agg_fun       <- if (aggregation_method == "mean") base::mean else stats::median
   legend_suffix <- if (aggregation_method == "mean") "Mean" else "Median"
   
   if (grouping_option$type == "separate") {
-    return(create_separate_heatmaps_with_stats(mfi_clean, scale_method, aggregation_method, 
-                                               agg_fun, legend_suffix, cluster_rows, cluster_cols,
-                                               show_row_names, show_column_names, show_cell_values,
-                                               log_base, percentile_range, stats_results, stats_config))
+    return(create_separate_heatmaps_with_stats(
+      mfi_clean, scale_method, aggregation_method, agg_fun, legend_suffix,
+      cluster_rows, cluster_cols, show_row_names, show_column_names,
+      show_cell_values, log_base, percentile_range, stats_results, stats_config
+    ))
   } else {
-    return(create_combined_heatmap_with_stats(mfi_clean, scale_method, aggregation_method,
-                                              agg_fun, legend_suffix, cluster_rows, cluster_cols,
-                                              show_row_names, show_column_names, show_cell_values,
-                                              log_base, percentile_range, stats_results, stats_config))
+    return(create_combined_heatmap_with_stats(
+      mfi_clean, scale_method, aggregation_method, agg_fun, legend_suffix,
+      cluster_rows, cluster_cols, show_row_names, show_column_names,
+      show_cell_values, log_base, percentile_range, stats_results, stats_config
+    ))
   }
 }
 
+
 # ===== COMPLETE INTERACTIVE WORKFLOW =====
+# Change from previous version: every ComplexHeatmap::draw() call is replaced
+# with draw_mfi_heatmap(), which calls the correct post-draw overlay function.
 
 create_mfi_heatmaps_interactive_enhanced <- function(mfi_data, auto_save = FALSE, ...) {
   
   cat("=== Enhanced Interactive MFI Heatmap Creation with Statistics ===\n")
   
-  while(TRUE) {
-    # Step 1: Select congenics
-    selected_congenics <- select_congenics_interactive(mfi_data)
-    if(is.null(selected_congenics)) {
-      cat("Congenic selection cancelled.\n")
-      return(NULL)
-    }
+  while (TRUE) {
     
-    # Step 2: Select grouping option
+    # Step 1: congenics
+    selected_congenics <- select_congenics_interactive(mfi_data)
+    if (base::is.null(selected_congenics)) { cat("Congenic selection cancelled.\n"); return(NULL) }
+    
+    # Step 2: grouping
     grouping_option <- select_grouping_option(mfi_data)
     
-    # Step 3: Select markers
-    filtered_data <- mfi_data %>%
+    # Step 3: markers
+    filtered_data    <- mfi_data %>%
       dplyr::filter(!is.na(congenics), congenics %in% selected_congenics)
-    
     selected_markers <- select_markers_interactive(filtered_data)
-    if(is.null(selected_markers)) {
-      cat("Marker selection cancelled.\n")
-      return(NULL)
-    }
+    if (base::is.null(selected_markers)) { cat("Marker selection cancelled.\n"); return(NULL) }
     
-    # Step 4: Select statistical testing
-    stats_config <- select_statistical_test_interactive(mfi_data, selected_congenics, selected_markers)
+    # Step 4: statistics
+    stats_config <- select_statistical_test_interactive(
+      mfi_data, selected_congenics, selected_markers
+    )
     
-    # Step 5: Get scaling method
+    # Step 5: scaling
     scaling_params <- select_scaling_method_interactive()
+    if (base::is.null(scaling_params)) { cat("Scaling selection cancelled.\n"); return(NULL) }
     
-    if(is.null(scaling_params)) {
-      cat("Scaling method selection cancelled.\n")
-      return(NULL)
-    }
-    
-    # Step 6: Create heatmaps
-    cat("\nCreating heatmaps with your selections...\n")
+    # Step 6: create heatmaps
+    cat("\nCreating heatmaps...\n")
     cat("- Congenics:", base::paste(selected_congenics, collapse = ", "), "\n")
-    cat("- Markers:", base::length(selected_markers), "selected\n")
-    cat("- Grouping:", grouping_option$type, "\n")
-    cat("- Scaling:", scaling_params$scale_method, "\n")
-    if(stats_config$perform_stats) {
-      cat("- Statistics:", stats_config$test_type, "\n")
-    } else {
-      cat("- Statistics: None\n")
-    }
+    cat("- Markers:",   base::length(selected_markers), "selected\n")
+    cat("- Grouping:",  grouping_option$type, "\n")
+    cat("- Scaling:",   scaling_params$scale_method, "\n")
+    cat("- Statistics:", if (stats_config$perform_stats) stats_config$test_type else "None", "\n")
     
-    # Combine all parameters
     all_params <- base::c(
       base::list(
-        mfi_data = mfi_data,
+        mfi_data           = mfi_data,
         selected_congenics = selected_congenics,
-        selected_markers = selected_markers,
-        grouping_option = grouping_option,
-        stats_config = stats_config
+        selected_markers   = selected_markers,
+        grouping_option    = grouping_option,
+        stats_config       = stats_config
       ),
       scaling_params,
       base::list(...)
@@ -7159,117 +7273,135 @@ create_mfi_heatmaps_interactive_enhanced <- function(mfi_data, auto_save = FALSE
     heatmaps <- base::do.call(create_mfi_heatmaps_with_stats, all_params)
     
     if (base::length(heatmaps) > 0) {
-      cat(base::sprintf("\nDisplaying heatmap: %s\n", base::names(heatmaps)[1]))
-      ComplexHeatmap::draw(heatmaps[[1]])
       
-      # Interactive save option
-      if(!auto_save) {
+      # --- Initial display ---
+      cat(base::sprintf("\nDisplaying heatmap: %s\n", base::names(heatmaps)[1]))
+      draw_mfi_heatmap(heatmaps[[1]], stats_config = stats_config)    # <-- replaces ComplexHeatmap::draw()
+      
+      # --- Save options ---
+      if (!auto_save) {
         cat("\n=== Save MFI Heatmaps ===\n")
         cat("1. Save all heatmaps\n")
-        cat("2. Save selected heatmaps\n") 
+        cat("2. Save selected heatmaps\n")
         cat("3. Don't save\n")
         
         save_choice <- base::readline("Choose save option (1-3): ")
         
-        if(save_choice == "1") {
-          # Save all heatmaps
+        if (save_choice == "1") {
+          
           saved_count <- 0
-          purrr::iwalk(heatmaps, function(heatmap, heatmap_name) {
+          purrr::iwalk(heatmaps, function(heatmap_item, heatmap_name) {
             base::tryCatch({
-              timestamp <- base::format(base::Sys.time(), "%Y%m%d_%H%M%S")
+              timestamp      <- base::format(base::Sys.time(), "%Y%m%d_%H%M%S")
               suggested_name <- base::paste0("mfi_heatmap_", base::make.names(heatmap_name))
-              filename <- base::paste0(suggested_name, "_", timestamp, ".png")
+              filename       <- base::paste0(suggested_name, "_", timestamp, ".png")
               
               grDevices::png(filename, width = 12, height = 10, units = "in", res = 300)
-              ComplexHeatmap::draw(heatmap)
+              draw_mfi_heatmap(heatmap_item)    # <-- replaces ComplexHeatmap::draw()
               grDevices::dev.off()
               
-              cat("Heatmap saved to:", filename, "\n")
+              cat("Heatmap saved:", filename, "\n")
               saved_count <<- saved_count + 1
-              
             }, error = function(e) {
               cat("Error saving heatmap", heatmap_name, ":", e$message, "\n")
             })
           })
-          cat("Saved", saved_count, "out of", base::length(heatmaps), "heatmaps\n")
+          cat("Saved", saved_count, "of", base::length(heatmaps), "heatmaps\n")
           
-        } else if(save_choice == "2") {
-          # Save selected heatmaps
+        } else if (save_choice == "2") {
+          
           cat("\nAvailable heatmaps:\n")
           purrr::iwalk(base::names(heatmaps), ~cat(base::sprintf("%d. %s\n", .y, .x)))
           
-          selection <- base::readline("Enter heatmap numbers to save (space or comma-separated): ")
-          if(selection != "") {
+          selection <- base::readline("Enter heatmap numbers (space or comma-separated): ")
+          if (selection != "") {
             base::tryCatch({
-              if(base::grepl("\\s", selection)) {
-                selected_indices <- base::as.numeric(stringr::str_trim(stringr::str_split(selection, "\\s+")[[1]]))
+              if (base::grepl("\\s", selection)) {
+                selected_indices <- base::as.numeric(
+                  stringr::str_trim(stringr::str_split(selection, "\\s+")[[1]])
+                )
               } else {
-                selected_indices <- base::as.numeric(stringr::str_trim(stringr::str_split(selection, ",")[[1]]))
+                selected_indices <- base::as.numeric(
+                  stringr::str_trim(stringr::str_split(selection, ",")[[1]])
+                )
               }
               
               selected_indices <- selected_indices[!is.na(selected_indices)]
-              valid_indices <- selected_indices[selected_indices >= 1 & selected_indices <= base::length(heatmaps)]
+              valid_indices    <- selected_indices[
+                selected_indices >= 1 & selected_indices <= base::length(heatmaps)
+              ]
               
-              if(base::length(valid_indices) > 0) {
+              if (base::length(valid_indices) > 0) {
                 selected_heatmaps <- heatmaps[valid_indices]
-                selected_names <- base::names(heatmaps)[valid_indices]
+                selected_names    <- base::names(heatmaps)[valid_indices]
                 
                 saved_count <- 0
-                purrr::iwalk(selected_heatmaps, function(heatmap, idx) {
+                purrr::iwalk(selected_heatmaps, function(heatmap_item, idx) {
                   heatmap_name <- selected_names[idx]
                   
-                  cat(base::sprintf("\n--- Saving heatmap: %s ---\n", heatmap_name))
-                  default_name <- base::paste0("mfi_heatmap_", base::make.names(heatmap_name), "_", base::format(base::Sys.time(), "%Y%m%d_%H%M%S"))
-                  filename <- base::readline(base::paste0("Enter filename (default: ", default_name, "): "))
-                  if(filename == "") filename <- default_name
+                  cat(base::sprintf("\n--- Saving: %s ---\n", heatmap_name))
+                  default_name <- base::paste0(
+                    "mfi_heatmap_", base::make.names(heatmap_name), "_",
+                    base::format(base::Sys.time(), "%Y%m%d_%H%M%S")
+                  )
+                  filename <- base::readline(
+                    base::paste0("Enter filename (default: ", default_name, "): ")
+                  )
+                  if (filename == "") filename <- default_name
                   
-                  if(!stringr::str_detect(filename, "\\.(png|pdf)$")) {
+                  if (!stringr::str_detect(filename, "\\.(png|pdf)$")) {
                     cat("1. PNG\n2. PDF\n")
                     format_choice <- base::readline("Choose format (1-2): ")
-                    extension <- if(format_choice == "2") ".pdf" else ".png"
-                    filename <- base::paste0(filename, extension)
+                    extension     <- if (format_choice == "2") ".pdf" else ".png"
+                    filename      <- base::paste0(filename, extension)
                   }
                   
                   base::tryCatch({
-                    if(stringr::str_detect(filename, "\\.pdf$")) {
+                    if (stringr::str_detect(filename, "\\.pdf$")) {
                       grDevices::pdf(filename, width = 12, height = 10)
                     } else {
-                      grDevices::png(filename, width = 12, height = 10, units = "in", res = 300)
+                      grDevices::png(filename, width = 12, height = 10,
+                                     units = "in", res = 300)
                     }
-                    ComplexHeatmap::draw(heatmap)
+                    draw_mfi_heatmap(heatmap_item)    # <-- replaces ComplexHeatmap::draw()
                     grDevices::dev.off()
                     
-                    cat("Heatmap saved to:", filename, "\n")
+                    cat("Saved:", filename, "\n")
                     saved_count <<- saved_count + 1
-                    
                   }, error = function(e) {
-                    cat("Error saving heatmap:", e$message, "\n")
+                    cat("Error saving:", e$message, "\n")
                   })
                 })
-                
                 cat("Saved", saved_count, "selected heatmaps\n")
               }
-              
             }, error = function(e) {
               cat("Invalid input format\n")
             })
           }
         }
         
-        # Save statistics if available
-        if(stats_config$perform_stats && base::exists("stats_results") && !is.null(stats_results)) {
+        # Save statistics table if available
+        if (stats_config$perform_stats && base::exists("stats_results") &&
+            !base::is.null(stats_results)) {
           cat("\n1. Save statistical results\n2. Don't save statistics\n")
-          stats_save_choice <- base::readline("Save heatmap statistics? (1-2): ")
-          if(stats_save_choice == "1") {
-            stats_filename <- base::paste0("mfi_heatmap_statistics_", base::format(base::Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
-            stats_filename <- base::readline(base::paste0("Enter stats filename (default: ", stats_filename, "): "))
-            if(stats_filename == "") {
-              stats_filename <- base::paste0("mfi_heatmap_statistics_", base::format(base::Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+          stats_save_choice <- base::readline("Save statistics? (1-2): ")
+          if (stats_save_choice == "1") {
+            stats_filename <- base::paste0(
+              "mfi_heatmap_statistics_",
+              base::format(base::Sys.time(), "%Y%m%d_%H%M%S"), ".csv"
+            )
+            stats_filename <- base::readline(
+              base::paste0("Enter stats filename (default: ", stats_filename, "): ")
+            )
+            if (stats_filename == "") {
+              stats_filename <- base::paste0(
+                "mfi_heatmap_statistics_",
+                base::format(base::Sys.time(), "%Y%m%d_%H%M%S"), ".csv"
+              )
             }
-            
             base::tryCatch({
               readr::write_csv(stats_results$summary, stats_filename)
-              cat("Statistics saved to:", stats_filename, "\n")
+              cat("Statistics saved:", stats_filename, "\n")
             }, error = function(e) {
               cat("Error saving statistics:", e$message, "\n")
             })
@@ -7278,27 +7410,28 @@ create_mfi_heatmaps_interactive_enhanced <- function(mfi_data, auto_save = FALSE
       }
       
       return(heatmaps)
+      
     } else {
-      cat("No heatmaps were created. Please check your selections.\n")
+      cat("No heatmaps created. Please check your selections.\n")
       return(NULL)
     }
   }
 }
 
-# ===== DATA DIAGNOSTIC FUNCTION =====
+
+# ===== DATA DIAGNOSTIC FUNCTION (UNCHANGED) =====
 
 diagnose_mfi_data <- function(mfi_data) {
   cat("\n=== MFI DATA DIAGNOSTIC ===\n")
-  
-  cat("Dataset dimensions:", base::nrow(mfi_data), "rows x", base::ncol(mfi_data), "columns\n")
-  cat("Column names:", base::paste(base::names(mfi_data), collapse = ", "), "\n\n")
+  cat("Dimensions:", base::nrow(mfi_data), "rows x", base::ncol(mfi_data), "columns\n")
+  cat("Columns:", base::paste(base::names(mfi_data), collapse = ", "), "\n\n")
   
   required_cols <- base::c("marker", "MFI", "tissue_factor", "congenics", "NodeShort")
-  missing_cols <- base::setdiff(required_cols, base::names(mfi_data))
+  missing_cols  <- base::setdiff(required_cols, base::names(mfi_data))
   if (base::length(missing_cols) > 0) {
-    cat("⚠️  Missing required columns:", base::paste(missing_cols, collapse = ", "), "\n")
+    cat("Missing required columns:", base::paste(missing_cols, collapse = ", "), "\n")
   } else {
-    cat("✓ All required columns present\n")
+    cat("All required columns present\n")
   }
   
   cat("\n--- Data Completeness ---\n")
@@ -7308,33 +7441,26 @@ diagnose_mfi_data <- function(mfi_data) {
   
   if ("MFI" %in% base::names(mfi_data)) {
     cat("\n--- MFI Distribution ---\n")
-    mfi_stats <- base::summary(mfi_data$MFI)
-    base::print(mfi_stats)
-    
-    cat("MFI range:", base::min(mfi_data$MFI, na.rm = TRUE), "to", 
-        base::max(mfi_data$MFI, na.rm = TRUE), "\n")
-    
+    base::print(base::summary(mfi_data$MFI))
+    cat("MFI range:", base::min(mfi_data$MFI, na.rm = TRUE),
+        "to", base::max(mfi_data$MFI, na.rm = TRUE), "\n")
     zero_neg <- base::sum(mfi_data$MFI <= 0, na.rm = TRUE)
-    if (zero_neg > 0) {
-      cat("⚠️ ", zero_neg, "zero or negative MFI values found\n")
-    }
+    if (zero_neg > 0) cat("Zero or negative MFI values:", zero_neg, "\n")
   }
   
   cat("\n--- Unique Values ---\n")
   if ("congenics" %in% base::names(mfi_data)) {
-    congenics_unique <- base::unique(mfi_data$congenics[!is.na(mfi_data$congenics)])
-    cat("Congenics (", base::length(congenics_unique), "):", base::paste(congenics_unique, collapse = ", "), "\n")
+    u <- base::unique(mfi_data$congenics[!is.na(mfi_data$congenics)])
+    cat("Congenics (", base::length(u), "):", base::paste(u, collapse = ", "), "\n")
   }
-  
   if ("tissue_factor" %in% base::names(mfi_data)) {
-    groups_unique <- base::unique(mfi_data$tissue_factor[!is.na(mfi_data$tissue_factor)])
-    cat("Tissues (", base::length(groups_unique), "):", base::paste(groups_unique, collapse = ", "), "\n")
+    u <- base::unique(mfi_data$tissue_factor[!is.na(mfi_data$tissue_factor)])
+    cat("Tissues (", base::length(u), "):", base::paste(u, collapse = ", "), "\n")
   }
-  
   if ("marker" %in% base::names(mfi_data)) {
-    markers_unique <- base::unique(mfi_data$marker[!is.na(mfi_data$marker)])
-    cat("Markers (", base::length(markers_unique), "):", base::paste(utils::head(markers_unique, 10), collapse = ", "))
-    if (base::length(markers_unique) > 10) cat(", ... and", base::length(markers_unique) - 10, "more")
+    u <- base::unique(mfi_data$marker[!is.na(mfi_data$marker)])
+    cat("Markers (", base::length(u), "):", base::paste(utils::head(u, 10), collapse = ", "))
+    if (base::length(u) > 10) cat(", ... and", base::length(u) - 10, "more")
     cat("\n")
   }
   
@@ -7344,12 +7470,12 @@ diagnose_mfi_data <- function(mfi_data) {
       dplyr::filter(!is.na(congenics), !is.na(tissue_factor)) %>%
       dplyr::count(tissue_factor, congenics) %>%
       tidyr::pivot_wider(names_from = congenics, values_from = n, values_fill = 0)
-    
     base::print(sample_dist)
   }
 }
+
 #===============================================================================
-# Engraftment plot of congenic markers with Save (USE)
+# Engraftment plot of congenic markers with Save ----
 #===============================================================================
 
 create_engraftment_plot <- function(data, 
@@ -8515,118 +8641,169 @@ exclude_samples_by_metadata <- function(gs, pd) {
 # INTERACTIVE NODE SELECTION (STREAMLINED)
 # ============================================================================
 
-select_single_node_for_umap <- function(gs) {
+select_nodes_for_umap <- function(gs) {
   pops <- get_all_populations(gs)
   
-  while(TRUE) {
+  while (TRUE) {
     cat("\n=== Node Selection for UMAP Analysis ===\n")
-    cat("1. Select from list (interactive)\n")
-    cat("2. Use regex pattern\n") 
+    cat("You may select ONE or MULTIPLE nodes.\n")
+    cat("Cells from all selected nodes will be pooled and tagged with a 'source_node' column.\n\n")
+    cat("1. Select from numbered list\n")
+    cat("2. Use regex pattern\n")
     cat("3. Use leaf names\n")
-    cat("4. Exit/Cancel\n")
+    cat("4. Cancel\n")
     
-    choice <- readline("Choose method (1-4): ")
+    choice <- base::readline("Choose method (1-4): ")
     
-    if(choice == "4") {
-      stop("Node selection cancelled by user.")
+    if (choice == "4") stop("Node selection cancelled by user.")
+    
+    # ------------------------------------------------------------------
+    # Helper: confirm a candidate vector and return or loop
+    # ------------------------------------------------------------------
+    confirm_selection <- function(candidates) {
+      if (base::length(candidates) == 0) {
+        cat("No nodes selected. Please try again.\n")
+        return(NULL)
+      }
+      
+      cat(base::sprintf("\n%d node(s) selected:\n", base::length(candidates)))
+      purrr::iwalk(candidates, ~cat(base::sprintf("  %d. %s\n", .y, .x)))
+      
+      ok <- base::readline("Confirm selection? (y/n, default y): ")
+      if (base::tolower(base::trimws(ok)) == "n") {
+        cat("Selection cancelled.\n")
+        return(NULL)
+      }
+      candidates
     }
     
-    result <- switch(choice,
-                     "1" = {
-                       cat("\nAvailable populations:\n")
-                       sel <- select.list(pops, multiple = FALSE, title = "Select ONE population for UMAP")
-                       if(length(sel) == 0) {
-                         cat("No population selected. Going back...\n")
-                         next
-                       }
-                       sel
-                     },
-                     
-                     "2" = {
-                       while(TRUE) {
-                         pattern <- readline("Enter regex pattern or 'back': ")
-                         
-                         if(tolower(pattern) == "back") break
-                         if(pattern == "") {
-                           cat("Empty pattern. Please try again.\n")
-                           next
-                         }
-                         
-                         matches <- grep(pattern, pops, value = TRUE, ignore.case = TRUE)
-                         if(length(matches) == 0) {
-                           cat("No matches found. Try a different pattern.\n")
-                           retry <- readline("Try again? (y/n): ")
-                           if(tolower(retry) != "y") break
-                           next
-                         }
-                         
-                         cat(sprintf("Found %d matches:\n", length(matches)))
-                         iwalk(matches, ~cat(sprintf("%d. %s\n", .y, .x)))
-                         
-                         while(TRUE) {
-                           index <- readline("Enter number of population to select, or 'back': ")
-                           if(tolower(index) == "back") break
-                           
-                           if(grepl("^\\d+$", index)) {
-                             selected_idx <- as.numeric(index)
-                             if(!is.na(selected_idx) && selected_idx >= 1 && selected_idx <= length(matches)) {
-                               return(matches[selected_idx])
-                             }
-                           }
-                           cat("Invalid selection. Please try again.\n")
-                         }
-                       }
-                       NULL
-                     },
-                     
-                     "3" = {
-                       while(TRUE) {
-                         input <- readline("Enter leaf name or 'back': ")
-                         if(tolower(input) == "back") break
-                         if(input == "") {
-                           cat("No leaf name provided. Please try again.\n")
-                           next
-                         }
-                         
-                         matches <- resolve_nodes_by_leaf(gs, input)
-                         
-                         if(length(matches) == 0) {
-                           cat("No matches found for that leaf name.\n")
-                           retry <- readline("Try again? (y/n): ")
-                           if(tolower(retry) != "y") break
-                           next
-                         }
-                         
-                         if(length(matches) == 1) {
-                           return(matches[1])
-                         } else {
-                           cat(sprintf("Found %d matches:\n", length(matches)))
-                           iwalk(matches, ~cat(sprintf("%d. %s\n", .y, .x)))
-                           
-                           while(TRUE) {
-                             index <- readline("Enter number to select, or 'back': ")
-                             if(tolower(index) == "back") break
-                             
-                             if(grepl("^\\d+$", index)) {
-                               selected_idx <- as.numeric(index)
-                               if(!is.na(selected_idx) && selected_idx >= 1 && selected_idx <= length(matches)) {
-                                 return(matches[selected_idx])
-                               }
-                             }
-                             cat("Invalid selection. Please try again.\n")
-                           }
-                         }
-                       }
-                       NULL
-                     },
-                     
-                     {
-                       cat("Invalid choice. Please select 1-4.\n")
-                       NULL
-                     }
-    )
+    # ------------------------------------------------------------------
+    # Helper: parse space- or comma-separated integers against a vector
+    # ------------------------------------------------------------------
+    parse_indices <- function(raw, n_options) {
+      clean        <- stringr::str_replace_all(raw, ",", " ")
+      parts        <- stringr::str_trim(stringr::str_split(base::trimws(clean), "\\s+")[[1]])
+      parts        <- parts[parts != ""]
+      idx          <- base::suppressWarnings(base::as.numeric(parts))
+      invalid      <- idx[base::is.na(idx) | idx < 1 | idx > n_options]
+      
+      if (base::length(invalid) > 0) {
+        cat("Invalid number(s):", base::paste(invalid, collapse = ", "),
+            "— must be between 1 and", n_options, "\n")
+        return(NULL)
+      }
+      base::unique(base::as.integer(idx))
+    }
     
-    if(!is.null(result)) return(result)
+    # ------------------------------------------------------------------
+    # METHOD 1 — numbered list
+    # ------------------------------------------------------------------
+    if (choice == "1") {
+      cat("\nAvailable populations:\n")
+      purrr::iwalk(pops, ~cat(base::sprintf("%d. %s\n", .y, .x)))
+      
+      while (TRUE) {
+        raw <- base::readline(
+          "Enter node number(s), space-separated (e.g. 3 7 12): "
+        )
+        if (base::tolower(raw) == "back") break
+        
+        idx <- parse_indices(raw, base::length(pops))
+        if (base::is.null(idx)) next
+        
+        result <- confirm_selection(pops[idx])
+        if (!base::is.null(result)) return(result)
+      }
+      next
+    }
+    
+    # ------------------------------------------------------------------
+    # METHOD 2 — regex
+    # ------------------------------------------------------------------
+    if (choice == "2") {
+      while (TRUE) {
+        pattern <- base::readline("Enter regex pattern or 'back': ")
+        if (base::tolower(pattern) == "back") break
+        if (pattern == "") { cat("Empty pattern.\n"); next }
+        
+        matches <- base::grep(pattern, pops, value = TRUE, ignore.case = TRUE)
+        if (base::length(matches) == 0) {
+          cat("No matches. Try again.\n"); next
+        }
+        
+        cat(base::sprintf("Found %d match(es):\n", base::length(matches)))
+        purrr::iwalk(matches, ~cat(base::sprintf("  %d. %s\n", .y, .x)))
+        
+        while (TRUE) {
+          raw <- base::readline(
+            "Enter number(s) to select, 'all', or 'back': "
+          )
+          if (base::tolower(raw) == "back") break
+          if (base::tolower(raw) == "all") {
+            result <- confirm_selection(matches)
+            if (!base::is.null(result)) return(result)
+            break
+          }
+          
+          idx <- parse_indices(raw, base::length(matches))
+          if (base::is.null(idx)) next
+          
+          result <- confirm_selection(matches[idx])
+          if (!base::is.null(result)) return(result)
+          break
+        }
+      }
+      next
+    }
+    
+    # ------------------------------------------------------------------
+    # METHOD 3 — leaf names (comma- or space-separated)
+    # ------------------------------------------------------------------
+    if (choice == "3") {
+      while (TRUE) {
+        raw <- base::readline(
+          "Enter leaf name(s) space-separated (e.g. CD8a_pos siIEL) or 'back': "
+        )
+        if (base::tolower(raw) == "back") break
+        if (raw == "") { cat("No leaf names provided.\n"); next }
+        
+        leaf_names <- stringr::str_trim(stringr::str_split(raw, "\\s+")[[1]])
+        leaf_names <- leaf_names[leaf_names != ""]
+        
+        matches <- base::unlist(
+          purrr::map(leaf_names, ~resolve_nodes_by_leaf(gs, .x)),
+          use.names = FALSE
+        )
+        matches <- base::unique(matches)
+        
+        if (base::length(matches) == 0) {
+          cat("No matches found for those leaf names.\n"); next
+        }
+        
+        cat(base::sprintf("Found %d match(es):\n", base::length(matches)))
+        purrr::iwalk(matches, ~cat(base::sprintf("  %d. %s\n", .y, .x)))
+        
+        # Allow further narrowing if many matches returned
+        narrow <- base::readline(
+          "Enter number(s) to keep, 'all', or 'back': "
+        )
+        if (base::tolower(narrow) == "back") break
+        if (base::tolower(narrow) == "all") {
+          result <- confirm_selection(matches)
+          if (!base::is.null(result)) return(result)
+          next
+        }
+        
+        idx <- parse_indices(narrow, base::length(matches))
+        if (base::is.null(idx)) next
+        
+        result <- confirm_selection(matches[idx])
+        if (!base::is.null(result)) return(result)
+      }
+      next
+    }
+    
+    cat("Invalid choice. Please select 1-4.\n")
   }
 }
 
@@ -8638,141 +8815,253 @@ select_markers_for_umap <- function(gs) {
   lookup <- get_marker_lookup(gs)
   
   exclude_patterns <- c("FSC", "SSC", "Time", "Event", "Original", "Width", "Height")
-  exclude_regex <- paste0("(?i)", paste(exclude_patterns, collapse = "|"))
+  exclude_regex    <- base::paste0("(?i)", base::paste(exclude_patterns, collapse = "|"))
   
   potential_markers <- lookup %>%
     dplyr::filter(!stringr::str_detect(colname, exclude_regex)) %>%
-    dplyr::filter(!stringr::str_detect(marker, exclude_regex))
+    dplyr::filter(!stringr::str_detect(marker,  exclude_regex))
   
   comp_channels <- potential_markers %>%
-    dplyr::filter(stringr::str_detect(colname, "(?i)comp")) %>%
+    dplyr::filter(stringr::str_detect(colname, stringr::regex("comp", ignore_case = TRUE))) %>%
     dplyr::pull(colname)
   
-  while(TRUE) {
+  dump_patterns <- base::c("DUMP", "LIVEDEAD", "LD", "IV",
+                           "intravenous", "live.dead", "live dead")
+  dump_regex    <- base::paste(dump_patterns, collapse = "|")
+  
+  comp_clean_lookup <- potential_markers %>%
+    dplyr::filter(
+      colname %in% comp_channels,
+      !stringr::str_detect(marker,  stringr::regex(dump_regex, ignore_case = TRUE)),
+      !stringr::str_detect(colname, stringr::regex(dump_regex, ignore_case = TRUE))
+    )
+  
+  comp_excluded_preview <- potential_markers %>%
+    dplyr::filter(
+      colname %in% comp_channels,
+      stringr::str_detect(marker,  stringr::regex(dump_regex, ignore_case = TRUE)) |
+        stringr::str_detect(colname, stringr::regex(dump_regex, ignore_case = TRUE))
+    ) %>%
+    dplyr::pull(marker)
+  
+  while (TRUE) {
     cat("\n=== Marker Selection for UMAP Calculation ===\n")
     cat("NOTE: ALL markers will be retained in the data.\n")
     cat("This selection determines which markers are used to CALCULATE the UMAP.\n")
     cat("You can overlay any marker on the UMAP later, even if not used for calculation.\n\n")
     
     cat("Available markers:", nrow(potential_markers), "\n")
-    if(length(comp_channels) > 0) {
-      cat("Compensated channels found:", length(comp_channels), "\n")
+    if (base::length(comp_channels) > 0) {
+      cat("Compensated channels found:", base::length(comp_channels), "\n")
+      cat("Compensated channels after dump/viability exclusion:",
+          nrow(comp_clean_lookup), "\n")
     }
     
-    cat("\nRecommendation: Use compensated channels for best results\n")
-    
     cat("\nOptions:\n")
-    cat("1. Select specific markers/channels for UMAP calculation\n")
+    cat("1. Define markers to EXCLUDE from UMAP calculation\n")   # <-- label changed
     cat("2. Use all compensated channels (recommended)\n")
-    cat("3. Use all available channels\n")
-    cat("4. Preview marker distributions\n")
-    cat("5. Back\n")
+    cat("3. Use all compensated channels EXCLUDING dump/viability channels\n")
     
-    choice <- readline("Choose (1-5): ")
+    if (base::length(comp_excluded_preview) > 0) {
+      cat(base::sprintf("    (would exclude: %s)\n",
+                        base::paste(comp_excluded_preview, collapse = ", ")))
+    } else {
+      cat("    (no compensated markers match exclusion patterns in this dataset)\n")
+    }
+    
+    cat("4. Use all available channels\n")
+    cat("5. Preview marker distributions\n")
+    cat("6. Back\n")
+    
+    choice <- readline("Choose (1-6): ")
     
     switch(choice,
+           
+           # ----------------------------------------------------------------
+           # OPTION 1 — exclusion-based selection (changed)
+           # ----------------------------------------------------------------
            "1" = {
-             choices <- paste0(potential_markers$colname, " :: ", potential_markers$marker)
-             sel <- select.list(choices, multiple = TRUE, 
-                                title = "Select markers for UMAP CALCULATION (all markers will be retained)")
-             
-             if(length(sel) == 0) {
-               cat("No markers selected.\n")
-               retry <- readline("Try again? (y/n): ")
-               if(tolower(retry) != "y") next
-               next
+             # Start from all compensated channels; fall back to all potential
+             # markers if there are no comp channels.
+             base_lookup <- if (base::length(comp_channels) > 0) {
+               potential_markers %>% dplyr::filter(colname %in% comp_channels)
+             } else {
+               potential_markers
              }
              
-             if(length(sel) < 2) {
-               cat("UMAP requires at least 2 dimensions. Please select more markers.\n")
-               retry <- readline("Try again? (y/n): ")
-               if(tolower(retry) != "y") next
-               next
+             cat("\nAll markers available for UMAP calculation:\n")
+             for (i in base::seq_along(base_lookup$marker)) {
+               cat(base::sprintf("  %2d. %s (%s)\n",
+                                 i, base_lookup$marker[i], base_lookup$colname[i]))
              }
              
-             selected_channels <- purrr::map_chr(sel, ~stringr::str_split(.x, " :: ")[[1]][1])
-             selected_markers <- purrr::map_chr(sel, ~stringr::str_split(.x, " :: ")[[1]][2])
+             cat("\nEnter the NUMBERS of markers to EXCLUDE (space or comma-separated).\n")
+             cat("Press Enter with no input to keep all markers listed above.\n")
              
-             cat(sprintf("Selected %d markers for UMAP calculation:\n", length(selected_channels)))
-             purrr::iwalk(selected_channels, ~cat(sprintf("  %d. %s (%s)\n", .y, 
-                                                          selected_markers[.y], .x)))
+             exclusion_input <- base::readline("Exclude marker numbers: ")
+             
+             if (base::nchar(base::trimws(exclusion_input)) == 0) {
+               # No exclusions — use everything
+               selected_lookup <- base_lookup
+               cat("No exclusions — using all",
+                   nrow(selected_lookup), "markers.\n")
+             } else {
+               # Parse space- or comma-separated integers
+               clean_input  <- stringr::str_replace_all(exclusion_input, ",", " ")
+               raw_indices  <- stringr::str_trim(
+                 stringr::str_split(base::trimws(clean_input), "\\s+")[[1]]
+               )
+               raw_indices  <- raw_indices[raw_indices != ""]
+               excl_indices <- base::suppressWarnings(base::as.numeric(raw_indices))
+               
+               invalid <- excl_indices[
+                 is.na(excl_indices) |
+                   excl_indices < 1  |
+                   excl_indices > nrow(base_lookup)
+               ]
+               
+               if (base::length(invalid) > 0) {
+                 cat("Invalid selection(s):", base::paste(invalid, collapse = ", "),
+                     "— please enter numbers between 1 and",
+                     nrow(base_lookup), "\n")
+                 next
+               }
+               
+               excl_indices    <- base::unique(base::as.integer(excl_indices))
+               excluded_lookup <- base_lookup[excl_indices, ]
+               selected_lookup <- base_lookup[-excl_indices, ]
+               
+               if (nrow(selected_lookup) == 0) {
+                 cat("That would exclude ALL markers. Please choose fewer to exclude.\n")
+                 next
+               }
+               
+               cat("\nMarkers EXCLUDED (", nrow(excluded_lookup), "):",
+                   base::paste(excluded_lookup$marker, collapse = ", "), "\n")
+               cat("Markers RETAINED (", nrow(selected_lookup), "):",
+                   base::paste(selected_lookup$marker, collapse = ", "), "\n")
+             }
+             
+             if (nrow(selected_lookup) < 2) {
+               cat("UMAP requires at least 2 dimensions. Please exclude fewer markers.\n")
+               next
+             }
              
              confirm <- readline("Confirm selection? (y/n): ")
-             if(tolower(confirm) == "y") {
-               return(list(
-                 channels = selected_channels,
-                 markers = selected_markers,
-                 lookup = potential_markers %>% dplyr::filter(colname %in% selected_channels),
-                 all_markers_lookup = potential_markers  # Return ALL markers
+             if (base::tolower(base::trimws(confirm)) == "y") {
+               return(base::list(
+                 channels           = selected_lookup$colname,
+                 markers            = selected_lookup$marker,
+                 lookup             = selected_lookup,
+                 all_markers_lookup = potential_markers
                ))
              }
            },
-           
+           # ----------------------------------------------------------------
+           # OPTIONS 2-6 unchanged
+           # ----------------------------------------------------------------
            "2" = {
-             if(length(comp_channels) == 0) {
-               cat("No compensated channels found. Try option 1 or 3.\n")
+             if (base::length(comp_channels) == 0) {
+               cat("No compensated channels found. Try option 1 or 4.\n")
                next
              }
              
-             selected_lookup <- potential_markers %>% dplyr::filter(colname %in% comp_channels)
+             selected_lookup <- potential_markers %>%
+               dplyr::filter(colname %in% comp_channels)
              
-             cat(sprintf("Using %d compensated channels for UMAP calculation:\n", nrow(selected_lookup)))
-             purrr::iwalk(selected_lookup$colname, ~cat(sprintf("  %d. %s (%s)\n", .y, 
-                                                                selected_lookup$marker[.y], .x)))
+             cat(base::sprintf("Using all %d compensated channels for UMAP calculation:\n",
+                               nrow(selected_lookup)))
+             purrr::iwalk(selected_lookup$colname,
+                          ~cat(base::sprintf("  %d. %s (%s)\n",
+                                             .y, selected_lookup$marker[.y], .x)))
              
-             confirm <- readline("Confirm compensated channels? (y/n): ")
-             if(tolower(confirm) == "y") {
-               return(list(
-                 channels = selected_lookup$colname,
-                 markers = selected_lookup$marker,
-                 lookup = selected_lookup,
+             confirm <- readline("Confirm? (y/n): ")
+             if (tolower(confirm) == "y") {
+               return(base::list(
+                 channels           = selected_lookup$colname,
+                 markers            = selected_lookup$marker,
+                 lookup             = selected_lookup,
                  all_markers_lookup = potential_markers
                ))
              }
            },
            
            "3" = {
-             cat(sprintf("Using all %d available channels for UMAP calculation:\n", nrow(potential_markers)))
-             cat("First 10 markers:\n")
-             purrr::iwalk(head(potential_markers$marker, 10), 
-                          ~cat(sprintf("  %d. %s\n", .y, .x)))
-             if(nrow(potential_markers) > 10) {
-               cat(sprintf("  ... and %d more\n", nrow(potential_markers) - 10))
+             if (nrow(comp_clean_lookup) == 0) {
+               cat("No compensated channels remain after dump/viability exclusion.",
+                   "Try option 1 or 2.\n")
+               next
              }
              
-             confirm <- readline("Confirm all channels? (y/n): ")
-             if(tolower(confirm) == "y") {
-               return(list(
-                 channels = potential_markers$colname,
-                 markers = potential_markers$marker,
-                 lookup = potential_markers,
-                 all_markers_lookup = potential_markers
+             cat(base::sprintf(
+               "Using %d compensated channels (excluded %d dump/viability channel(s): %s):\n",
+               nrow(comp_clean_lookup),
+               base::length(comp_excluded_preview),
+               if (base::length(comp_excluded_preview) > 0)
+                 base::paste(comp_excluded_preview, collapse = ", ")
+               else
+                 "none"
+             ))
+             purrr::iwalk(comp_clean_lookup$colname,
+                          ~cat(base::sprintf("  %d. %s (%s)\n",
+                                             .y, comp_clean_lookup$marker[.y], .x)))
+             
+             confirm <- readline("Confirm? (y/n): ")
+             if (tolower(confirm) == "y") {
+               return(base::list(
+                 channels           = comp_clean_lookup$colname,
+                 markers            = comp_clean_lookup$marker,
+                 lookup             = comp_clean_lookup,
+                 all_markers_lookup = comp_clean_lookup
                ))
              }
            },
            
            "4" = {
+             cat(base::sprintf("Using all %d available channels for UMAP calculation:\n",
+                               nrow(potential_markers)))
+             cat("First 10 markers:\n")
+             purrr::iwalk(utils::head(potential_markers$marker, 10),
+                          ~cat(base::sprintf("  %d. %s\n", .y, .x)))
+             if (nrow(potential_markers) > 10) {
+               cat(base::sprintf("  ... and %d more\n", nrow(potential_markers) - 10))
+             }
+             
+             confirm <- readline("Confirm all channels? (y/n): ")
+             if (tolower(confirm) == "y") {
+               return(base::list(
+                 channels           = potential_markers$colname,
+                 markers            = potential_markers$marker,
+                 lookup             = potential_markers,
+                 all_markers_lookup = potential_markers
+               ))
+             }
+           },
+           
+           "5" = {
              cat("\n--- Marker Distribution ---\n")
              cat("Total potential markers:", nrow(potential_markers), "\n")
-             cat("Compensated channels:", length(comp_channels), "\n")
+             cat("Compensated channels (all):", base::length(comp_channels), "\n")
+             cat("Compensated channels (clean):", nrow(comp_clean_lookup), "\n")
              
              cat("\nSample of available markers:\n")
-             sample_markers <- potential_markers %>% 
-               dplyr::slice_sample(n = min(20, nrow(potential_markers)))
-             purrr::iwalk(sample_markers$marker, 
-                          ~cat(sprintf("  %s (%s)\n", .x, sample_markers$colname[.y])))
+             sample_markers <- potential_markers %>%
+               dplyr::slice_sample(n = base::min(20, nrow(potential_markers)))
+             purrr::iwalk(sample_markers$marker,
+                          ~cat(base::sprintf("  %s (%s)\n",
+                                             .x, sample_markers$colname[.y])))
              
              cat("\nPress Enter to continue...")
              readline()
              next
            },
            
-           "5" = {
+           "6" = {
              return("BACK")
            },
            
            {
-             cat("Invalid choice. Please select 1-5.\n")
+             cat("Invalid choice. Please select 1-6.\n")
            }
     )
   }
@@ -8897,132 +9186,142 @@ determine_cell_congenics <- function(gh, parent_node) {
   return(congenics)
 }
 
-extract_single_cell_data <- function(gs, node, selected_markers, 
+extract_single_cell_data <- function(gs, nodes, selected_markers,
                                      selected_samples = NULL,
                                      keywords = c("pairing_factor", "tissue_factor"),
-                                     sample_limit = NULL, 
+                                     sample_limit = NULL,
                                      max_cells_per_sample = 5000) {
   
-  if(is.null(selected_samples)) {
-    selected_samples <- sampleNames(gs)
+  if (base::is.null(selected_samples)) {
+    selected_samples <- flowWorkspace::sampleNames(gs)
   }
   
-  cat("Extracting single-cell data from node:", basename(node), "\n")
-  cat("Using", length(selected_samples), "samples\n")
+  # Report what we are about to extract
+  cat("Extracting single-cell data from", base::length(nodes), "node(s):\n")
+  purrr::iwalk(nodes, ~cat(base::sprintf("  %d. %s\n", .y, .x)))
+  cat("Using", base::length(selected_samples), "samples\n")
   
+  # Sample-level metadata
   tryCatch({
-    if(exists("pData") && is.function(pData)) {
-      pd <- pData(gs) %>% 
-        rownames_to_column("Sample") %>%
-        select(Sample, any_of(keywords))
-    } else {
-      pd <- tibble(Sample = selected_samples)
-    }
+    pd <- flowWorkspace::pData(gs) |>
+      tibble::rownames_to_column("Sample") |>
+      dplyr::select(Sample, dplyr::any_of(keywords))
   }, error = function(e) {
     cat("Warning: Could not load sample metadata, using sample names only\n")
-    pd <- tibble(Sample = selected_samples)
+    pd <<- tibble::tibble(Sample = selected_samples)
   })
   
+  # Optional sample limit
   samples_to_process <- selected_samples
-  if(!is.null(sample_limit) && sample_limit < length(samples_to_process)) {
-    samples_to_process <- sample(samples_to_process, sample_limit)
+  if (!base::is.null(sample_limit) && sample_limit < base::length(samples_to_process)) {
+    set.seed(7777777)
+    samples_to_process <- base::sample(samples_to_process, sample_limit)
     cat("Randomly selected", sample_limit, "samples for analysis\n")
   }
   
-  all_data <- map_dfr(samples_to_process, function(sample_name) {
-    cat("Processing sample:", sample_name, "\n")
+  # -----------------------------------------------------------------------
+  # Extract from EACH node, then row-bind with source_node tag
+  # -----------------------------------------------------------------------
+  all_data <- purrr::map_dfr(nodes, function(node) {
     
-    gh <- gs[[sample_name]]
+    cat("--- Node:", basename(node), "---\n")
     
-    if(!node %in% gh_get_pop_paths(gh)) {
-      cat("  Node not found in sample, skipping\n")
-      return(tibble())
-    }
-    
-    tryCatch({
-      ff <- gh_pop_get_data(gh, node)
+    node_data <- purrr::map_dfr(samples_to_process, function(sample_name) {
       
-      if(is.null(ff)) {
-        cat("  No data found, skipping\n")
-        return(tibble())
-      }
+      gh <- gs[[sample_name]]
       
-      expr_data <- if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
-      
-      all_available_channels <- intersect(selected_markers$all_markers_lookup$colname, colnames(expr_data))
-      
-      if(length(all_available_channels) == 0) {
-        cat("  No channels found, skipping\n")
+      if (!node %in% gh_get_pop_paths(gh)) {
+        cat("  [", sample_name, "] node not found, skipping\n")
         return(tibble::tibble())
       }
       
-      # Extract ALL markers, not just those selected for UMAP
-      cell_data <- tibble::as_tibble(expr_data[, all_available_channels, drop = FALSE])
-      
-      cat("  Extracted", length(all_available_channels), "marker channels\n")
-      
-      # Determine congenics for each cell based on sub-population membership
       tryCatch({
-        cell_congenics <- determine_cell_congenics(gh, node)
-        cat("  Extracted congenics information for cells\n")
-      }, error = function(e) {
-        cat("  Could not determine congenics, using node name\n")
-        cell_congenics <- rep(basename(node), nrow(cell_data))
-      })
-      
-      if(nrow(cell_data) > max_cells_per_sample) {
-        # Subsample but keep congenics aligned
-        subsample_indices <- sample(nrow(cell_data), max_cells_per_sample)
-        cell_data <- cell_data[subsample_indices, ]
-        cell_congenics <- cell_congenics[subsample_indices]
-        cat("  Subsampled to", max_cells_per_sample, "cells\n")
-      }
-      
-      cell_data <- cell_data %>%
-        dplyr::mutate(
-          Sample = sample_name,
-          CellID = paste0(sample_name, "_", row_number()),
-          congenics = cell_congenics,
-          .before = 1
+        ff <- gh_pop_get_data(gh, node)
+        if (base::is.null(ff)) return(tibble::tibble())
+        
+        expr_data <- if (inherits(ff, "cytoframe")) flowCore::exprs(ff) else flowCore::exprs(ff)
+        
+        # Use ALL markers from the lookup (not just UMAP markers)
+        all_available <- base::intersect(
+          selected_markers$all_markers_lookup$colname,
+          base::colnames(expr_data)
         )
-      
-      cat("  Extracted", nrow(cell_data), "cells\n")
-      return(cell_data)
-      
-    }, error = function(e) {
-      cat("  Error processing sample:", e$message, "\n")
-      return(tibble())
+        
+        if (base::length(all_available) == 0) return(tibble::tibble())
+        
+        cell_data <- tibble::as_tibble(expr_data[, all_available, drop = FALSE])
+        
+        # Congenic membership per cell
+        tryCatch({
+          cell_congenics <- determine_cell_congenics(gh, node)
+        }, error = function(e) {
+          cell_congenics <<- base::rep(basename(node), nrow(cell_data))
+        })
+        
+        # Subsample if needed
+        if (nrow(cell_data) > max_cells_per_sample) {
+          idx       <- base::sample(nrow(cell_data), max_cells_per_sample)
+          cell_data <- cell_data[idx, ]
+          cell_congenics <- cell_congenics[idx]
+        }
+        
+        cell_data <- cell_data |>
+          dplyr::mutate(
+            Sample      = sample_name,
+            CellID      = base::paste0(sample_name, "_", node,
+                                       "_", base::seq_len(nrow(cell_data))),
+            source_node = basename(node),
+            congenics   = cell_congenics,
+            .before     = 1
+          )
+        
+        cat("  [", sample_name, "]", nrow(cell_data), "cells\n")
+        cell_data
+        
+      }, error = function(e) {
+        cat("  [", sample_name, "] error:", e$message, "\n")
+        tibble::tibble()
+      })
     })
+    
+    node_data
   })
   
-  if(nrow(all_data) == 0) {
-    stop("No single-cell data extracted. Check node selection and markers.")
+  if (nrow(all_data) == 0) {
+    stop("No single-cell data extracted. Check node selections and markers.")
   }
   
-  marker_lookup <- selected_markers$all_markers_lookup %>%
-    dplyr::select(colname, marker) %>%
+  # Rename channels → marker names
+  marker_lookup <- selected_markers$all_markers_lookup |>
+    dplyr::select(colname, marker) |>
     tibble::deframe()
   
-  cat("Renaming", length(marker_lookup), "channels to marker names\n")
-  
-  for(channel in names(marker_lookup)) {
-    if(channel %in% names(all_data)) {
-      names(all_data)[names(all_data) == channel] <- marker_lookup[channel]
+  for (channel in base::names(marker_lookup)) {
+    if (channel %in% base::names(all_data)) {
+      base::names(all_data)[base::names(all_data) == channel] <- marker_lookup[channel]
     }
   }
   
-  all_data <- all_data %>%
-    left_join(pd, by = "Sample")
+  # Join sample-level metadata
+  all_data <- all_data |> dplyr::left_join(pd, by = "Sample")
   
-  cat("Final dataset:", nrow(all_data), "cells from", 
-      n_distinct(all_data$Sample), "samples\n")
-  cat("Markers for UMAP:", paste(marker_lookup, collapse = ", "), "\n")
+  cat("\nTotal cells extracted:", scales::comma(nrow(all_data)), "\n")
+  cat("From", base::length(nodes), "node(s) across",
+      dplyr::n_distinct(all_data$Sample), "samples\n")
   
-  return(list(
-    data = all_data,
-    marker_names = unname(marker_lookup),
+  if (base::length(nodes) > 1) {
+    cat("Cell counts per source_node:\n")
+    node_counts <- table(all_data$source_node)
+    for (nd in base::names(node_counts)) {
+      cat(base::sprintf("  %-30s %s cells\n", nd, scales::comma(node_counts[nd])))
+    }
+  }
+  
+  base::list(
+    data         = all_data,
+    marker_names = base::unname(marker_lookup),
     sample_metadata = pd
-  ))
+  )
 }
 
 # ============================================================================
@@ -9219,15 +9518,27 @@ compute_umap_embedding <- function(single_cell_data,
   cat("  - Markers used for UMAP:", length(markers_for_umap), "\n")
   cat("  - Total markers retained:", length(all_marker_cols), "\n")
   
-  return(list(
-    data = umap_data,
-    embedding = umap_result,
-    marker_names = all_marker_cols,  # ALL markers
-    markers_used_for_umap = markers_for_umap,  # Only markers used for UMAP
-    markers_not_used = setdiff(all_marker_cols, markers_for_umap),
-    config = list(
-      n_neighbors = n_neighbors,
-      min_dist = min_dist,
+  # return(list(
+  #   data = umap_data,
+  #   embedding = umap_result,
+  #   marker_names = all_marker_cols,  # ALL markers
+  #   markers_used_for_umap = markers_for_umap,  # Only markers used for UMAP
+  #   markers_not_used = setdiff(all_marker_cols, markers_for_umap),
+  #   config = list(
+  #     n_neighbors = n_neighbors,
+  #     min_dist = min_dist,
+  #     n_components = n_components
+  #   ),
+  #   transformation = transform_data
+  return(base::list(
+    data                 = umap_data,
+    embedding            = umap_result,
+    marker_names         = markers_for_umap,   # only the selected/clean markers
+    markers_used_for_umap = markers_for_umap,
+    markers_not_used     = base::setdiff(all_marker_cols, markers_for_umap),
+    config               = base::list(
+      n_neighbors  = n_neighbors,
+      min_dist     = min_dist,
       n_components = n_components
     ),
     transformation = transform_data
@@ -9273,27 +9584,28 @@ initialize_visualization_session <- function(umap_result) {
 
 # Helper function for consistent menu selection
 select_from_menu <- function(options, title, allow_multiple = FALSE, show_preview = TRUE) {
-  if (length(options) == 0) {
+  if (base::length(options) == 0) {
     cat("No options available\n")
     return(NULL)
   }
   
   cat("\n", title, "\n")
-  cat(strrep("=", nchar(title)), "\n")
+  cat(base::strrep("=", base::nchar(title)), "\n")
   
-  # Show preview if requested and many options
-  if (show_preview && length(options) > 20) {
-    cat("Showing first 20 options (", length(options), "total):\n")
-    display_options <- head(options, 20)
-    cat("...\n")
+  if (show_preview && base::length(options) > 20) {
+    cat("Showing first 20 options (", base::length(options), "total):\n")
+    display_options <- utils::head(options, 20)
   } else {
     display_options <- options
   }
   
-  iwalk(display_options, ~cat(sprintf("%d. %s\n", .y, .x)))
+  # --- Display options using seq_along (always integer, never named character) ---
+  for (i in base::seq_along(display_options)) {
+    cat(base::sprintf("%d. %s\n", i, display_options[i]))
+  }
   
-  if (length(options) > 20) {
-    cat(sprintf("... and %d more options\n", length(options) - 20))
+  if (base::length(options) > 20) {
+    cat(base::sprintf("... and %d more options\n", base::length(options) - 20))
     cat("Enter 'all' to see all options\n")
   }
   
@@ -9304,32 +9616,34 @@ select_from_menu <- function(options, title, allow_multiple = FALSE, show_previe
       "Enter choice number: "
     }
     
-    choice <- readline(prompt)
+    choice <- base::readline(prompt)
     
     if (choice == "") {
       cat("No selection made\n")
       return(NULL)
     }
     
-    if (tolower(choice) == "all") {
-      if (length(options) > 20) {
+    if (base::tolower(choice) == "all") {
+      if (base::length(options) > 20) {
         cat("\nAll available options:\n")
-        iwalk(options, ~cat(sprintf("%d. %s\n", .y, .x)))
+        # --- Same fix in the 'all' branch ---
+        for (i in base::seq_along(options)) {
+          cat(base::sprintf("%d. %s\n", i, options[i]))
+        }
         next
       } else {
         return(if (allow_multiple) options else options[1])
       }
     }
     
-    # Parse selection
-    selected_indices <- parse_selection(choice, length(options))
+    selected_indices <- parse_selection(choice, base::length(options))
     
-    if (length(selected_indices) == 0) {
+    if (base::length(selected_indices) == 0) {
       cat("Invalid selection. Please try again.\n")
       next
     }
     
-    if (!allow_multiple && length(selected_indices) > 1) {
+    if (!allow_multiple && base::length(selected_indices) > 1) {
       cat("Multiple selections not allowed. Using first selection.\n")
       selected_indices <- selected_indices[1]
     }
@@ -10369,10 +10683,6 @@ import_external_metadata <- function(gs) {
 }
 
 # ============================================================================
-# FIXED SECTION IN MAIN FUNCTION FOR METADATA MERGING
-# ============================================================================
-
-# ============================================================================
 # FIXED METADATA MERGING WITH PROPER CONFLICT RESOLUTION
 # ============================================================================
 
@@ -10552,145 +10862,308 @@ merge_external_metadata_safely <- function(single_cell_data, external_metadata) 
   })
 }
 
-# ============================================================================
-# MAIN ENHANCED FUNCTION WITH SAMPLE EXCLUSION
-# ============================================================================
+# Helper function to interactively exclude markers from the data frame before UMAP and downstream analyses
+
+interactive_marker_exclusion_from_data <- function(single_cell_data) { 
+  
+  marker_names <- single_cell_data$marker_names
+  
+  cat("\n=== Marker Exclusion for UMAP + Downstream Analyses ===\n")
+  cat("Excluded markers will be REMOVED from the data entirely.\n")
+  cat("They will not appear in the UMAP, visualisation overlays, or clustering.\n\n")
+  
+  cat("Current markers in dataset (", base::length(marker_names), "):\n")
+  for (i in base::seq_along(marker_names)) {
+    cat(base::sprintf("  %2d. %s\n", i, marker_names[i]))
+  }
+  
+  cat("\nEnter regex patterns to EXCLUDE (space-separated, case-insensitive).\n")
+  cat("Example: 'DUMP LD IV live.dead'\n")
+  cat("Press Enter with no input to keep all markers.\n")
+  
+  while (TRUE) {
+    exclusion_input <- base::readline("Exclude patterns: ")
+    
+    if (base::nchar(base::trimws(exclusion_input)) == 0) {
+      cat("No exclusions — keeping all", base::length(marker_names), "markers.\n")
+      return(single_cell_data)
+    }
+    
+    # Parse space-separated patterns
+    patterns <- stringr::str_trim(
+      stringr::str_split(base::trimws(exclusion_input), "\\s+")[[1]]
+    )
+    patterns <- patterns[patterns != ""]
+    combined_regex <- base::paste(patterns, collapse = "|")
+    
+    excluded <- marker_names[
+      stringr::str_detect(marker_names,
+                          stringr::regex(combined_regex, ignore_case = TRUE))
+    ]
+    retained <- marker_names[
+      !stringr::str_detect(marker_names,
+                           stringr::regex(combined_regex, ignore_case = TRUE))
+    ]
+    
+    cat("\nPatterns:", base::paste(patterns, collapse = ", "), "\n")
+    
+    if (base::length(excluded) == 0) {
+      cat("No markers matched those patterns. Try again or press Enter to skip.\n")
+      next
+    }
+    
+    cat("EXCLUDED (", base::length(excluded), "):",
+        base::paste(excluded, collapse = ", "), "\n")
+    cat("RETAINED (", base::length(retained), "):",
+        base::paste(retained, collapse = ", "), "\n")
+    
+    if (base::length(retained) == 0) {
+      cat("That would remove ALL markers. Please use less restrictive patterns.\n")
+      next
+    }
+    
+    confirm <- base::readline("Remove these markers from the data? (y/n, default y): ")
+    if (base::tolower(base::trimws(confirm)) == "n") {
+      cat("Cancelled. Re-enter patterns or press Enter to skip.\n")
+      next
+    }
+    
+    # Physically remove excluded columns from the data frame
+    cols_to_drop <- excluded[excluded %in% names(single_cell_data$data)]
+    if (base::length(cols_to_drop) > 0) {
+      single_cell_data$data <- single_cell_data$data %>%
+        dplyr::select(-dplyr::all_of(cols_to_drop))
+      cat("Removed", base::length(cols_to_drop),
+          "column(s) from data frame.\n")
+    }
+    
+    # Update marker_names to reflect removal
+    single_cell_data$marker_names <- retained
+    
+    cat("\nFinal dataset:\n")
+    cat("  - Cells:", scales::comma(nrow(single_cell_data$data)), "\n")
+    cat("  - Markers retained:", base::length(retained), "\n")
+    cat("  -", base::paste(retained, collapse = ", "), "\n")
+    
+    return(single_cell_data)
+  }
+}
+
+# Main Function
 
 analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissue_factor")) {
   
   cat("=== Enhanced Interactive UMAP Analysis for Flow Cytometry ===\n")
   cat("Features:\n")
   cat("- Sample exclusion (unstained controls, etc.)\n")
-  cat("- Event counting and population assessment\n") 
+  cat("- Single or multiple node selection and pooling\n")
+  cat("- Event counting and population assessment\n")
+  cat("- Single marker exclusion step (no redundant prompts)\n")
   cat("- Optional external metadata import\n")
   cat("- Persistent visualization with plot saving\n")
   cat("- Session-based plot management\n\n")
   
+  # -----------------------------------------------------------------------
   # Step 1: Sample exclusion
+  # -----------------------------------------------------------------------
   selected_samples <- interactive_sample_exclusion(gs)
   
-  # Step 2: Select node
-  selected_node <- select_single_node_for_umap(gs)
-  cat("\nSelected node:", basename(selected_node), "\n")
+  # -----------------------------------------------------------------------
+  # Step 2: Select node(s)
+  # Returns a character vector — length 1 for single node, >1 to pool.
+  # -----------------------------------------------------------------------
+  selected_nodes <- select_nodes_for_umap(gs)
   
-  # Step 3: Select markers
+  cat("\nSelected", base::length(selected_nodes), "node(s):\n")
+  purrr::iwalk(selected_nodes, ~cat(base::sprintf("  %d. %s\n", .y, .x)))
+  
+  # -----------------------------------------------------------------------
+  # Step 3: Select markers for UMAP calculation + single exclusion decision
+  # -----------------------------------------------------------------------
   selected_markers <- select_markers_for_umap(gs)
-  if(is.character(selected_markers) && selected_markers == "BACK") {
+  
+  if (base::is.character(selected_markers) &&
+      base::length(selected_markers) == 1 &&
+      selected_markers == "BACK") {
     cat("Analysis cancelled\n")
     return(NULL)
   }
   
-  # Step 4: Enhanced data extraction with event counting
+  # Single follow-up: decide whether non-UMAP markers should be dropped from
+  # the data entirely. This replaces the separate interactive_marker_exclusion_from_data()
+  # step that previously asked the same question in a different form.
+  n_umap   <- nrow(selected_markers$lookup)
+  n_all    <- nrow(selected_markers$all_markers_lookup)
+  n_unused <- n_all - n_umap
+  
+  if (n_unused > 0) {
+    unused_names <- base::setdiff(
+      selected_markers$all_markers_lookup$marker,
+      selected_markers$lookup$marker
+    )
+    cat("\n", n_unused, "marker(s) are in the data but NOT used for UMAP calculation:\n")
+    purrr::iwalk(unused_names, ~cat(base::sprintf("  %d. %s\n", .y, .x)))
+    
+    drop_choice <- base::readline(
+      "Remove these from the data entirely? They won't appear in overlays or clustering. (y/n, default n): "
+    )
+    
+    if (base::tolower(base::trimws(drop_choice)) == "y") {
+      # Restrict all_markers_lookup to only UMAP markers.
+      # extract_single_cell_data() uses this to decide which columns to pull.
+      selected_markers$all_markers_lookup <- selected_markers$lookup
+      cat("Non-UMAP markers will be excluded from the extracted data.\n")
+    } else {
+      cat("Non-UMAP markers retained — available for overlays and clustering.\n")
+    }
+  } else {
+    cat("All available markers selected for UMAP — no exclusion needed.\n")
+  }
+  
+  # -----------------------------------------------------------------------
+  # Step 4: Event counts across all selected nodes
+  # -----------------------------------------------------------------------
   cat("\n=== Data Extraction Parameters ===\n")
-  event_summary <- get_population_event_counts(gs, selected_node, selected_samples)
   
-  cat("Population Event Summary (selected samples only):\n")
-  cat("Total events:", scales::comma(event_summary$total_events), "\n")
-  cat("Mean events per sample:", round(event_summary$mean_events), "\n")
-  cat("Samples with zero events:", event_summary$samples_with_zero, "\n")
+  if (base::length(selected_nodes) == 1) {
+    event_summary <- get_population_event_counts(gs, selected_nodes, selected_samples)
+    
+    cat("Population Event Summary (selected samples only):\n")
+    cat("Node:", basename(selected_nodes), "\n")
+    cat("Total events:", scales::comma(event_summary$total_events), "\n")
+    cat("Mean events per sample:", base::round(event_summary$mean_events), "\n")
+    cat("Samples with zero events:", event_summary$samples_with_zero, "\n")
+    
+  } else {
+    cat("Event counts per node (selected samples):\n")
+    event_summary <- purrr::map(
+      purrr::set_names(selected_nodes, basename(selected_nodes)),
+      ~get_population_event_counts(gs, .x, selected_samples)
+    )
+    purrr::iwalk(event_summary, function(es, node_name) {
+      cat(base::sprintf(
+        "  %-30s %s cells total (mean %s/sample)\n",
+        node_name,
+        scales::comma(es$total_events),
+        scales::comma(base::round(es$mean_events))
+      ))
+    })
+  }
   
-  sample_limit_input <- readline("Max samples to analyze (Enter for all): ")
+  # -----------------------------------------------------------------------
+  # Step 4a: User parameters — sample limit and max cells per sample
+  # -----------------------------------------------------------------------
+  sample_limit_input <- base::readline("Max samples to analyse (Enter for all): ")
   sample_limit <- NULL
-  if(sample_limit_input != "" && grepl("^\\d+$", sample_limit_input)) {
-    sample_limit <- as.numeric(sample_limit_input)
+  if (sample_limit_input != "" && base::grepl("^\\d+$", sample_limit_input)) {
+    sample_limit <- base::as.numeric(sample_limit_input)
   }
   
-  max_cells_input <- readline("Max cells per sample (default 5000): ")
+  max_cells_input <- base::readline("Max cells per sample per node (default 5000): ")
   max_cells <- 5000
-  if(max_cells_input != "" && grepl("^\\d+$", max_cells_input)) {
-    max_cells <- as.numeric(max_cells_input)
+  if (max_cells_input != "" && base::grepl("^\\d+$", max_cells_input)) {
+    max_cells <- base::as.numeric(max_cells_input)
   }
   
+  # -----------------------------------------------------------------------
+  # Step 4b: Extract single-cell data (multi-node aware)
+  # Note: interactive_marker_exclusion_from_data() is no longer called —
+  # the exclusion decision was handled in Step 3 above.
+  # -----------------------------------------------------------------------
   single_cell_data <- extract_single_cell_data(
-    gs = gs,
-    node = selected_node,
-    selected_markers = selected_markers,
-    selected_samples = selected_samples,
-    keywords = keywords,
-    sample_limit = sample_limit,
+    gs                   = gs,
+    nodes                = selected_nodes,
+    selected_markers     = selected_markers,
+    selected_samples     = selected_samples,
+    keywords             = keywords,
+    sample_limit         = sample_limit,
     max_cells_per_sample = max_cells
   )
   
-  # Step 5: Import external metadata (optional) - FIXED VERSION
+  # -----------------------------------------------------------------------
+  # Step 5: Import external metadata (optional)
+  # -----------------------------------------------------------------------
   cat("\n=== Metadata Import ===\n")
-  import_choice <- readline("Import external metadata? (y/n, default n): ")
+  import_choice <- base::readline("Import external metadata? (y/n, default n): ")
   
   external_metadata <- NULL
-  if(tolower(import_choice) == "y") {
+  
+  if (base::tolower(base::trimws(import_choice)) == "y") {
     external_metadata <- import_external_metadata(gs)
     
-    if(!is.null(external_metadata)) {
-      # FIXED: More robust type checking
-      cat("Debug: external_metadata class:", paste(class(external_metadata), collapse = ", "), "\n")
-      cat("Debug: is.data.frame():", is.data.frame(external_metadata), "\n")
-      cat("Debug: inherits data.frame:", inherits(external_metadata, "data.frame"), "\n")
+    if (!base::is.null(external_metadata)) {
+      cat("Debug: external_metadata class:",
+          base::paste(base::class(external_metadata), collapse = ", "), "\n")
+      cat("Debug: is.data.frame():", base::is.data.frame(external_metadata), "\n")
+      cat("Debug: inherits data.frame:",
+          base::inherits(external_metadata, "data.frame"), "\n")
       
-      # Use inherits() instead of is.data.frame() for more robust checking
-      is_dataframe_like <- inherits(external_metadata, "data.frame") || 
-        inherits(external_metadata, "tbl_df") || 
-        inherits(external_metadata, "tbl")
+      is_dataframe_like <- base::inherits(external_metadata, "data.frame") ||
+        base::inherits(external_metadata, "tbl_df") ||
+        base::inherits(external_metadata, "tbl")
       
-      if(!is_dataframe_like) {
+      if (!is_dataframe_like) {
         cat("Warning: External metadata is not a data frame-like object\n")
-        
-        # Only try to extract from list if it's actually not data.frame-like
-        if(is.list(external_metadata)) {
+        if (base::is.list(external_metadata)) {
           cat("Attempting to extract data frame from list...\n")
-          
-          # Try to find a data frame in the list
-          df_elements <- external_metadata[sapply(external_metadata, function(x) {
-            inherits(x, "data.frame") || inherits(x, "tbl_df") || inherits(x, "tbl")
-          })]
-          
-          if(length(df_elements) > 0) {
+          df_elements <- external_metadata[
+            base::sapply(external_metadata, function(x) {
+              base::inherits(x, "data.frame") ||
+                base::inherits(x, "tbl_df")   ||
+                base::inherits(x, "tbl")
+            })
+          ]
+          if (base::length(df_elements) > 0) {
             external_metadata <- df_elements[[1]]
             cat("Extracted data frame from list\n")
           } else {
-            cat("Error: No data frame found in returned list. Skipping external metadata.\n")
+            cat("Error: No data frame found. Skipping external metadata.\n")
             external_metadata <- NULL
           }
         } else {
-          cat("Error: Metadata is not a list or data frame. Skipping external metadata.\n")
+          cat("Error: Metadata is not a list or data frame. Skipping.\n")
           external_metadata <- NULL
         }
       }
       
-      # Final validation and conversion if needed
-      if(!is.null(external_metadata)) {
-        # Ensure it's a proper tibble for consistency
-        if(!inherits(external_metadata, "tbl_df")) {
-          tryCatch({
-            external_metadata <- as_tibble(external_metadata)
+      if (!base::is.null(external_metadata)) {
+        if (!base::inherits(external_metadata, "tbl_df")) {
+          base::tryCatch({
+            external_metadata <- tibble::as_tibble(external_metadata)
             cat("Converted to tibble\n")
           }, error = function(e) {
-            cat("Error: Could not convert external metadata to tibble:", e$message, "\n")
-            external_metadata <- NULL
+            cat("Error converting to tibble:", e$message, "\n")
+            external_metadata <<- NULL
           })
         } else {
           cat("Metadata is already a proper tibble\n")
         }
       }
       
-      # FIXED: Use the new safe merging function
-      if(!is.null(external_metadata) && inherits(external_metadata, "data.frame")) {
-        single_cell_data <- merge_external_metadata_safely(single_cell_data, external_metadata)
+      if (!base::is.null(external_metadata) &&
+          base::inherits(external_metadata, "data.frame")) {
+        single_cell_data <- merge_external_metadata_safely(
+          single_cell_data, external_metadata
+        )
       }
     }
   }
   
+  # -----------------------------------------------------------------------
   # Step 6: UMAP parameters
+  # -----------------------------------------------------------------------
   cat("\n=== UMAP Parameters ===\n")
   
-  n_neighbors_input <- readline("Number of neighbors (default 15): ")
+  n_neighbors_input <- base::readline("Number of neighbors (default 15): ")
   n_neighbors <- 15
-  if(n_neighbors_input != "" && grepl("^\\d+$", n_neighbors_input)) {
-    n_neighbors <- as.numeric(n_neighbors_input)
+  if (n_neighbors_input != "" && base::grepl("^\\d+$", n_neighbors_input)) {
+    n_neighbors <- base::as.numeric(n_neighbors_input)
   }
   
-  min_dist_input <- readline("Minimum distance (default 0.1): ")
+  min_dist_input <- base::readline("Minimum distance (default 0.1): ")
   min_dist <- 0.1
-  if(min_dist_input != "" && grepl("^[0-9.]+$", min_dist_input)) {
-    min_dist <- as.numeric(min_dist_input)
+  if (min_dist_input != "" && base::grepl("^[0-9.]+$", min_dist_input)) {
+    min_dist <- base::as.numeric(min_dist_input)
   }
   
   cat("Data transformation options:\n")
@@ -10698,61 +11171,103 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
   cat("2. log10\n")
   cat("3. sqrt\n")
   cat("4. none\n")
-  transform_choice <- readline("Choose transformation (1-4, default 1): ")
+  transform_choice <- base::readline("Choose transformation (1-4, default 1): ")
   
-  transform_data <- switch(
-    if(transform_choice == "") "1" else transform_choice,
+  transform_data <- base::switch(
+    if (transform_choice == "") "1" else transform_choice,
     "1" = "asinh",
-    "2" = "log10", 
+    "2" = "log10",
     "3" = "sqrt",
     "4" = "none",
     "asinh"
   )
   
+  # -----------------------------------------------------------------------
   # Step 7: Compute UMAP
+  # marker_names reflects the post-exclusion state from Step 3.
+  # -----------------------------------------------------------------------
   umap_result <- compute_umap_embedding(
     single_cell_data = single_cell_data,
-    n_neighbors = n_neighbors,
-    min_dist = min_dist,
-    n_components = 2,
-    transform_data = transform_data,
-    markers_for_umap = selected_markers$markers  # Use marker NAMES, not channel names
+    n_neighbors      = n_neighbors,
+    min_dist         = min_dist,
+    n_components     = 2,
+    transform_data   = transform_data,
+    markers_for_umap = single_cell_data$marker_names
   )
   
-  # Step 8: Initialize enhanced visualization session
+  # -----------------------------------------------------------------------
+  # Step 8: Initialize visualization session
+  # -----------------------------------------------------------------------
   cat("\n=== Initializing Visualization Session ===\n")
   initialize_visualization_session(umap_result)
   
-  # Step 9: Interactive visualization menu
+  # Register source_node as a metadata column when multiple nodes were pooled
+  # so it is immediately available for colouring and faceting.
+  if (base::length(selected_nodes) > 1) {
+    if (!"source_node" %in% .umap_session_plots$metadata_cols) {
+      .umap_session_plots$metadata_cols <- c(
+        .umap_session_plots$metadata_cols, "source_node"
+      )
+      cat("'source_node' added to metadata columns for colouring/faceting.\n")
+    }
+  }
+  
+  # -----------------------------------------------------------------------
+  # Step 9: Interactive visualization
+  # -----------------------------------------------------------------------
   cat("\nStarting interactive visualization...\n")
   cat("You can now create, save, and manage multiple plots in this session.\n")
   
-  visualization_results <- interactive_visualization_menu()
+  interactive_visualization_menu()
   
-  # Return comprehensive results
-  results <- list(
-    node = selected_node,
-    markers = selected_markers,
-    single_cell_data = single_cell_data,
-    external_metadata = external_metadata,
-    selected_samples = selected_samples,
-    excluded_samples = setdiff(sampleNames(gs), selected_samples),
-    event_summary = event_summary,
-    umap_result = umap_result,
-    visualization_session = visualization_results,
-    final_data = umap_result$data
+  # Snapshot the session as a plain list (value semantics).
+  # Prevents subsequent analyze_flow_umap_enhanced() calls — which reset
+  # .umap_session_plots — from corrupting earlier objects.
+  session_snapshot <- base::list(
+    umap_data     = .umap_session_plots$umap_data,
+    plots         = .umap_session_plots$plots,
+    plot_counter  = .umap_session_plots$plot_counter,
+    metadata_cols = .umap_session_plots$metadata_cols,
+    marker_names  = .umap_session_plots$marker_names
+  )
+  
+  # -----------------------------------------------------------------------
+  # Assemble and return results
+  # -----------------------------------------------------------------------
+  results <- base::list(
+    nodes                 = selected_nodes,
+    markers               = selected_markers,
+    single_cell_data      = single_cell_data,
+    external_metadata     = external_metadata,
+    selected_samples      = selected_samples,
+    excluded_samples      = base::setdiff(
+      flowWorkspace::sampleNames(gs), selected_samples),
+    event_summary         = event_summary,
+    umap_result           = umap_result,
+    visualization_session = session_snapshot,
+    final_data            = umap_result$data
   )
   
   cat("\n=== Enhanced Analysis Complete ===\n")
-  cat("Results contain:\n")
-  cat("- Original node:", basename(selected_node), "\n")
-  cat("- Markers analyzed:", length(selected_markers$markers), "\n")
-  cat("- Samples included:", length(selected_samples), "\n")
-  cat("- Samples excluded:", length(results$excluded_samples), "\n")
-  cat("- Cells analyzed:", scales::comma(nrow(results$final_data)), "\n")
-  cat("- External metadata:", !is.null(external_metadata), "\n")
-  cat("- Plots created:", length(visualization_results$plots), "\n")
-  cat("- Session plots stored in global variable for continued access\n")
+  cat("- Node(s):", base::paste(basename(selected_nodes), collapse = ", "), "\n")
+  cat("- Markers in data:", base::length(single_cell_data$marker_names), "\n")
+  cat("- Markers used for UMAP:", base::length(selected_markers$lookup$marker), "\n")
+  cat("- Samples included:", base::length(selected_samples), "\n")
+  cat("- Samples excluded:", base::length(results$excluded_samples), "\n")
+  cat("- Cells analysed:", scales::comma(nrow(results$final_data)), "\n")
+  
+  if (base::length(selected_nodes) > 1) {
+    node_counts <- table(results$final_data$source_node)
+    cat("- Cells per node:\n")
+    for (nd in base::names(node_counts)) {
+      cat(base::sprintf("    %-30s %s\n", nd, scales::comma(node_counts[nd])))
+    }
+  }
+  
+  cat("- External metadata:", !base::is.null(external_metadata), "\n")
+  cat("- Plots created in session:", base::length(session_snapshot$plots), "\n")
+  cat("\nTo re-enter visualization for this run: restart_visualization_session(this_object)\n")
+  cat("To re-enter clustering for this run:     restart_clustering_session(clustering_results)\n")
   
   return(results)
 }
@@ -10760,6 +11275,90 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
 # ============================================================================
 # UTILITY FUNCTIONS FOR ENHANCED FEATURES
 # ============================================================================
+
+interactive_marker_exclusion_from_data <- function(single_cell_data) {
+  
+  marker_names <- single_cell_data$marker_names
+  
+  cat("\n=== Marker Exclusion for UMAP + Downstream Analyses ===\n")
+  cat("Excluded markers will be REMOVED from the data entirely.\n")
+  cat("They will not appear in the UMAP, visualisation overlays, or clustering.\n\n")
+  
+  cat("Available markers (", base::length(marker_names), "):\n")
+  for (i in base::seq_along(marker_names)) {
+    cat(base::sprintf("  %2d. %s\n", i, marker_names[i]))
+  }
+  
+  cat("\nEnter the NUMBERS of markers to EXCLUDE (space or comma-separated).\n")
+  cat("Press Enter with no input to keep all markers.\n")
+  
+  while (TRUE) {
+    exclusion_input <- base::readline("Exclude marker numbers: ")
+    
+    if (base::nchar(base::trimws(exclusion_input)) == 0) {
+      cat("No exclusions — keeping all", base::length(marker_names), "markers.\n")
+      return(single_cell_data)
+    }
+    
+    # Parse space- or comma-separated integers
+    exclusion_input_clean <- stringr::str_replace_all(exclusion_input, ",", " ")
+    raw_indices <- stringr::str_trim(
+      stringr::str_split(base::trimws(exclusion_input_clean), "\\s+")[[1]]
+    )
+    raw_indices <- raw_indices[raw_indices != ""]
+    
+    selected_indices <- base::suppressWarnings(base::as.numeric(raw_indices))
+    
+    # Validate
+    invalid <- selected_indices[is.na(selected_indices) |
+                                  selected_indices < 1 |
+                                  selected_indices > base::length(marker_names)]
+    
+    if (base::length(invalid) > 0) {
+      cat("Invalid selection(s):", base::paste(invalid, collapse = ", "),
+          "— please enter numbers between 1 and", base::length(marker_names), "\n")
+      next
+    }
+    
+    selected_indices <- base::unique(base::as.integer(selected_indices))
+    excluded <- marker_names[selected_indices]
+    retained <- marker_names[-selected_indices]
+    
+    cat("\nMarkers EXCLUDED (", base::length(excluded), "):",
+        base::paste(excluded, collapse = ", "), "\n")
+    cat("Markers RETAINED (", base::length(retained), "):",
+        base::paste(retained, collapse = ", "), "\n")
+    
+    if (base::length(retained) == 0) {
+      cat("That would remove ALL markers. Please choose fewer markers to exclude.\n")
+      next
+    }
+    
+    confirm <- base::readline("Remove these markers from the data? (y/n, default y): ")
+    if (base::tolower(base::trimws(confirm)) == "n") {
+      cat("Cancelled. Re-enter marker numbers or press Enter to skip.\n")
+      next
+    }
+    
+    # Physically remove excluded columns from the data frame
+    cols_to_drop <- excluded[excluded %in% names(single_cell_data$data)]
+    if (base::length(cols_to_drop) > 0) {
+      single_cell_data$data <- single_cell_data$data %>%
+        dplyr::select(-dplyr::all_of(cols_to_drop))
+      cat("Removed", base::length(cols_to_drop), "column(s) from data frame.\n")
+    }
+    
+    # Update marker_names to retained set only
+    single_cell_data$marker_names <- retained
+    
+    cat("\nFinal dataset:\n")
+    cat("  - Cells:", scales::comma(nrow(single_cell_data$data)), "\n")
+    cat("  - Markers retained:", base::length(retained), "\n")
+    cat("  -", base::paste(retained, collapse = ", "), "\n")
+    
+    return(single_cell_data)
+  }
+}
 
 export_all_session_plots <- function(directory = "umap_plots", 
                                      width = 8, 
@@ -11563,6 +12162,99 @@ perform_hierarchical_clustering <- function(umap_data, marker_names,
 }
 
 # ============================================================================
+# CLUSTER SUBSET SELECTION HELPER
+# ============================================================================
+
+#' Prompt user to choose all clusters or a named subset.
+#' Returns a list: $data (filtered tibble), $label (string for plot titles/filenames)
+#' @param clustered_data  Tibble with a ClusterID column (or whichever cluster_column).
+#' @param cluster_column  Name of the cluster assignment column.
+select_clusters_for_analysis <- function(clustered_data,
+                                         cluster_column = "ClusterID") {
+  
+  available_clusters <- sort(unique(as.character(clustered_data[[cluster_column]])))
+  n_clusters         <- length(available_clusters)
+  
+  cat("\n=== Cluster Subset Selection ===\n")
+  cat("Available clusters (", n_clusters, "):\n")
+  for (i in seq_along(available_clusters)) {
+    n_cells_i <- sum(clustered_data[[cluster_column]] == available_clusters[i])
+    pct_i     <- round(n_cells_i / nrow(clustered_data) * 100, 1)
+    cat(sprintf("  %2d. %s  (%s cells, %s%%)\n",
+                i, available_clusters[i],
+                scales::comma(n_cells_i), pct_i))
+  }
+  
+  cat("\nOptions:\n")
+  cat("  1. Use ALL clusters\n")
+  cat("  2. Select specific clusters\n")
+  
+  while (TRUE) {
+    mode_choice <- base::readline("Choose (1 or 2): ")
+    
+    if (mode_choice == "1") {
+      cat("Using all", n_clusters, "clusters.\n")
+      return(base::list(data  = clustered_data,
+                        label = "all_clusters"))
+    }
+    
+    if (mode_choice == "2") {
+      cat("Enter cluster numbers (space or comma-separated, e.g. 1 3 5 or 1,3,5):\n")
+      
+      raw_input <- base::readline("Cluster numbers: ")
+      
+      # Parse space- or comma-separated integers
+      raw_input_clean  <- stringr::str_replace_all(raw_input, ",", " ")
+      raw_parts        <- stringr::str_trim(
+        stringr::str_split(base::trimws(raw_input_clean), "\\s+")[[1]]
+      )
+      raw_parts        <- raw_parts[raw_parts != ""]
+      selected_indices <- base::suppressWarnings(base::as.numeric(raw_parts))
+      
+      invalid <- selected_indices[
+        base::is.na(selected_indices) |
+          selected_indices < 1         |
+          selected_indices > n_clusters
+      ]
+      
+      if (base::length(invalid) > 0) {
+        cat("Invalid selection(s):", base::paste(invalid, collapse = ", "),
+            "— please enter numbers between 1 and", n_clusters, "\n")
+        next
+      }
+      
+      selected_indices   <- base::unique(base::as.integer(selected_indices))
+      selected_clusters  <- available_clusters[selected_indices]
+      
+      cat("Selected clusters:", base::paste(selected_clusters, collapse = ", "), "\n")
+      
+      confirm <- base::readline("Confirm? (y/n, default y): ")
+      if (base::tolower(base::trimws(confirm)) == "n") {
+        cat("Re-enter cluster numbers.\n")
+        next
+      }
+      
+      filtered_data <- clustered_data |>
+        dplyr::filter(.data[[cluster_column]] %in% selected_clusters)
+      
+      label <- base::paste0(
+        "clusters_",
+        base::paste(stringr::str_remove_all(selected_clusters, "[^A-Za-z0-9]"),
+                    collapse = "_")
+      )
+      
+      cat("Using", base::length(selected_clusters), "cluster(s),",
+          scales::comma(nrow(filtered_data)), "cells.\n")
+      
+      return(base::list(data  = filtered_data,
+                        label = label))
+    }
+    
+    cat("Invalid choice. Please enter 1 or 2.\n")
+  }
+}
+
+# ============================================================================
 # CLUSTER CHARACTERIZATION AND MFI ANALYSIS
 # ============================================================================
 
@@ -11735,45 +12427,99 @@ create_cluster_umap_plot <- function(clustered_data, cluster_column = "ClusterID
 }
 
 create_cluster_heatmap <- function(mfi_analysis, cluster_column = "ClusterID",
-                                   value_type = "mean_zscore", 
-                                   title = NULL) {
+                                   value_type    = "mean_zscore",
+                                   cluster_rows  = TRUE,
+                                   cluster_cols  = TRUE,
+                                   title         = NULL) {
   
-  if (is.null(title)) {
-    title <- paste("Cluster Expression Heatmap (", str_replace(value_type, "_", " "), ")", sep = "")
+  if (base::is.null(title)) {
+    title <- base::paste0(
+      "Cluster Expression Heatmap (",
+      stringr::str_replace_all(value_type, "_", " "), ")"
+    )
   }
   
-  # Prepare data for heatmap
-  heatmap_data <- mfi_analysis$mfi_zscore %>%
-    select(all_of(c(cluster_column, "Marker", value_type))) %>%
-    pivot_wider(names_from = Marker, values_from = all_of(value_type)) %>%
-    column_to_rownames(cluster_column) %>%
-    as.matrix()
+  # --- Build matrix: rows = clusters, cols = markers ---
+  heatmap_matrix <- mfi_analysis$mfi_zscore %>%
+    dplyr::select(dplyr::all_of(base::c(cluster_column, "Marker", value_type))) %>%
+    tidyr::pivot_wider(names_from  = "Marker",
+                       values_from = dplyr::all_of(value_type)) %>%
+    tibble::column_to_rownames(cluster_column) %>%
+    base::as.matrix()
   
-  # Convert to long format for ggplot
-  heatmap_long <- heatmap_data %>%
-    as_tibble(rownames = "Cluster") %>%
-    pivot_longer(-Cluster, names_to = "Marker", values_to = "Expression") %>%
-    mutate(
-      Cluster = factor(Cluster, levels = rownames(heatmap_data)),
-      Marker = factor(Marker, levels = colnames(heatmap_data))
+  # Handle any NA values introduced by pivot (replace with 0)
+  heatmap_matrix[base::is.na(heatmap_matrix)] <- 0
+  
+  if (base::nrow(heatmap_matrix) == 0 || base::ncol(heatmap_matrix) == 0) {
+    stop("Empty matrix — check mfi_analysis$mfi_zscore and cluster_column.")
+  }
+  
+  # --- Colour scale: symmetric around 0 for z-scores ---
+  max_val <- base::max(base::abs(heatmap_matrix), na.rm = TRUE)
+  if (max_val == 0) max_val <- 1
+  
+  col_fun <- circlize::colorRamp2(
+    base::c(-max_val, 0, max_val),
+    base::c("#1F77B4", "white", "#D62728")
+  )
+  
+  # --- Cluster size annotation (right side) ---
+  cluster_sizes <- mfi_analysis$cluster_overview %>%
+    dplyr::select(dplyr::all_of(base::c(cluster_column, "n_cells", "percentage"))) %>%
+    dplyr::arrange(dplyr::desc(.data[[cluster_column]]))
+  
+  # Align annotation to matrix row order
+  size_vec <- cluster_sizes$n_cells[
+    base::match(base::rownames(heatmap_matrix), cluster_sizes[[cluster_column]])
+  ]
+  pct_vec <- cluster_sizes$percentage[
+    base::match(base::rownames(heatmap_matrix), cluster_sizes[[cluster_column]])
+  ]
+  
+  row_ann <- ComplexHeatmap::rowAnnotation(
+    `N cells`   = ComplexHeatmap::anno_barplot(
+      size_vec,
+      gp        = grid::gpar(fill = "grey70", col = NA),
+      bar_width = 0.8,
+      axis_param = base::list(gp = grid::gpar(fontsize = 7))
+    ),
+    `%`         = ComplexHeatmap::anno_text(
+      base::paste0(base::round(pct_vec, 1), "%"),
+      gp        = grid::gpar(fontsize = 7)
+    ),
+    annotation_name_gp  = grid::gpar(fontsize = 9),
+    annotation_name_side = "top"
+  )
+  
+  # --- Build heatmap ---
+  ht <- ComplexHeatmap::Heatmap(
+    heatmap_matrix,
+    name              = stringr::str_replace_all(value_type, "_", " "),
+    col               = col_fun,
+    cluster_rows      = cluster_rows,
+    cluster_columns   = cluster_cols,
+    show_row_names    = TRUE,
+    show_column_names = TRUE,
+    row_names_gp      = grid::gpar(fontsize = 9),
+    column_names_gp   = grid::gpar(fontsize = 9, angle = 45),
+    column_title      = title,
+    column_title_gp   = grid::gpar(fontsize = 13, fontface = "bold"),
+    row_title         = "Clusters",
+    row_title_gp      = grid::gpar(fontsize = 11),
+    right_annotation  = row_ann,
+    heatmap_legend_param = base::list(
+      title_gp  = grid::gpar(fontsize = 10),
+      labels_gp = grid::gpar(fontsize = 9)
     )
+  )
   
-  # Create heatmap
-  p <- ggplot(heatmap_long, aes(x = Marker, y = Cluster, fill = Expression)) +
-    geom_tile() +
-    scale_fill_gradient2(
-      low = "blue", mid = "white", high = "red",
-      midpoint = 0, name = str_replace(value_type, "_", "\n")
-    ) +
-    labs(title = title) +
-    theme_minimal() +
-    theme(
-      axis.text.x = element_text(angle = 45, hjust = 1),
-      plot.title = element_text(hjust = 0.5),
-      panel.grid = element_blank()
-    )
+  # Sanity checks
+  stopifnot(
+    base::nrow(heatmap_matrix) >= 2,
+    base::ncol(heatmap_matrix) >= 2
+  )
   
-  return(p)
+  return(ht)
 }
 
 create_mfi_violin_plots <- function(clustered_data, marker_names, 
@@ -12097,69 +12843,185 @@ perform_clustering_analysis <- function(umap_results, method = NULL) {
     stop("Required packages not available. Please install missing packages.")
   }
   
-  # Extract necessary data from UMAP results
-  if (is.null(umap_results$final_data) || is.null(umap_results$umap_result$marker_names)) {
-    stop("Invalid UMAP results. Please run UMAP analysis first.")
+  if (base::is.null(umap_results$final_data) ||
+      base::is.null(umap_results$umap_result$marker_names)) {
+    stop("Invalid UMAP results. Please run analyze_flow_umap_enhanced() first.")
   }
   
-  umap_data <- safe_tibble_operations(umap_results$final_data)
+  umap_data    <- safe_tibble_operations(umap_results$final_data)
   marker_names <- umap_results$umap_result$marker_names
   
   cat("Input data:", scales::comma(nrow(umap_data)), "cells\n")
-  cat("Available markers:", length(marker_names), "\n")
-  cat("Markers:", paste(head(marker_names, 5), collapse = ", "), 
-      if(length(marker_names) > 5) "..." else "", "\n")
+  cat("Available markers for clustering:", base::length(marker_names), "\n")
+  cat(base::paste(marker_names, collapse = ", "), "\n")
   
-  # Select clustering method if not provided
-  if (is.null(method)) {
+  # -----------------------------------------------------------------------
+  # Select clustering method
+  # -----------------------------------------------------------------------
+  if (base::is.null(method)) {
     method <- select_clustering_method()
   }
-  
   cat("Selected clustering method:", method, "\n")
   
-  # Store in session environment
-  .clustering_session$umap_data <- umap_data
-  .clustering_session$marker_names <- marker_names
-  .clustering_session$method <- method
-  
-  # Perform clustering based on selected method
-  clustering_result <- switch(method,
-                              "flowsom" = perform_flowsom_clustering(umap_data, marker_names),
-                              "flowsom_consensus" = perform_consensus_clustering(umap_data, marker_names),
-                              "kmeans" = perform_kmeans_clustering(umap_data, marker_names),
-                              "hierarchical" = perform_hierarchical_clustering(umap_data, marker_names),
-                              "dbscan" = perform_dbscan_clustering(umap_data, marker_names),
-                              "comparison" = {
-                                cat("Multiple methods comparison not yet implemented. Using FlowSOM.\n")
-                                perform_flowsom_clustering(umap_data, marker_names)
-                              }
-  )
-  
-  if (is.null(clustering_result)) {
-    stop("Clustering failed")
+  # -----------------------------------------------------------------------
+  # Interactive marker exclusion for clustering
+  # -----------------------------------------------------------------------
+  cat("\n=== Marker Exclusion for Clustering ===\n")
+  cat("Current markers (", base::length(marker_names), "):\n")
+  for (i in base::seq_along(marker_names)) {
+    cat(base::sprintf("  %2d. %s\n", i, marker_names[i]))
   }
   
-  # Store clustering results
+  cat("\nEnter regex patterns to EXCLUDE markers (space-separated, case-insensitive).\n")
+  cat("Examples: 'DUMP LD IV'  or  'live.dead LIVEDEAD'  or  'CD45'\n")
+  cat("Press Enter with no input to use all markers.\n")
+  
+  exclusion_input <- base::readline("Exclude patterns: ")
+  
+  if (base::nchar(base::trimws(exclusion_input)) > 0) {
+    
+    patterns <- stringr::str_trim(
+      stringr::str_split(exclusion_input, "\\s+")[[1]]
+    )
+    patterns       <- patterns[patterns != ""]
+    combined_regex <- base::paste(patterns, collapse = "|")
+    
+    excluded <- marker_names[
+      stringr::str_detect(marker_names,
+                          stringr::regex(combined_regex, ignore_case = TRUE))
+    ]
+    retained <- marker_names[
+      !stringr::str_detect(marker_names,
+                           stringr::regex(combined_regex, ignore_case = TRUE))
+    ]
+    
+    cat("\nPatterns applied:", base::paste(patterns, collapse = ", "), "\n")
+    
+    if (base::length(excluded) > 0) {
+      cat("Markers EXCLUDED (", base::length(excluded), "):",
+          base::paste(excluded, collapse = ", "), "\n")
+    } else {
+      cat("No markers matched the exclusion patterns.\n")
+    }
+    
+    cat("Markers RETAINED (", base::length(retained), "):",
+        base::paste(retained, collapse = ", "), "\n")
+    
+    if (base::length(retained) == 0) {
+      stop("All markers were excluded. Please re-run with less restrictive patterns.")
+    }
+    
+    confirm <- base::readline("Proceed with this marker set? (y/n, default y): ")
+    if (base::tolower(base::trimws(confirm)) == "n") {
+      cat("Re-enter exclusion patterns.\n")
+      exclusion_input2 <- base::readline("Exclude patterns (Enter to skip): ")
+      
+      if (base::nchar(base::trimws(exclusion_input2)) > 0) {
+        patterns2       <- stringr::str_trim(
+          stringr::str_split(exclusion_input2, "\\s+")[[1]]
+        )
+        patterns2       <- patterns2[patterns2 != ""]
+        combined_regex2 <- base::paste(patterns2, collapse = "|")
+        retained <- marker_names[
+          !stringr::str_detect(marker_names,
+                               stringr::regex(combined_regex2, ignore_case = TRUE))
+        ]
+        if (base::length(retained) == 0) {
+          cat("All markers excluded again — using full marker list.\n")
+          retained <- marker_names
+        }
+      } else {
+        cat("No patterns entered — using full marker list.\n")
+        retained <- marker_names
+      }
+    }
+    
+    marker_names <- retained
+    
+  } else {
+    cat("No exclusions entered — using all", base::length(marker_names), "markers.\n")
+  }
+  
+  cat("\nFinal marker set for clustering (", base::length(marker_names), "):\n")
+  cat(base::paste(marker_names, collapse = ", "), "\n\n")
+  
+  # -----------------------------------------------------------------------
+  # Store inputs in session env for option-7 re-runs inside the menu
+  # -----------------------------------------------------------------------
+  .clustering_session$umap_data    <- umap_data
+  .clustering_session$marker_names <- marker_names
+  .clustering_session$method       <- method
+  
+  # -----------------------------------------------------------------------
+  # Run initial clustering
+  # -----------------------------------------------------------------------
+  clustering_result <- base::switch(
+    method,
+    "flowsom"           = perform_flowsom_clustering(umap_data, marker_names),
+    "flowsom_consensus" = perform_consensus_clustering(umap_data, marker_names),
+    "kmeans"            = perform_kmeans_clustering(umap_data, marker_names),
+    "hierarchical"      = perform_hierarchical_clustering(umap_data, marker_names),
+    "dbscan"            = perform_dbscan_clustering(umap_data, marker_names),
+    "comparison"        = {
+      cat("Multiple methods comparison not yet implemented. Using FlowSOM.\n")
+      perform_flowsom_clustering(umap_data, marker_names)
+    },
+    {
+      cat("Unrecognised method — falling back to FlowSOM.\n")
+      perform_flowsom_clustering(umap_data, marker_names)
+    }
+  )
+  
+  if (base::is.null(clustering_result)) {
+    stop("Clustering failed. Check method selection and input data.")
+  }
+  
+  # Sync initial result into session env
   .clustering_session$clustering_result <- clustering_result
   
-  # Perform MFI analysis
-  cat("\nPerforming MFI analysis...\n")
+  # -----------------------------------------------------------------------
+  # MFI analysis on initial clustering result
+  # -----------------------------------------------------------------------
+  cat("\nPerforming MFI analysis on initial clustering result...\n")
   mfi_analysis <- analyze_cluster_mfi(clustering_result$clustered_data, marker_names)
   .clustering_session$mfi_analysis <- mfi_analysis
   
-  # Interactive post-clustering analysis menu
-  interactive_clustering_menu(clustering_result, mfi_analysis, marker_names)
+  # -----------------------------------------------------------------------
+  # Interactive menu — capture final state (may differ if option 7 was used)
+  # -----------------------------------------------------------------------
+  menu_state <- interactive_clustering_menu(clustering_result, mfi_analysis, marker_names)
   
-  # Return comprehensive results
-  final_results <- list(
-    clustering_result = clustering_result,
-    mfi_analysis = mfi_analysis,
-    method = method,
-    umap_data = umap_data,
-    marker_names = marker_names
-  )
+  final_clustering <- menu_state$clustering_result
+  final_mfi        <- menu_state$mfi_analysis
   
-  return(final_results)
+  # -----------------------------------------------------------------------
+  # Sanity checks before returning
+  # -----------------------------------------------------------------------
+  stopifnot(!base::is.null(final_clustering))
+  stopifnot(!base::is.null(final_clustering$clustered_data))
+  stopifnot(!base::is.null(final_mfi))
+  
+  cat("\n=== Clustering Analysis Complete ===\n")
+  cat("- Method:", final_clustering$method, "\n")
+  cat("- Clusters:", final_clustering$n_clusters, "\n")
+  cat("- Cells:", scales::comma(nrow(final_clustering$clustered_data)), "\n")
+  cat("- Markers used:", base::length(marker_names), "\n")
+  
+  cluster_counts <- safe_count(final_clustering$clustered_data, "ClusterID", "n_cells") |>
+    dplyr::mutate(percentage = base::round(n_cells / base::sum(n_cells) * 100, 1))
+  
+  cat("\nFinal cluster distribution:\n")
+  base::print(base::as.data.frame(cluster_counts))
+  
+  cat("\nTo re-enter the clustering menu: restart_clustering_session(this_object)\n")
+  
+  return(base::list(
+    clustering_result = final_clustering,
+    mfi_analysis      = final_mfi,
+    method            = final_clustering$method,
+    umap_data         = umap_data,
+    marker_names      = marker_names
+  ))
 }
 
 # ============================================================================
@@ -12168,15 +13030,19 @@ perform_clustering_analysis <- function(umap_results, method = NULL) {
 
 interactive_clustering_menu <- function(clustering_result, mfi_analysis, marker_names) {
   
+  # Track the current state locally so option 7 re-runs propagate to the caller.
+  current_clustering <- clustering_result
+  current_mfi        <- mfi_analysis
+  
   while (TRUE) {
     cat("\n=== Interactive Clustering Analysis Menu ===\n")
-    cat("Method:", clustering_result$method, "\n")
-    cat("Clusters:", clustering_result$n_clusters, "\n")
-    cat("Cells:", scales::comma(nrow(clustering_result$clustered_data)), "\n\n")
+    cat("Method:", current_clustering$method, "\n")
+    cat("Clusters:", current_clustering$n_clusters, "\n")
+    cat("Cells:", scales::comma(nrow(current_clustering$clustered_data)), "\n\n")
     
     menu_options <- c(
       "View cluster UMAP plot",
-      "View cluster MFI heatmap", 
+      "View cluster MFI heatmap",
       "View marker expression violin plots",
       "Perform differential expression analysis",
       "Extract specific cluster data",
@@ -12184,142 +13050,190 @@ interactive_clustering_menu <- function(clustering_result, mfi_analysis, marker_
       "Re-run clustering with different parameters",
       "Return to main analysis"
     )
+    purrr::iwalk(menu_options, ~cat(base::sprintf("%d. %s\n", .y, .x)))
     
-    iwalk(menu_options, ~cat(sprintf("%d. %s\n", .y, .x)))
-    
-    choice <- readline("\nEnter choice (1-8): ")
-    
-    if (!grepl("^[1-8]$", choice)) {
+    choice <- base::readline("\nEnter choice (1-8): ")
+    if (!base::grepl("^[1-8]$", choice)) {
       cat("Invalid choice. Please enter 1-8.\n")
       next
     }
+    choice_num <- base::as.numeric(choice)
     
-    choice_num <- as.numeric(choice)
-    
+    # ------------------------------------------------------------------
+    # OPTION 1: UMAP plot — no cluster sub-selection (shows all)
+    # ------------------------------------------------------------------
     if (choice_num == 1) {
-      # UMAP plot
-      cluster_plot <- create_cluster_umap_plot(clustering_result$clustered_data)
+      cluster_plot <- create_cluster_umap_plot(current_clustering$clustered_data)
       print(cluster_plot)
       
-      save_choice <- readline("Save this plot? (y/n): ")
-      if (tolower(save_choice) == "y") {
-        filename <- readline("Enter filename (without extension): ")
+      save_choice <- base::readline("Save this plot? (y/n): ")
+      if (base::tolower(save_choice) == "y") {
+        filename <- base::readline("Enter filename (without extension): ")
         if (filename != "") {
-          ggsave(paste0(filename, ".png"), plot = cluster_plot, 
-                 width = 10, height = 8, dpi = 300)
-          cat("Plot saved as:", paste0(filename, ".png"), "\n")
+          ggplot2::ggsave(base::paste0(filename, ".png"),
+                          plot = cluster_plot, width = 10, height = 8, dpi = 300)
+          cat("Plot saved as:", base::paste0(filename, ".png"), "\n")
         }
       }
       
+      # ------------------------------------------------------------------
+      # OPTION 2: MFI heatmap
+      # ------------------------------------------------------------------
     } else if (choice_num == 2) {
-      # MFI heatmap
-      heatmap_plot <- create_cluster_heatmap(mfi_analysis)
-      print(heatmap_plot)
       
-      save_choice <- readline("Save this plot? (y/n): ")
-      if (tolower(save_choice) == "y") {
-        filename <- readline("Enter filename (without extension): ")
-        if (filename != "") {
-          ggsave(paste0(filename, ".png"), plot = heatmap_plot,
-                 width = 12, height = 8, dpi = 300)
-          cat("Plot saved as:", paste0(filename, ".png"), "\n")
-        }
+      subset     <- select_clusters_for_analysis(current_clustering$clustered_data)
+      mfi_subset <- analyze_cluster_mfi(subset$data, marker_names)
+      ht         <- create_cluster_heatmap(mfi_subset)
+      ComplexHeatmap::draw(ht)
+      
+      save_choice <- base::readline("Save this plot? (y/n): ")
+      if (base::tolower(save_choice) == "y") {
+        filename <- base::readline("Enter filename (without extension): ")
+        if (filename == "") filename <- base::paste0("cluster_heatmap_", subset$label)
+        grDevices::png(base::paste0(filename, ".png"),
+                       width = 12, height = 8, units = "in", res = 300)
+        ComplexHeatmap::draw(ht)
+        grDevices::dev.off()
+        cat("Saved:", base::paste0(filename, ".png"), "\n")
       }
       
+      # ------------------------------------------------------------------
+      # OPTION 3: Violin plots
+      # ------------------------------------------------------------------
     } else if (choice_num == 3) {
-      # Violin plots
-      violin_plot <- create_mfi_violin_plots(clustering_result$clustered_data, marker_names)
+      
+      subset      <- select_clusters_for_analysis(current_clustering$clustered_data)
+      violin_plot <- create_mfi_violin_plots(subset$data, marker_names)
       print(violin_plot)
       
-      save_choice <- readline("Save this plot? (y/n): ")
-      if (tolower(save_choice) == "y") {
-        filename <- readline("Enter filename (without extension): ")
-        if (filename != "") {
-          ggsave(paste0(filename, ".png"), plot = violin_plot,
-                 width = 12, height = 10, dpi = 300)
-          cat("Plot saved as:", paste0(filename, ".png"), "\n")
-        }
+      save_choice <- base::readline("Save this plot? (y/n): ")
+      if (base::tolower(save_choice) == "y") {
+        filename <- base::readline("Enter filename (without extension): ")
+        if (filename == "") filename <- base::paste0("violin_", subset$label)
+        ggplot2::ggsave(base::paste0(filename, ".png"),
+                        plot = violin_plot, width = 12, height = 10, dpi = 300)
+        cat("Saved:", base::paste0(filename, ".png"), "\n")
       }
       
+      # ------------------------------------------------------------------
+      # OPTION 4: Differential expression
+      # ------------------------------------------------------------------
     } else if (choice_num == 4) {
-      # Differential expression
-      diff_analysis <- perform_cluster_differential_analysis(mfi_analysis)
+      subset     <- select_clusters_for_analysis(current_clustering$clustered_data)
+      mfi_subset <- analyze_cluster_mfi(subset$data, marker_names)
+      diff_analysis <- perform_cluster_differential_analysis(mfi_subset)
       .clustering_session$diff_analysis <- diff_analysis
-      
       readline("Press Enter to continue...")
       
+      # ------------------------------------------------------------------
+      # OPTION 5: Extract specific cluster data
+      # ------------------------------------------------------------------
     } else if (choice_num == 5) {
-      # Extract cluster data
-      available_clusters <- unique(clustering_result$clustered_data$ClusterID)
-      cat("Available clusters:\n")
-      iwalk(available_clusters, ~cat(sprintf("%d. %s\n", .y, .x)))
+      subset             <- select_clusters_for_analysis(current_clustering$clustered_data)
+      available_clusters <- base::sort(
+        base::unique(base::as.character(subset$data$ClusterID))
+      )
       
-      cluster_choice <- readline("Enter cluster number or name: ")
+      cat("\nClusters available for extraction:\n")
+      purrr::iwalk(available_clusters, ~cat(base::sprintf("%d. %s\n", .y, .x)))
       
+      cluster_choice <- base::readline("Enter cluster number or name to extract: ")
       target_cluster <- NULL
-      if (grepl("^\\d+$", cluster_choice)) {
-        cluster_num <- as.numeric(cluster_choice)
-        if (!is.na(cluster_num) && cluster_num >= 1 && cluster_num <= length(available_clusters)) {
-          target_cluster <- available_clusters[cluster_num]
-        }
+      
+      if (base::grepl("^\\d+$", cluster_choice)) {
+        idx <- base::as.numeric(cluster_choice)
+        if (!base::is.na(idx) && idx >= 1 && idx <= base::length(available_clusters))
+          target_cluster <- available_clusters[idx]
       } else if (cluster_choice %in% available_clusters) {
         target_cluster <- cluster_choice
       }
       
-      if (!is.null(target_cluster)) {
-        extracted_data <- extract_cluster_data(clustering_result$clustered_data, target_cluster)
-        .clustering_session$extracted_cluster <- extracted_data
+      if (!base::is.null(target_cluster)) {
+        extracted <- extract_cluster_data(subset$data, target_cluster)
+        .clustering_session$extracted_cluster <- extracted
         
-        export_choice <- readline("Export this cluster data to CSV? (y/n): ")
-        if (tolower(export_choice) == "y") {
-          filename <- readline("Enter filename (without .csv extension): ")
-          if (filename == "") filename <- paste0("cluster_", target_cluster, "_data")
-          
-          write_csv(extracted_data$cluster_data, paste0(filename, ".csv"))
-          cat("Cluster data exported to:", paste0(filename, ".csv"), "\n")
+        export_choice <- base::readline("Export cluster data to CSV? (y/n): ")
+        if (base::tolower(export_choice) == "y") {
+          filename <- base::readline("Filename (without .csv): ")
+          if (filename == "") filename <- base::paste0("cluster_", target_cluster, "_data")
+          readr::write_csv(extracted$cluster_data, base::paste0(filename, ".csv"))
+          cat("Exported to:", base::paste0(filename, ".csv"), "\n")
         }
       } else {
         cat("Invalid cluster selection\n")
       }
       
+      # ------------------------------------------------------------------
+      # OPTION 6: Export all results
+      # ------------------------------------------------------------------
     } else if (choice_num == 6) {
-      # Export all results
-      export_dir <- readline("Export directory (default: cluster_analysis): ")
+      subset        <- select_clusters_for_analysis(current_clustering$clustered_data)
+      subset_result <- current_clustering
+      subset_result$clustered_data  <- subset$data
+      subset_result$cluster_summary <- safe_count(subset$data, "ClusterID", "n_cells") |>
+        dplyr::mutate(percentage = base::round(n_cells / base::sum(n_cells) * 100, 1))
+      
+      mfi_subset <- analyze_cluster_mfi(subset$data, marker_names)
+      
+      export_dir <- base::readline("Export directory (default: cluster_analysis): ")
       if (export_dir == "") export_dir <- "cluster_analysis"
+      if (subset$label != "all_clusters")
+        export_dir <- base::paste0(export_dir, "_", subset$label)
       
-      export_cluster_results(clustering_result, mfi_analysis, export_dir)
+      export_cluster_results(subset_result, mfi_subset, export_dir)
       
+      # ------------------------------------------------------------------
+      # OPTION 7: Re-run clustering — updates current_clustering in place
+      # ------------------------------------------------------------------
     } else if (choice_num == 7) {
-      # Re-run clustering
-      cat("Re-running clustering with different parameters...\n")
+      cat("Re-running on the full dataset with different parameters...\n")
       new_method <- select_clustering_method()
       
-      new_clustering_result <- switch(new_method,
-                                      "flowsom" = perform_flowsom_clustering(.clustering_session$umap_data, marker_names),
-                                      "flowsom_consensus" = perform_consensus_clustering(.clustering_session$umap_data, marker_names),
-                                      "kmeans" = perform_kmeans_clustering(.clustering_session$umap_data, marker_names),
-                                      "hierarchical" = perform_hierarchical_clustering(.clustering_session$umap_data, marker_names),
-                                      "dbscan" = perform_dbscan_clustering(.clustering_session$umap_data, marker_names)
+      # Always re-cluster on the full data stored in the session
+      full_data <- .clustering_session$umap_data
+      
+      new_result <- base::switch(
+        new_method,
+        "flowsom"           = perform_flowsom_clustering(full_data, marker_names),
+        "flowsom_consensus" = perform_consensus_clustering(full_data, marker_names),
+        "kmeans"            = perform_kmeans_clustering(full_data, marker_names),
+        "hierarchical"      = perform_hierarchical_clustering(full_data, marker_names),
+        "dbscan"            = perform_dbscan_clustering(full_data, marker_names),
+        {
+          cat("Unrecognised method — falling back to FlowSOM.\n")
+          perform_flowsom_clustering(full_data, marker_names)
+        }
       )
       
-      if (!is.null(new_clustering_result)) {
-        clustering_result <- new_clustering_result
-        .clustering_session$clustering_result <- clustering_result
+      if (!base::is.null(new_result)) {
+        # Update LOCAL tracking variables — these flow back to perform_clustering_analysis
+        current_clustering <- new_result
+        current_mfi        <- analyze_cluster_mfi(
+          current_clustering$clustered_data, marker_names
+        )
         
-        mfi_analysis <- analyze_cluster_mfi(clustering_result$clustered_data, marker_names)
-        .clustering_session$mfi_analysis <- mfi_analysis
+        # Keep session env in sync for any option-7-within-option-7 calls
+        .clustering_session$clustering_result <- current_clustering
+        .clustering_session$mfi_analysis      <- current_mfi
         
-        cat("Clustering re-run complete!\n")
+        cat("Re-run complete! Now showing", current_clustering$n_clusters, "clusters.\n")
       }
       
+      # ------------------------------------------------------------------
+      # OPTION 8: Exit — return current (possibly re-run) state
+      # ------------------------------------------------------------------
     } else if (choice_num == 8) {
-      # Return to main
       cat("Returning to main analysis...\n")
       break
     }
-  }
+    
+  } # end while
   
-  return(invisible(.clustering_session))
+  # Return the final state so perform_clustering_analysis() can use it.
+  return(base::invisible(base::list(
+    clustering_result = current_clustering,
+    mfi_analysis      = current_mfi
+  )))
 }
 
 # ============================================================================
