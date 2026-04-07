@@ -292,6 +292,7 @@ interactive_save_dataframe <- function(df, suggested_name = "data", data_type = 
 # ============================================================================
 # SECTION 1: CORE SETUP AND DATA LOADING
 # ============================================================================
+`%||%` <- function(x, y) if (!base::is.null(x)) x else y
 
 # Function to extract and preview keywords from FCS files
 preview_fcs_keywords <- function(fcs_path, sample_limit = 5) {
@@ -5761,50 +5762,77 @@ select_statistical_test_interactive <- function(mfi_data, selected_congenics, se
   }
 }
 
+select_correction_method <- function() {
+  cat("\nMultiple comparison correction:\n")
+  cat("1. Benjamini-Hochberg FDR (recommended — markers are correlated)\n")
+  cat("2. Bonferroni (conservative)\n")
+  cat("3. None\n")
+  
+  while (TRUE) {
+    choice <- base::readline("Choose correction (1-3, default 1): ")
+    if (choice == "") choice <- "1"
+    
+    if (choice == "1") {
+      cat("Using Benjamini-Hochberg FDR correction.\n")
+      return(base::list(method = "BH",         label = "Benjamini-Hochberg FDR"))
+    } else if (choice == "2") {
+      cat("Using Bonferroni correction.\n")
+      return(base::list(method = "bonferroni", label = "Bonferroni"))
+    } else if (choice == "3") {
+      cat("No multiple comparison correction applied.\n")
+      return(base::list(method = "none",       label = "None"))
+    }
+    cat("Invalid choice.\n")
+  }
+}
+
 configure_two_group_test <- function(test_type, pairing, selected_congenics, mfi_data) {
-  base::cat(base::sprintf("\n--- Configuring %s (%s) ---\n", 
+  base::cat(base::sprintf("\n--- Configuring %s (%s) ---\n",
                           base::switch(test_type,
-                                       "t.test" = "T-test",
+                                       "t.test"      = "T-test",
                                        "mannwhitney" = "Mann-Whitney U test",
-                                       "wilcoxon" = "Wilcoxon signed-rank test"),
+                                       "wilcoxon"    = "Wilcoxon signed-rank test"),
                           pairing))
   
-  tissue_col <- "tissue_factor"  # Default tissue column
+  tissue_col  <- "tissue_factor"
+  correction  <- select_correction_method()
   sig_display <- select_significance_display()
-  alpha <- get_alpha_level()
+  alpha       <- get_alpha_level()
   
   pairing_var <- NULL
   if (pairing == "paired") {
     base::cat("\nFor paired analysis, samples need to be matched.\n")
-    base::cat("Common pairing variables: Sample, NodeShort, Subject_ID, etc.\n")
-    pairing_var <- base::readline("Enter column name for pairing (enter default: 'pairing_factor'): ")
-    if (pairing_var == "") pairing_var <- "Sample"
+    pairing_var <- base::readline("Enter column name for pairing (default: 'pairing_factor'): ")
+    if (pairing_var == "") pairing_var <- "pairing_factor"
   }
   
   return(base::list(
-    perform_stats = TRUE,
-    test_type = test_type,
-    pairing = pairing,
-    pairing_var = pairing_var,
-    alpha = alpha,
-    sig_display = sig_display,
-    groups = selected_congenics,
-    post_hoc = FALSE,
-    tissue_col = tissue_col
+    perform_stats      = TRUE,
+    test_type          = test_type,
+    pairing            = pairing,
+    pairing_var        = pairing_var,
+    alpha              = alpha,
+    sig_display        = sig_display,
+    groups             = selected_congenics,
+    post_hoc           = FALSE,
+    tissue_col         = tissue_col,
+    correction_method  = correction$method,
+    correction_label   = correction$label
   ))
 }
 
 configure_multi_group_test <- function(test_type, selected_congenics, mfi_data) {
-  base::cat(base::sprintf("\n--- Configuring %s ---\n", 
+  base::cat(base::sprintf("\n--- Configuring %s ---\n",
                           base::switch(test_type,
-                                       "anova" = "One-way ANOVA",
-                                       "kruskal" = "Kruskal-Wallis test", 
+                                       "anova"    = "One-way ANOVA",
+                                       "kruskal"  = "Kruskal-Wallis test",
                                        "rm_anova" = "Repeated measures ANOVA",
                                        "friedman" = "Friedman test")))
   
-  tissue_col <- "tissue_factor"  # Default tissue column
+  tissue_col  <- "tissue_factor"
+  correction  <- select_correction_method()
   sig_display <- select_significance_display()
-  alpha <- get_alpha_level()
+  alpha       <- get_alpha_level()
   
   post_hoc <- FALSE
   if (test_type %in% c("anova", "kruskal")) {
@@ -5815,27 +5843,28 @@ configure_multi_group_test <- function(test_type, selected_congenics, mfi_data) 
     ph_choice <- base::readline("Choose post-hoc option (1-2): ")
     if (ph_choice == "2") {
       post_hoc <- TRUE
-      base::cat("Will perform pairwise comparisons with multiple comparison correction.\n")
+      base::cat("Will perform pairwise comparisons.\n")
     }
   }
   
   pairing_var <- NULL
   if (test_type %in% c("rm_anova", "friedman")) {
-    base::cat("\nFor repeated measures analysis, samples need to be matched.\n")
-    base::cat("Common pairing variables: Sample, NodeShort, Subject_ID, etc.\n")
+    base::cat("\nFor repeated measures, samples need to be matched.\n")
     pairing_var <- base::readline("Enter column name for pairing (default: 'Sample'): ")
     if (pairing_var == "") pairing_var <- "Sample"
   }
   
   return(base::list(
-    perform_stats = TRUE,
-    test_type = test_type,
-    pairing_var = pairing_var,
-    alpha = alpha,
-    sig_display = sig_display,
-    groups = selected_congenics,
-    post_hoc = post_hoc,
-    tissue_col = tissue_col
+    perform_stats      = TRUE,
+    test_type          = test_type,
+    pairing_var        = pairing_var,
+    alpha              = alpha,
+    sig_display        = sig_display,
+    groups             = selected_congenics,
+    post_hoc           = post_hoc,
+    tissue_col         = tissue_col,
+    correction_method  = correction$method,
+    correction_label   = correction$label
   ))
 }
 
@@ -6296,33 +6325,45 @@ perform_kruskal_test <- function(marker_data, stats_config) {
 }
 
 compile_stats_summary <- function(results_list, stats_config) {
-  if (base::length(results_list) == 0) {
-    return(NULL)
-  }
+  if (base::length(results_list) == 0) return(NULL)
   
   summary_df <- purrr::map_dfr(results_list, function(result) {
     base::data.frame(
-      tissue = base::as.character(result$tissue),
-      marker = base::as.character(result$marker),
+      tissue    = base::as.character(result$tissue),
+      marker    = base::as.character(result$marker),
       test_name = result$test_name,
-      p_value = result$p_value,
-      significant = result$p_value < stats_config$alpha,
-      stars = dplyr::case_when(
-        result$p_value < 0.001 ~ "***",
-        result$p_value < 0.01 ~ "**", 
-        result$p_value < 0.05 ~ "*",
-        TRUE ~ ""
-      ),
+      p_value   = result$p_value,
       stringsAsFactors = FALSE
     )
   }, .id = "tissue_marker_combo")
   
-  summary_df <- summary_df %>%
+  # Apply chosen correction within each tissue independently
+  correction_method <- stats_config$correction_method %||% "BH"
+  
+  if (correction_method == "none") {
+    summary_df <- summary_df |>
+      dplyr::mutate(p_adj = p_value)
+  } else {
+    summary_df <- summary_df |>
+      dplyr::group_by(tissue) |>
+      dplyr::mutate(
+        p_adj = stats::p.adjust(p_value, method = correction_method)
+      ) |>
+      dplyr::ungroup()
+  }
+  
+  summary_df <- summary_df |>
     dplyr::mutate(
+      significant = p_adj < stats_config$alpha,
+      stars = dplyr::case_when(
+        p_adj < 0.001 ~ "***",
+        p_adj < 0.01  ~ "**",
+        p_adj < 0.05  ~ "*",
+        TRUE          ~ ""
+      ),
       p_formatted = dplyr::case_when(
-        p_value < 0.001 ~ "< 0.001",
-        p_value < 0.01 ~ base::sprintf("%.3f", p_value),
-        TRUE ~ base::sprintf("%.3f", p_value)
+        p_adj < 0.001 ~ "< 0.001",
+        TRUE          ~ base::sprintf("%.3f", p_adj)
       )
     )
   
@@ -6694,10 +6735,9 @@ overlay_mfi_pvalues <- function(drawn_ht, heatmap_name, sig_values) {
         for (i in base::seq_len(n_rows)) {
           marker    <- marker_order[i]
           disp_text <- sig_values[[marker]]
-          if (base::is.null(disp_text) || base::is.na(disp_text) || disp_text == "") next
-          
-          is_sig <- base::grepl("\\*|^p\\s*[=<]", disp_text)
-          if (!is_sig) next                          # <-- skip non-significant
+          if (base::is.null(disp_text) ||
+              base::is.na(disp_text)   ||
+              base::nchar(base::trimws(disp_text)) == 0) next
           
           grid::grid.text(
             label = disp_text,
@@ -6718,6 +6758,7 @@ overlay_mfi_pvalues <- function(drawn_ht, heatmap_name, sig_values) {
 overlay_mfi_pvalues_combined <- function(drawn_ht, heatmap_name,
                                          tissue_order, stats_results,
                                          stats_config) {
+  
   if (base::is.null(stats_results) || base::is.null(stats_config) ||
       stats_config$sig_display == "none") {
     return(invisible(NULL))
@@ -6729,11 +6770,18 @@ overlay_mfi_pvalues_combined <- function(drawn_ht, heatmap_name,
   n_rows       <- base::length(marker_order)
   
   for (slice_i in base::seq_along(tissue_order)) {
-    current_tissue  <- tissue_order[slice_i]
+    current_tissue <- tissue_order[slice_i]
+    
     sig_annotations <- create_tissue_significance_matrix(
       stats_results, base::rownames(ht_matrix), current_tissue, stats_config
     )
     if (base::is.null(sig_annotations) || base::length(sig_annotations) == 0) next
+    
+    # Pull p_adj for this tissue — use current_tissue (not title which doesn't exist here)
+    tissue_p_lookup <- stats_results$summary |>
+      dplyr::filter(tissue == current_tissue) |>
+      dplyr::select(marker, p_adj) |>
+      dplyr::rename(p_value = p_adj)
     
     base::tryCatch(
       ComplexHeatmap::decorate_heatmap_body(
@@ -6744,10 +6792,20 @@ overlay_mfi_pvalues_combined <- function(drawn_ht, heatmap_name,
           for (i in base::seq_len(n_rows)) {
             marker    <- marker_order[i]
             disp_text <- sig_annotations[[marker]]
-            if (base::is.null(disp_text) || base::is.na(disp_text) || disp_text == "") next
             
-            is_sig <- base::grepl("\\*|^p\\s*[=<]", disp_text)
-            if (!is_sig) next                        # <-- skip non-significant
+            # Skip empty
+            if (base::is.null(disp_text)   ||
+                base::is.na(disp_text)     ||
+                base::nchar(base::trimws(disp_text)) == 0) next
+            
+            # Skip non-significant
+            marker_p <- tissue_p_lookup |>
+              dplyr::filter(marker == .env$marker) |>
+              dplyr::pull(p_value)
+            
+            if (base::length(marker_p) == 0 ||
+                base::is.na(marker_p[1])    ||
+                marker_p[1] >= stats_config$alpha) next
             
             grid::grid.text(
               label = disp_text,
@@ -6765,8 +6823,7 @@ overlay_mfi_pvalues_combined <- function(drawn_ht, heatmap_name,
   }
   
   invisible(NULL)
-}
-
+} 
 
 # Maps stats_config$test_type to a human-readable footnote string.
 get_stats_footnote <- function(stats_config) {
@@ -6774,37 +6831,32 @@ get_stats_footnote <- function(stats_config) {
   
   test_label <- base::switch(
     stats_config$test_type,
-    "t.test"     = "Paired t-test",
-    "mannwhitney"= "Mann-Whitney U test (unpaired)",
-    "wilcoxon"   = "Wilcoxon signed-rank test (paired)",
-    "anova"      = "One-way ANOVA",
-    "kruskal"    = "Kruskal-Wallis test",
-    "rm_anova"   = "Repeated measures ANOVA",
-    "friedman"   = "Friedman test",
-    stats_config$test_type   # fallback: print raw string
+    "t.test"      = "Paired t-test",
+    "mannwhitney" = "Mann-Whitney U test (unpaired)",
+    "wilcoxon"    = "Wilcoxon signed-rank test (paired)",
+    "anova"       = "One-way ANOVA",
+    "kruskal"     = "Kruskal-Wallis test",
+    "rm_anova"    = "Repeated measures ANOVA",
+    "friedman"    = "Friedman test",
+    stats_config$test_type
   )
+  
+  correction_label <- stats_config$correction_label %||% "Benjamini-Hochberg FDR"
   
   sig_label <- base::switch(
     stats_config$sig_display,
-    "p_values" = "p-values shown",
-    "stars"    = base::paste0(
-      "significance symbols shown: ",
-      "* p<0.05, ** p<0.01, *** p<0.001"
-    ),
-    "both"     = base::paste0(
-      "p-values and significance symbols shown: ",
-      "* p<0.05, ** p<0.01, *** p<0.001"
-    ),
-    "none"     = NULL
+    "p_values" = "adjusted p-values shown",
+    "stars"    = "significance symbols: * p<0.05, ** p<0.01, *** p<0.001",
+    "both"     = "adjusted p-values and symbols: * p<0.05, ** p<0.01, *** p<0.001",
+    "none"     = return(NULL)
   )
   
-  if (base::is.null(sig_label)) return(NULL)
-  
   base::paste0(
-    "Statistical test: ", test_label,
+    "Test: ", test_label,
+    " | Correction: ", correction_label, " (within tissue)",
     " | \u03b1 = ", stats_config$alpha,
     " | ", sig_label,
-    " | Only significant results overlaid"
+    " | Significant only"
   )
 }
 
@@ -6822,7 +6874,6 @@ draw_mfi_heatmap <- function(heatmap_item, stats_config = NULL) {
       heatmap_item$stats_results,
       heatmap_item$stats_config
     )
-    # Use the config stored in the heatmap item for the combined case
     active_config <- heatmap_item$stats_config
   } else {
     overlay_mfi_pvalues(
@@ -6830,10 +6881,10 @@ draw_mfi_heatmap <- function(heatmap_item, stats_config = NULL) {
       heatmap_item$heatmap_name,
       heatmap_item$sig_values
     )
-    active_config <- stats_config
+    # Prefer config stored in item; fall back to parameter
+    active_config <- heatmap_item$stats_config %||% stats_config
   }
   
-  # --- Footnote ---
   footnote <- get_stats_footnote(active_config)
   if (!base::is.null(footnote)) {
     grid::grid.text(
@@ -6865,8 +6916,6 @@ create_single_heatmap_with_stats <- function(heatmap_matrix, title, scale_method
   scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, legend_suffix,
                                         log_base, percentile_range)
   
-  # --- Build sig_values: named character vector (marker -> display text) ---
-  # Collected here; rendered post-draw via overlay_mfi_pvalues().
   sig_values <- NULL
   
   if (!base::is.null(stats_results) && !base::is.null(stats_config) &&
@@ -6877,21 +6926,35 @@ create_single_heatmap_with_stats <- function(heatmap_matrix, title, scale_method
     )
     
     if (!base::is.null(sig_annotations) && base::length(sig_annotations) > 0) {
-      sig_values        <- base::rep("", base::nrow(heatmap_matrix))
+      
+      sig_values <- base::rep("", base::nrow(heatmap_matrix))
       base::names(sig_values) <- base::rownames(heatmap_matrix)
       
+      # Pull p_adj (adjusted), not raw p_value
+      tissue_p_lookup <- stats_results$summary |>
+        dplyr::filter(tissue == title) |>
+        dplyr::select(marker, p_adj) |>
+        dplyr::rename(p_value = p_adj)
+      
       for (marker in base::names(sig_annotations)) {
-        if (marker %in% base::names(sig_values) &&
-            !base::is.null(sig_annotations[marker]) &&
-            !base::is.na(sig_annotations[marker]) &&
-            sig_annotations[marker] != "") {
-          sig_values[marker] <- sig_annotations[marker]
-        }
+        if (!marker %in% base::names(sig_values)) next
+        
+        disp <- sig_annotations[marker]
+        if (base::is.null(disp) || base::is.na(disp) || disp == "") next
+        
+        marker_p <- tissue_p_lookup |>
+          dplyr::filter(marker == .env$marker) |>
+          dplyr::pull(p_value)
+        
+        if (base::length(marker_p) == 0 ||
+            base::is.na(marker_p[1])    ||
+            marker_p[1] >= stats_config$alpha) next
+        
+        sig_values[marker] <- disp
       }
     }
   }
   
-  # --- cell_fun: numeric values only (no significance here) ---
   cell_function <- NULL
   if (show_cell_values) {
     cell_function <- function(j, i, x, y, width, height, fill) {
@@ -6926,12 +6989,12 @@ create_single_heatmap_with_stats <- function(heatmap_matrix, title, scale_method
   return(base::list(
     heatmap      = ht,
     sig_values   = sig_values,
-    heatmap_name = scaled_result$legend_title,  # must match name = above
+    heatmap_name = scaled_result$legend_title,
     matrix       = scaled_result$matrix,
-    type         = "separate"
+    type         = "separate",
+    stats_config = stats_config    # stored so draw_mfi_heatmap() can render footnote
   ))
 }
-
 
 # ===== SEPARATE HEATMAPS WITH STATS =====
 # Key change: stores the full result list per tissue (not $heatmap only),
@@ -10949,6 +11012,66 @@ interactive_marker_exclusion_from_data <- function(single_cell_data) {
   }
 }
 
+# helper function to downsample to sample with lowest events.
+
+downsample_to_minimum <- function(single_cell_data, seed = 7777777) {
+  
+  data <- single_cell_data$data
+  
+  # Group key: if multiple nodes were pooled, equalise within each node
+  # separately; otherwise just by Sample.
+  has_source_node <- "source_node" %in% base::names(data) &&
+    base::length(base::unique(data$source_node)) > 1
+  
+  group_cols <- if (has_source_node) c("Sample", "source_node") else "Sample"
+  
+  # Count cells per group
+  group_counts <- data |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+    dplyr::summarise(n_cells = dplyr::n(), .groups = "drop") |>
+    dplyr::arrange(n_cells)
+  
+  min_cells   <- base::min(group_counts$n_cells)
+  min_group   <- group_counts[1, group_cols, drop = FALSE]
+  
+  cat("\nCell counts per group before downsampling:\n")
+  base::print(base::as.data.frame(group_counts))
+  cat(base::sprintf(
+    "\nMinimum: %s cells",
+    scales::comma(min_cells)
+  ))
+  if (has_source_node) {
+    cat(base::sprintf(
+      " (Sample: %s, Node: %s)",
+      min_group$Sample, min_group$source_node
+    ))
+  } else {
+    cat(base::sprintf(" (Sample: %s)", min_group$Sample))
+  }
+  cat("\n")
+  
+  # Downsample
+  set.seed(seed)
+  downsampled <- data |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(group_cols))) |>
+    dplyr::slice_sample(n = min_cells) |>
+    dplyr::ungroup()
+  
+  n_before <- nrow(data)
+  n_after  <- nrow(downsampled)
+  
+  cat(base::sprintf(
+    "Downsampled: %s → %s cells (removed %s)\n",
+    scales::comma(n_before),
+    scales::comma(n_after),
+    scales::comma(n_before - n_after)
+  ))
+  
+  single_cell_data$data <- downsampled
+  return(single_cell_data)
+}
+
+
 # Main Function
 
 analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissue_factor")) {
@@ -11079,6 +11202,52 @@ analyze_flow_umap_enhanced <- function(gs, keywords = c("pairing_factor", "tissu
     sample_limit         = sample_limit,
     max_cells_per_sample = max_cells
   )
+  
+  # -----------------------------------------------------------------------
+  # Step 4c: Optional downsampling to minimum sample cell count
+  # -----------------------------------------------------------------------
+  group_label <- if ("source_node" %in% names(single_cell_data$data) &&
+                     length(unique(single_cell_data$data$source_node)) > 1) {
+    "sample × node combination"
+  } else {
+    "sample"
+  }
+  
+  # Show current per-group counts so the user can make an informed decision
+  count_col  <- if (group_label == "sample × node combination") {
+    c("Sample", "source_node")
+  } else {
+    "Sample"
+  }
+  
+  group_counts_preview <- single_cell_data$data |>
+    dplyr::group_by(dplyr::across(dplyr::all_of(count_col))) |>
+    dplyr::summarise(n_cells = dplyr::n(), .groups = "drop") |>
+    dplyr::arrange(n_cells)
+  
+  cat(base::sprintf(
+    "\nCell counts per %s (sorted, lowest first):\n", group_label
+  ))
+  base::print(base::as.data.frame(group_counts_preview))
+  cat(base::sprintf(
+    "Min: %s   Max: %s   Median: %s\n",
+    scales::comma(min(group_counts_preview$n_cells)),
+    scales::comma(max(group_counts_preview$n_cells)),
+    scales::comma(median(group_counts_preview$n_cells))
+  ))
+  
+  downsample_choice <- base::readline(base::sprintf(
+    "Downsample all %ss to %s cells (minimum)? (y/n, default n): ",
+    group_label,
+    scales::comma(min(group_counts_preview$n_cells))
+  ))
+  
+  if (base::tolower(base::trimws(downsample_choice)) == "y") {
+    single_cell_data <- downsample_to_minimum(single_cell_data)
+    cat("Downsampling complete.\n")
+  } else {
+    cat("Skipping downsampling — proceeding with unequal cell counts.\n")
+  }
   
   # -----------------------------------------------------------------------
   # Step 5: Import external metadata (optional)
@@ -12258,6 +12427,54 @@ select_clusters_for_analysis <- function(clustered_data,
 # CLUSTER CHARACTERIZATION AND MFI ANALYSIS
 # ============================================================================
 
+#Ensures a consistant pallet of colors from the cluster UMAP to the cluster MFI analysis and other cluster visualizations. Caches palettes in session for efficiency.
+get_cluster_palette <- function(clustered_data,
+                                cluster_column = "ClusterID",
+                                force_rebuild  = FALSE) {
+  
+  cache_key <- base::paste0("palette_", cluster_column)
+  
+  # Return cached palette if it covers the current cluster set
+  if (!force_rebuild &&
+      !base::is.null(.clustering_session[[cache_key]])) {
+    
+    cached    <- .clustering_session[[cache_key]]
+    current   <- base::as.character(
+      base::sort(base::unique(clustered_data[[cluster_column]]))
+    )
+    
+    if (base::all(current %in% base::names(cached))) {
+      return(cached)
+    }
+  }
+  
+  # Build palette
+  cluster_levels <- base::as.character(
+    base::sort(base::unique(clustered_data[[cluster_column]]))
+  )
+  n <- base::length(cluster_levels)
+  
+  if (n <= 12) {
+    colours <- RColorBrewer::brewer.pal(base::max(3L, base::min(n, 11L)), "Set3")
+    if (n == 12) colours <- c(colours, "#FF1493")
+    colours <- colours[base::seq_len(n)]
+  } else {
+    colours <- grDevices::rainbow(n, alpha = 0.8)
+  }
+  
+  palette <- stats::setNames(colours, cluster_levels)
+  
+  # Cache in session environment
+  .clustering_session[[cache_key]] <- palette
+  
+  cat(base::sprintf(
+    "Cluster colour palette built: %d clusters cached in .clustering_session$%s\n",
+    n, cache_key
+  ))
+  
+  return(palette)
+}
+
 analyze_cluster_mfi <- function(clustered_data, marker_names, 
                                 cluster_column = "ClusterID") {
   
@@ -12367,61 +12584,113 @@ analyze_cluster_mfi <- function(clustered_data, marker_names,
 # CLUSTER VISUALIZATION FUNCTIONS
 # ============================================================================
 
-create_cluster_umap_plot <- function(clustered_data, cluster_column = "ClusterID",
-                                     title = NULL, show_percentages = TRUE) {
+get_cluster_palette <- function(clustered_data,
+                                cluster_column = "ClusterID",
+                                force_rebuild  = FALSE) {
   
-  if (is.null(title)) {
-    title <- paste("UMAP with", str_replace(cluster_column, "Cluster", ""), "Clusters")
+  cache_key <- base::paste0("palette_", cluster_column)
+  
+  # Return cached palette if it covers the current cluster set
+  if (!force_rebuild &&
+      !base::is.null(.clustering_session[[cache_key]])) {
+    
+    cached    <- .clustering_session[[cache_key]]
+    current   <- base::as.character(
+      base::sort(base::unique(clustered_data[[cluster_column]]))
+    )
+    
+    if (base::all(current %in% base::names(cached))) {
+      return(cached)
+    }
   }
   
-  # Clean data structure first
+  # Build palette
+  cluster_levels <- base::as.character(
+    base::sort(base::unique(clustered_data[[cluster_column]]))
+  )
+  n <- base::length(cluster_levels)
+  
+  if (n <= 12) {
+    colours <- RColorBrewer::brewer.pal(base::max(3L, base::min(n, 11L)), "Set3")
+    if (n == 12) colours <- c(colours, "#FF1493")
+    colours <- colours[base::seq_len(n)]
+  } else {
+    colours <- grDevices::rainbow(n, alpha = 0.8)
+  }
+  
+  palette <- stats::setNames(colours, cluster_levels)
+  
+  # Cache in session environment
+  .clustering_session[[cache_key]] <- palette
+  
+  cat(base::sprintf(
+    "Cluster colour palette built: %d clusters cached in .clustering_session$%s\n",
+    n, cache_key
+  ))
+  
+  return(palette)
+}
+
+create_cluster_umap_plot <- function(clustered_data,
+                                     cluster_column   = "ClusterID",
+                                     title            = NULL,
+                                     show_percentages = TRUE) {
+  
+  if (base::is.null(title)) {
+    title <- base::paste("UMAP —", cluster_column)
+  }
+  
   clustered_data <- safe_tibble_operations(clustered_data)
   
-  # FIXED: Use safe_count instead of dplyr count()
-  cluster_stats <- safe_count(clustered_data, cluster_column, "n_cells") %>%
-    mutate(
-      percentage = round(n_cells / sum(n_cells) * 100, 1),
-      label = if (show_percentages) {
-        paste0(.data[[cluster_column]], "\n(", percentage, "%)")
+  # Shared palette — identical to violin plots
+  pal <- get_cluster_palette(clustered_data, cluster_column)
+  
+  # Cluster size statistics for optional percentage labels
+  cluster_stats <- safe_count(clustered_data, cluster_column, "n_cells") |>
+    dplyr::mutate(
+      percentage = base::round(n_cells / base::sum(n_cells) * 100, 1),
+      label      = if (show_percentages) {
+        base::paste0(.data[[cluster_column]], "\n(", percentage, "%)")
       } else {
-        as.character(.data[[cluster_column]])
+        base::as.character(.data[[cluster_column]])
       }
     )
   
-  # Add labels to data - convert to data frame first to avoid S4/tibble issues
-  plot_data <- as.data.frame(clustered_data) %>%
-    as_tibble() %>%
-    left_join(cluster_stats %>% select(all_of(cluster_column), label), 
-              by = cluster_column)
+  plot_data <- safe_tibble_operations(clustered_data) |>
+    dplyr::left_join(
+      cluster_stats |> dplyr::select(dplyr::all_of(cluster_column), label),
+      by = cluster_column
+    )
   
-  # Create color palette
-  n_clusters <- n_distinct(clustered_data[[cluster_column]])
+  n_clusters <- base::length(pal)
   
-  if (n_clusters <= 12) {
-    colors <- RColorBrewer::brewer.pal(min(n_clusters, 11), "Set3")
-    if (n_clusters == 12) colors <- c(colors, "#FF1493")  # Add pink for 12th cluster
-  } else {
-    colors <- rainbow(n_clusters, alpha = 0.8)
-  }
-  
-  p <- ggplot(plot_data, aes(x = UMAP1, y = UMAP2, color = .data[[cluster_column]])) +
-    geom_point(size = 0.5, alpha = 0.7) +
-    scale_color_manual(values = colors, name = "Cluster") +
-    labs(
-      title = title,
-      subtitle = paste("Total cells:", scales::comma(nrow(clustered_data)), 
-                       "| Clusters:", n_clusters)
+  p <- ggplot2::ggplot(
+    plot_data,
+    ggplot2::aes(x = UMAP1, y = UMAP2, color = .data[[cluster_column]])
+  ) +
+    ggplot2::geom_point(size = 0.5, alpha = 0.7) +
+    ggplot2::scale_color_manual(values = pal, name = "Cluster") +
+    ggplot2::labs(
+      title    = title,
+      subtitle = base::paste(
+        "Total cells:", scales::comma(nrow(clustered_data)),
+        "| Clusters:", n_clusters
+      )
     ) +
-    theme_minimal() +
-    theme(
-      axis.text = element_blank(),
-      axis.ticks = element_blank(), 
-      panel.grid = element_blank(),
-      plot.title = element_text(hjust = 0.5),
-      plot.subtitle = element_text(hjust = 0.5),
-      legend.position = "right"
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      axis.text          = ggplot2::element_blank(),
+      axis.ticks         = ggplot2::element_blank(),
+      panel.grid         = ggplot2::element_blank(),
+      plot.title         = ggplot2::element_text(hjust = 0.5),
+      plot.subtitle      = ggplot2::element_text(hjust = 0.5),
+      legend.position    = "right"
     ) +
-    guides(color = guide_legend(override.aes = list(size = 3, alpha = 1)))
+    ggplot2::guides(
+      color = ggplot2::guide_legend(
+        override.aes = base::list(size = 3, alpha = 1)
+      )
+    )
   
   return(p)
 }
@@ -12522,54 +12791,363 @@ create_cluster_heatmap <- function(mfi_analysis, cluster_column = "ClusterID",
   return(ht)
 }
 
-create_mfi_violin_plots <- function(clustered_data, marker_names, 
-                                    cluster_column = "ClusterID",
-                                    max_markers = 9) {
+select_violin_stats_config <- function(n_clusters) {
   
-  # Clean data structure first
-  clustered_data <- safe_tibble_operations(clustered_data)
+  cat("\n=== Statistical Testing for Violin Plots ===\n")
+  cat("Groups (clusters):", n_clusters, "\n\n")
   
-  # Select top markers or limit number
-  if (length(marker_names) > max_markers) {
-    cat("Too many markers for violin plots. Selecting first", max_markers, "\n")
-    selected_markers <- head(marker_names, max_markers)
+  # -----------------------------------------------------------------------
+  # Test selection — options depend on number of groups
+  # -----------------------------------------------------------------------
+  if (n_clusters == 2) {
+    cat("Available tests (2 groups):\n")
+    cat("1. No statistical testing\n")
+    cat("2. Parametric:     Unpaired t-test\n")
+    cat("3. Parametric:     Paired t-test\n")
+    cat("4. Non-parametric: Mann-Whitney U (Wilcoxon rank-sum)\n")
+    cat("5. Non-parametric: Wilcoxon signed-rank (paired)\n")
+    
+    while (TRUE) {
+      choice <- base::readline("Choose test (1-5): ")
+      if (choice == "1") return(base::list(perform_stats = FALSE))
+      if (choice %in% base::c("2","3","4","5")) { test_num <- choice; break }
+      cat("Invalid choice.\n")
+    }
+    
+    test_info <- base::switch(test_num,
+                              "2" = base::list(fn = "t_test",     paired = FALSE, label = "Unpaired t-test"),
+                              "3" = base::list(fn = "t_test",     paired = TRUE,  label = "Paired t-test"),
+                              "4" = base::list(fn = "wilcox_test", paired = FALSE, label = "Mann-Whitney U test"),
+                              "5" = base::list(fn = "wilcox_test", paired = TRUE,  label = "Wilcoxon signed-rank test")
+    )
+    
   } else {
-    selected_markers <- marker_names
+    cat("Available tests (", n_clusters, "groups):\n")
+    cat("1. No statistical testing\n")
+    cat("2. Parametric:     One-way ANOVA + Tukey HSD post-hoc\n")
+    cat("3. Non-parametric: Kruskal-Wallis + Dunn post-hoc (Bonferroni)\n")
+    
+    while (TRUE) {
+      choice <- base::readline("Choose test (1-3): ")
+      if (choice == "1") return(base::list(perform_stats = FALSE))
+      if (choice %in% base::c("2","3")) { test_num <- choice; break }
+      cat("Invalid choice.\n")
+    }
+    
+    test_info <- base::switch(test_num,
+                              "2" = base::list(fn = "anova",    paired = FALSE, label = "One-way ANOVA + Tukey HSD"),
+                              "3" = base::list(fn = "kruskal",  paired = FALSE, label = "Kruskal-Wallis + Dunn (Bonferroni)")
+    )
   }
   
-  # Prepare data
-  violin_data <- clustered_data %>%
-    select(all_of(c(cluster_column, selected_markers))) %>%
-    pivot_longer(cols = all_of(selected_markers), 
-                 names_to = "Marker", values_to = "Expression")
+  # -----------------------------------------------------------------------
+  # p-value display options
+  # -----------------------------------------------------------------------
+  cat("\nSignificance display:\n")
+  cat("1. Significance stars only  (*** ** * ns)\n")
+  cat("2. Exact p-values\n")
+  cat("3. Both stars and p-values\n")
   
-  # Create violin plots
-  violin_plots <- map(selected_markers, function(marker) {
-    marker_data <- violin_data %>% dplyr::filter(Marker == marker)
-    
-    ggplot(marker_data, aes(x = .data[[cluster_column]], y = Expression, 
-                            fill = .data[[cluster_column]])) +
-      geom_violin(alpha = 0.7, scale = "width") +
-      geom_boxplot(width = 0.1, fill = "white", alpha = 0.8) +
-      labs(
-        title = marker,
-        x = "Cluster",
-        y = "Expression"
-      ) +
-      theme_minimal() +
-      theme(
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        legend.position = "none",
-        plot.title = element_text(size = 10, hjust = 0.5)
-      )
-  })
+  while (TRUE) {
+    disp <- base::readline("Choose display (1-3, default 1): ")
+    if (disp == "") disp <- "1"
+    if (disp %in% base::c("1","2","3")) break
+    cat("Invalid choice.\n")
+  }
   
-  # Arrange plots
-  ncol_grid <- ceiling(sqrt(length(violin_plots)))
-  combined_plot <- wrap_plots(violin_plots, ncol = ncol_grid)
+  sig_display <- base::switch(disp,
+                              "1" = "stars",
+                              "2" = "p",
+                              "3" = "both"
+  )
   
-  return(combined_plot)
+  # -----------------------------------------------------------------------
+  # Show all comparisons or significant only
+  # -----------------------------------------------------------------------
+  cat("\nFilter results:\n")
+  cat("1. Show ALL pairwise comparisons\n")
+  cat("2. Show only significant comparisons (p.adj < 0.05)\n")
+  
+  while (TRUE) {
+    filt <- base::readline("Choose (1-2, default 2): ")
+    if (filt == "") filt <- "2"
+    if (filt %in% base::c("1","2")) break
+    cat("Invalid choice.\n")
+  }
+  
+  hide_ns <- (filt == "2")
+  
+  return(base::list(
+    perform_stats = TRUE,
+    fn            = test_info$fn,
+    paired        = test_info$paired,
+    label         = test_info$label,
+    sig_display   = sig_display,
+    hide_ns       = hide_ns
+  ))
 }
+
+create_mfi_violin_plots <- function(clustered_data,
+                                    marker_names,
+                                    cluster_column = "ClusterID",
+                                    max_markers    = 9,
+                                    stats_config   = NULL) {
+  
+  if (!requireNamespace("rstatix", quietly = TRUE)) stop("rstatix required")
+  if (!requireNamespace("ggpubr",  quietly = TRUE)) stop("ggpubr required")
+  
+  clustered_data <- safe_tibble_operations(clustered_data)
+  
+  if (base::length(marker_names) > max_markers) {
+    cat("Limiting to first", max_markers, "markers for violin plots.\n")
+    marker_names <- utils::head(marker_names, max_markers)
+  }
+  
+  n_clusters <- dplyr::n_distinct(clustered_data[[cluster_column]])
+  
+  pal <- get_cluster_palette(clustered_data, cluster_column)
+  
+  if (base::is.null(stats_config)) {
+    stats_config <- select_violin_stats_config(n_clusters)
+  }
+  
+  # -------------------------------------------------------------------------
+  # Helper: run the chosen test for one marker
+  # -------------------------------------------------------------------------
+  run_test <- function(df, cluster_column, stats_config) {
+    
+    formula_obj <- stats::as.formula(
+      base::paste("Expression ~", cluster_column)
+    )
+    
+    base::tryCatch({
+      
+      n_groups  <- dplyr::n_distinct(df[[cluster_column]])
+      use_dodge <- n_groups > 2
+      
+      # ── Run test ──────────────────────────────────────────────────────────
+      if (stats_config$fn == "t_test") {
+        result <- rstatix::t_test(
+          df, formula_obj,
+          paired          = stats_config$paired,
+          p.adjust.method = "bonferroni"
+        )
+      } else if (stats_config$fn == "wilcox_test") {
+        result <- rstatix::wilcox_test(
+          df, formula_obj,
+          paired          = stats_config$paired,
+          p.adjust.method = "bonferroni"
+        )
+      } else if (stats_config$fn == "anova") {
+        result <- rstatix::tukey_hsd(df, formula_obj)
+      } else if (stats_config$fn == "kruskal") {
+        result <- rstatix::dunn_test(
+          df, formula_obj,
+          p.adjust.method = "bonferroni"
+        )
+      }
+      
+      if (base::is.null(result) || nrow(result) == 0) {
+        base::message("  No test results returned — skipping.")
+        return(NULL)
+      }
+      
+      # ── add_xy_position — omit dodge for single comparison ───────────────
+      if (use_dodge) {
+        result <- rstatix::add_xy_position(result, x = cluster_column, dodge = 0.8)
+      } else {
+        result <- rstatix::add_xy_position(result, x = cluster_column)
+      }
+      
+      # ── Resolve p column — evaluate names() OUTSIDE mutate ───────────────
+      has_padj <- "p.adj" %in% base::names(result)
+      has_p    <- "p"     %in% base::names(result)
+      
+      result <- result |>
+        dplyr::mutate(
+          p_use = dplyr::case_when(
+            has_padj & !base::is.na(p.adj) ~ p.adj,
+            has_p    & !base::is.na(p)     ~ p,
+            TRUE                           ~ 1
+          )
+        )
+      
+      # ── Build display label ───────────────────────────────────────────────
+      result <- result |>
+        dplyr::mutate(
+          p_label = dplyr::case_when(
+            
+            stats_config$sig_display == "stars" ~
+              dplyr::case_when(
+                base::is.na(p_use) ~ "ns",
+                p_use < 0.001      ~ "***",
+                p_use < 0.01       ~ "**",
+                p_use < 0.05       ~ "*",
+                TRUE               ~ "ns"
+              ),
+            
+            stats_config$sig_display == "p" ~
+              dplyr::case_when(
+                base::is.na(p_use) ~ "NA",
+                p_use < 0.001      ~ "< 0.001",
+                TRUE               ~ base::sprintf("%.3f", p_use)
+              ),
+            
+            stats_config$sig_display == "both" ~
+              dplyr::case_when(
+                base::is.na(p_use) ~ "NA",
+                p_use < 0.001      ~ "< 0.001 ***",
+                p_use < 0.01       ~ base::sprintf("%.3f **",  p_use),
+                p_use < 0.05       ~ base::sprintf("%.3f *",   p_use),
+                TRUE               ~ base::sprintf("%.3f ns",  p_use)
+              ),
+            
+            TRUE ~ base::sprintf(
+              "%.3f",
+              base::ifelse(base::is.na(p_use), 1, p_use)
+            )
+          )
+        )
+      
+      # ── Filter non-significant if requested ──────────────────────────────
+      if (stats_config$hide_ns) {
+        result <- result |>
+          dplyr::filter(!base::is.na(p_use) & p_use < 0.05)
+      }
+      
+      if (nrow(result) == 0) {
+        cat("  No significant comparisons to display for this marker.\n")
+        return(NULL)
+      }
+      
+      return(result)
+      
+    }, error = function(e) {
+      base::message("  Stats skipped for this marker: ", e$message)
+      return(NULL)
+    })
+  } # end run_test
+  
+  # -------------------------------------------------------------------------
+  # Footnote
+  # -------------------------------------------------------------------------
+  footnote <- if (stats_config$perform_stats) {
+    base::paste0(
+      "Statistical test: ", stats_config$label,
+      " | p.adj method: Bonferroni",
+      if (stats_config$hide_ns) " | Significant only (p.adj < 0.05)"
+      else " | All comparisons shown"
+    )
+  } else {
+    NULL
+  }
+  
+  # -------------------------------------------------------------------------
+  # Build one plot per marker
+  # -------------------------------------------------------------------------
+  violin_plots <- purrr::map(marker_names, function(marker) {
+    
+    marker_df <- clustered_data |>
+      dplyr::select(dplyr::all_of(base::c(cluster_column, marker))) |>
+      dplyr::rename(Expression = dplyr::all_of(marker)) |>
+      dplyr::mutate(
+        Expression        = base::as.numeric(Expression),
+        !!cluster_column := factor(
+          .data[[cluster_column]],
+          levels = base::names(pal)
+        )
+      ) |>
+      dplyr::filter(!base::is.na(Expression)) |>
+      dplyr::mutate(
+        !!cluster_column := droplevels(.data[[cluster_column]])  # <-- drop empty levels
+      )
+    
+    p <- ggplot2::ggplot(
+      marker_df,
+      ggplot2::aes(
+        x    = .data[[cluster_column]],
+        y    = Expression,
+        fill = .data[[cluster_column]]
+      )
+    ) +
+      ggplot2::geom_violin(alpha = 0.75, scale = "width", trim = FALSE) +
+      ggplot2::geom_boxplot(
+        width         = 0.12,
+        fill          = "white",
+        alpha         = 0.85,
+        outlier.size  = 0.5,
+        outlier.alpha = 0.4
+      ) +
+      ggplot2::scale_fill_manual(values = pal) +
+      ggplot2::labs(title = marker, x = "Cluster", y = "Expression") +
+      ggplot2::theme_minimal(base_size = 11) +
+      ggplot2::theme(
+        axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1),
+        legend.position  = "none",
+        plot.title       = ggplot2::element_text(size = 10, hjust = 0.5),
+        panel.grid.major = ggplot2::element_blank(),
+        panel.grid.minor = ggplot2::element_blank(),
+        axis.line        = ggplot2::element_line(colour = "black", linewidth = 0.3)
+      )
+    
+    if (stats_config$perform_stats) {
+      
+      stat_result <- run_test(marker_df, cluster_column, stats_config)
+      
+      if (!base::is.null(stat_result) && nrow(stat_result) > 0) {
+        
+        p <- p +
+          ggpubr::stat_pvalue_manual(
+            stat_result,
+            label        = "p_label",
+            tip.length   = 0.01,
+            bracket.size = 0.4,
+            size         = 2.8,
+            hide.ns      = FALSE
+          )
+        
+        max_y_stat <- base::max(stat_result$y.position, na.rm = TRUE)
+        max_y_data <- base::max(marker_df$Expression,   na.rm = TRUE)
+        
+        p <- p +
+          ggplot2::coord_cartesian(
+            ylim = base::c(NA, base::max(max_y_stat, max_y_data) * 1.10)
+          )
+      }
+      
+      if (!base::is.null(footnote)) {
+        p <- p +
+          ggplot2::labs(caption = footnote) +
+          ggplot2::theme(
+            plot.caption = ggplot2::element_text(
+              size   = 6,
+              hjust  = 1,
+              colour = "grey45",
+              face   = "italic",
+              margin = ggplot2::margin(t = 4)
+            )
+          )
+      }
+    }
+    
+    p
+    
+  }) # end purrr::map
+  
+  # -------------------------------------------------------------------------
+  # Arrange in grid
+  # -------------------------------------------------------------------------
+  n_m       <- base::length(violin_plots)
+  ncol_grid <- dplyr::case_when(
+    n_m <= 4  ~ 2L,
+    n_m <= 9  ~ 3L,
+    n_m <= 16 ~ 4L,
+    TRUE      ~ base::as.integer(base::ceiling(base::sqrt(n_m)))
+  )
+  
+  patchwork::wrap_plots(violin_plots, ncol = ncol_grid)
+  
+} # end create_mfi_violin_plots
 
 # ============================================================================
 # CLUSTER COMPARISON AND DIFFERENTIAL EXPRESSION
@@ -13103,6 +13681,9 @@ interactive_clustering_menu <- function(clustering_result, mfi_analysis, marker_
     } else if (choice_num == 3) {
       
       subset      <- select_clusters_for_analysis(current_clustering$clustered_data)
+      
+      # stats_config is collected inside create_mfi_violin_plots() via
+      # select_violin_stats_config() — no separate prompt needed here.
       violin_plot <- create_mfi_violin_plots(subset$data, marker_names)
       print(violin_plot)
       
@@ -13110,8 +13691,13 @@ interactive_clustering_menu <- function(clustering_result, mfi_analysis, marker_
       if (base::tolower(save_choice) == "y") {
         filename <- base::readline("Enter filename (without extension): ")
         if (filename == "") filename <- base::paste0("violin_", subset$label)
-        ggplot2::ggsave(base::paste0(filename, ".png"),
-                        plot = violin_plot, width = 12, height = 10, dpi = 300)
+        ggplot2::ggsave(
+          base::paste0(filename, ".png"),
+          plot   = violin_plot,
+          width  = 12,
+          height = 10,
+          dpi    = 300
+        )
         cat("Saved:", base::paste0(filename, ".png"), "\n")
       }
       
