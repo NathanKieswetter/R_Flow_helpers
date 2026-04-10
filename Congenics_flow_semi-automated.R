@@ -289,6 +289,126 @@ interactive_save_dataframe <- function(df, suggested_name = "data", data_type = 
   return(NULL)
 }
 
+# --- CHUNK 1/3: TISSUE COLOUR PALETTE MODULE ---
+# INSERT AFTER: the interactive_save_dataframe() function, before SECTION 1
+
+# ============================================================================
+# TISSUE COLOUR PALETTE
+# ============================================================================
+# Central source-of-truth for tissue identity colours.
+# All plotting functions call get_tissue_colors() — never hard-code colours.
+
+.TISSUE_CANONICAL <- list(
+  Spleen           = c("spleen",   "spl"),
+  Blood            = c("blood",    "pbmc"),
+  siIEL            = c("siiel",    "iel"),
+  Kidney           = c("kidney",   "kid"),
+  `Salivary Gland` = c("salivary gland", "sg", "salivarygland"),
+  Fat              = c("fat"),
+  Liver            = c("liver",    "liv"),
+  `Mesenteric LN`  = c("mesenteric lymph node", "mln", "mesln")
+)
+
+.TISSUE_COLORS <- c(
+  Spleen           = "#f18f14",
+  Blood            = "#ef7464",
+  siIEL            = "#527aa8",
+  Kidney           = "#87c7c1",
+  `Salivary Gland` = "#5aa439",
+  Fat              = "#efc93e",
+  Liver            = "#b87ca8",
+  `Mesenteric LN`  = "#BF3EFF"
+)
+
+#' Resolve a tissue label to its canonical name.
+#' Case-insensitive; returns NA_character_ for unrecognised labels.
+#' @param x Character vector of tissue labels.
+#' @return Character vector of canonical names (same length as x).
+resolve_tissue_canonical <- function(x) {
+  x_lower <- base::tolower(base::trimws(x))
+  
+  purrr::map_chr(x_lower, function(val) {
+    
+    match_found <- NA_character_
+    
+    for (canonical in base::names(.TISSUE_CANONICAL)) {
+      if (val %in% .TISSUE_CANONICAL[[canonical]]) {
+        match_found <- canonical
+        break
+      }
+    }
+    
+    match_found
+  })
+}
+
+#' Build a named colour vector for a set of tissue labels.
+#' Recognised tissues use the canonical palette; unrecognised tissues fall
+#' back to \code{unmatched_color} (default "grey60").
+#' Returns a named vector whose names are the ORIGINAL (not canonical) labels,
+#' so it can be passed directly to scale_fill_manual() / scale_color_manual().
+#'
+#' @param tissue_names  Character vector of tissue labels as they appear in data.
+#' @param unmatched_color  Hex colour for any label not in the canonical palette.
+#' @return Named character vector of colours.
+get_tissue_colors <- function(tissue_names,
+                              unmatched_color = "grey60") {
+  
+  unique_labels <- base::unique(base::as.character(tissue_names))
+  canonical     <- resolve_tissue_canonical(unique_labels)
+  
+  colours <- purrr::map_chr(
+    base::seq_along(unique_labels),
+    function(i) {
+      can <- canonical[i]
+      if (!base::is.na(can) && can %in% base::names(.TISSUE_COLORS)) {
+        .TISSUE_COLORS[[can]]
+      } else {
+        unmatched_color
+      }
+    }
+  )
+  
+  stats::setNames(colours, unique_labels)
+}
+
+#' Test whether a column name looks like a tissue grouping column.
+#' Used internally to decide when to apply tissue colours automatically.
+#' @param col_name  Single column name string.
+#' @return Logical scalar.
+.is_tissue_column <- function(col_name) {
+  base::grepl(
+    "tissue|organ|location|site|sampletype",
+    col_name,
+    ignore.case = TRUE
+  )
+}
+
+#' Convenience wrapper: given a data frame and a grouping column, return a
+#' tissue colour vector if the column appears to be tissue-typed, otherwise
+#' return NULL (caller falls back to its own palette logic).
+#'
+#' @param df          Data frame containing the grouping column.
+#' @param group_col   Name of the grouping column.
+#' @return Named colour vector or NULL.
+tissue_colors_from_column <- function(df, group_col) {
+  
+  if (!group_col %in% base::names(df)) return(NULL)
+  if (!.is_tissue_column(group_col))   return(NULL)
+  
+  labels    <- base::unique(base::as.character(df[[group_col]]))
+  canonical <- resolve_tissue_canonical(labels)
+  
+  # Only apply tissue palette if at least half the labels are recognised
+  n_recognised <- base::sum(!base::is.na(canonical))
+  if (n_recognised < base::ceiling(base::length(labels) / 2)) return(NULL)
+  
+  get_tissue_colors(labels)
+}
+
+cat("Tissue colour palette loaded.\n")
+cat("Canonical tissues:", base::paste(base::names(.TISSUE_COLORS), collapse = ", "), "\n")
+
 # ============================================================================
 # SECTION 1: CORE SETUP AND DATA LOADING
 # ============================================================================
@@ -2401,75 +2521,203 @@ extract_counts_freqs_base <- function(gs, nodes, parent_mapping = NULL, keywords
 }
 
 # Similarly, fix MFI extraction to not assume standardized columns
-extract_mfi_base <- function(gs, nodes, channels = NULL, summary_fun = median, keywords = NULL) {
-  if(is.null(channels)) {
+extract_mfi_base <- function(gs,
+                             nodes,
+                             channels      = NULL,
+                             summary_fun   = median,
+                             keywords      = NULL,
+                             transform     = TRUE,
+                             cofactor      = 6000) {
+  # ---------------------------------------------------------------------------
+  # Parameter notes
+  #   transform : logical. Apply asinh(x / cofactor) to single-cell values
+  #               BEFORE computing the summary statistic. Set FALSE only when
+  #               your data were already transformed upstream (e.g. you called
+  #               extract_mfi_base() earlier with transform = TRUE and are
+  #               reusing the result). A warning is issued in that case as a
+  #               reminder.
+  #   cofactor  : numeric. Scaling factor for asinh transformation.
+  #               150  — conventional PMT-based flow cytometry
+  #               6000 — reasonable starting point for Cytek Aurora
+  #               Best practice: run flowVS::estParamFlowVS() per channel.
+  #               A single scalar is applied to all channels; pass a named
+  #               numeric vector (names = colnames) for per-channel cofactors.
+  # ---------------------------------------------------------------------------
+  
+  if (!transform) {
+    warning(
+      "extract_mfi_base(): transform = FALSE. Ensure your data were ",
+      "already asinh-transformed upstream. Applying this function to ",
+      "raw (untransformed) MFI values and then Z-scoring heatmaps will ",
+      "produce misleading results.",
+      call. = FALSE
+    )
+  }
+  
+  # ---------------------------------------------------------------------------
+  # Channel resolution
+  # ---------------------------------------------------------------------------
+  if (is.null(channels)) {
     channels <- select_channels_interactive(gs)
-    if(length(channels) == 0) return(tibble())
-  } else if(length(channels) == 1 && tolower(channels) == "all") {
-    channels <- get_marker_lookup(gs)$colname
-  } else if(length(channels) == 1 && tolower(channels) == "compensated") {
-    lookup <- get_marker_lookup(gs)
-    channels <- lookup %>%
-      dplyr::filter(str_detect(colname, "(?i)comp")) %>%
-      pull(colname)
+    if (length(channels) == 0) return(tibble::tibble())
     
-    if(length(channels) == 0) {
-      warning("No compensated channels found. Skipping MFI analysis.")
-      return(tibble())
+  } else if (length(channels) == 1 && tolower(channels) == "all") {
+    channels <- get_marker_lookup(gs)$colname
+    
+  } else if (length(channels) == 1 && tolower(channels) == "compensated") {
+    lookup   <- get_marker_lookup(gs)
+    channels <- lookup |>
+      dplyr::filter(stringr::str_detect(colname, "(?i)comp")) |>
+      dplyr::pull(colname)
+    
+    if (length(channels) == 0) {
+      warning(
+        "No compensated channels found. Skipping MFI analysis.",
+        call. = FALSE
+      )
+      return(tibble::tibble())
     }
   }
   
-  # Validate channels
+  # ---------------------------------------------------------------------------
+  # Validate channels exist in the GatingSet
+  # ---------------------------------------------------------------------------
   lookup <- get_marker_lookup(gs)
   missing_channels <- setdiff(channels, lookup$colname)
-  if(length(missing_channels) > 0) {
-    stop("Channels not found: ", paste(missing_channels, collapse = ", "))
+  if (length(missing_channels) > 0) {
+    stop(
+      "Channels not found in GatingSet: ",
+      paste(missing_channels, collapse = ", "),
+      call. = FALSE
+    )
   }
   
-  # Extract MFI for all node-sample-channel combinations
-  results <- map_dfr(nodes, function(node) {
-    map_dfr(seq_along(gs), function(i) {
-      sample_name <- sampleNames(gs)[i]
-      gh <- gs[[i]]
+  # ---------------------------------------------------------------------------
+  # Build cofactor lookup — supports per-channel vector or single scalar
+  # ---------------------------------------------------------------------------
+  if (length(cofactor) == 1) {
+    # Scalar: apply same cofactor to all channels
+    cofactor_lookup <- stats::setNames(
+      rep(cofactor, length(channels)),
+      channels
+    )
+  } else {
+    # Named vector: validate names match channels
+    missing_cf <- setdiff(channels, names(cofactor))
+    if (length(missing_cf) > 0) {
+      warning(
+        "No cofactor provided for channels: ",
+        paste(missing_cf, collapse = ", "),
+        ". Using cofactor = 150 for these channels.",
+        call. = FALSE
+      )
+      extra <- stats::setNames(rep(150, length(missing_cf)), missing_cf)
+      cofactor <- c(cofactor, extra)
+    }
+    cofactor_lookup <- cofactor[channels]
+  }
+  
+  # ---------------------------------------------------------------------------
+  # Extract single-cell data, transform, then summarise
+  # ---------------------------------------------------------------------------
+  results <- purrr::map(nodes, function(node) {
+    
+    purrr::map(seq_along(gs), function(i) {
       
-      if(!node %in% gh_get_pop_paths(gh)) return(tibble())
+      sample_name <- flowWorkspace::sampleNames(gs)[i]
+      gh          <- gs[[i]]
       
-      ff <- tryCatch({
-        gh_pop_get_data(gh, node)
-      }, error = function(e) return(NULL))
+      # Skip node if it does not exist in this sample's gating hierarchy
+      if (!node %in% flowWorkspace::gh_get_pop_paths(gh)) {
+        return(tibble::tibble())
+      }
       
-      if(is.null(ff)) return(tibble())
+      # Retrieve expression data for this gate
+      ff <- tryCatch(
+        flowWorkspace::gh_pop_get_data(gh, node),
+        error = function(e) NULL
+      )
+      if (is.null(ff)) return(tibble::tibble())
       
-      expr_data <- if(inherits(ff, "cytoframe")) exprs(ff) else exprs(ff)
-      df <- as.data.frame(expr_data)
+      # exprs() is a direct accessor — avoids unnecessary matrix copy
+      expr_data <- flowCore::exprs(ff)
+      df        <- as.data.frame(expr_data)
       
       available_channels <- intersect(channels, colnames(df))
-      if(length(available_channels) == 0) return(tibble())
+      if (length(available_channels) == 0) return(tibble::tibble())
       
-      map_dfr(available_channels, function(ch) {
-        tibble(
-          Sample = sample_name,
-          Node = node,
+      # -------------------------------------------------------------------
+      # KEY CHANGE: transform single-cell values BEFORE aggregation.
+      # asinh(x / cofactor) is defined for all real numbers, handles the
+      # negative values common in spectral unmixing, and is symmetric
+      # around zero. log(x + 1) is NOT used — it returns NaN for any
+      # value below -1, which routinely occurs in Cytek Aurora data.
+      # -------------------------------------------------------------------
+      purrr::map(available_channels, function(ch) {
+        
+        values <- df[[ch]]
+        
+        if (transform) {
+          cf     <- cofactor_lookup[[ch]]
+          values <- base::asinh(values / cf)
+        }
+        
+        tibble::tibble(
+          Sample  = sample_name,
+          Node    = node,
           colname = ch,
-          MFI = summary_fun(df[[ch]], na.rm = TRUE)
+          MFI     = summary_fun(values, na.rm = TRUE)
         )
-      })
-    })
-  })
+        
+      }) |> purrr::list_rbind()
+      
+    }) |> purrr::list_rbind()
+    
+  }) |> purrr::list_rbind()
   
-  if(nrow(results) == 0) return(tibble())
+  # ---------------------------------------------------------------------------
+  # Return early if nothing was extracted
+  # ---------------------------------------------------------------------------
+  if (nrow(results) == 0) return(tibble::tibble())
   
-  results <- results %>%
-    left_join(lookup, by = "colname") %>%
-    select(Sample, Node, colname, marker, MFI)
+  # ---------------------------------------------------------------------------
+  # Join marker lookup (colname → friendly marker name)
+  # ---------------------------------------------------------------------------
+  results <- results |>
+    dplyr::left_join(
+      lookup |> dplyr::select(colname, marker),
+      by = "colname"
+    ) |>
+    dplyr::select(Sample, Node, colname, marker, MFI)
   
-  # Join with ALL sample metadata (don't assume specific columns exist)
-  pd <- pData(gs) %>% 
-    rownames_to_column("Sample")
+  # ---------------------------------------------------------------------------
+  # Join sample-level metadata (all pData columns, not just assumed keywords)
+  # ---------------------------------------------------------------------------
+  pd <- flowWorkspace::pData(gs) |>
+    tibble::rownames_to_column("Sample")
   
-  results <- results %>%
-    left_join(pd, by = "Sample") %>%
-    mutate(NodeShort = basename(Node))
+  # Check for column conflicts before joining
+  conflict_cols <- intersect(
+    setdiff(names(results), "Sample"),
+    setdiff(names(pd),      "Sample")
+  )
+  if (length(conflict_cols) > 0) {
+    warning(
+      "Column name conflicts between extracted MFI data and pData: ",
+      paste(conflict_cols, collapse = ", "),
+      ". pData columns suffixed with '.meta'.",
+      call. = FALSE
+    )
+    pd <- pd |>
+      dplyr::rename_with(
+        ~ paste0(.x, ".meta"),
+        .cols = dplyr::all_of(conflict_cols)
+      )
+  }
+  
+  results <- results |>
+    dplyr::left_join(pd, by = "Sample") |>
+    dplyr::mutate(NodeShort = basename(Node))
   
   return(results)
 }
@@ -5383,9 +5631,12 @@ apply_scaling_method <- function(heatmap_matrix, scale_method, legend_suffix,
     scaled_matrix <- (heatmap_matrix - global_mean) / global_sd
     legend_title <- "Global Z-score"
   } else if (scale_method == "log") {
-    # Use log(x + 1) transformation to handle zeros and negative values
-    scaled_matrix <- base::log(heatmap_matrix + 1, base = log_base)
-    legend_title <- base::paste0("Log", log_base, "(MFI + 1)")
+    # asinh replaces log(x+1): defined for all reals, handles negatives
+    # cofactor scales the linear region; 150 is a starting point —
+    # run flowVS::estParamFlowVS() per channel for Cytek Aurora data
+    log_cofactor  <- log_base   # reuse the existing UI parameter as cofactor
+    scaled_matrix <- base::asinh(heatmap_matrix / log_cofactor)
+    legend_title  <- base::paste0("asinh(MFI / ", log_cofactor, ")")
   } else if (scale_method == "sqrt") {
     scaled_matrix <- base::sqrt(base::pmax(heatmap_matrix, 0))
     legend_title <- "√MFI"
@@ -7072,6 +7323,9 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
   cat("Tissues found:", base::paste(unique_tissues, collapse = ", "), "\n")
   cat("Congenics found:", base::paste(unique_congenics, collapse = ", "), "\n")
   
+  # -------------------------------------------------------------------------
+  # Build ordered column names: one per tissue × congenic combination
+  # -------------------------------------------------------------------------
   ordered_columns <- base::c()
   tissue_groups   <- base::list()
   
@@ -7085,6 +7339,9 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
     tissue_groups[[tissue]] <- tissue_cols
   }
   
+  # -------------------------------------------------------------------------
+  # Aggregate MFI per marker × tissue × congenic
+  # -------------------------------------------------------------------------
   heatmap_data <- mfi_clean %>%
     dplyr::group_by(marker, tissue_factor, congenics) %>%
     dplyr::summarise(agg_MFI = agg_fun(MFI, na.rm = TRUE), .groups = "drop") %>%
@@ -7096,10 +7353,14 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
     tibble::column_to_rownames("marker") %>%
     base::as.matrix()
   
+  # Fill any missing tissue × congenic columns with NA
   missing_cols <- base::setdiff(ordered_columns, base::colnames(heatmap_matrix))
   if (base::length(missing_cols) > 0) {
-    missing_matrix <- base::matrix(NA, nrow = base::nrow(heatmap_matrix),
-                                   ncol = base::length(missing_cols))
+    missing_matrix <- base::matrix(
+      NA,
+      nrow = base::nrow(heatmap_matrix),
+      ncol = base::length(missing_cols)
+    )
     base::colnames(missing_matrix) <- missing_cols
     base::rownames(missing_matrix) <- base::rownames(heatmap_matrix)
     heatmap_matrix <- base::cbind(heatmap_matrix, missing_matrix)
@@ -7108,12 +7369,15 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
   heatmap_matrix <- heatmap_matrix[, ordered_columns, drop = FALSE]
   
   if (base::nrow(heatmap_matrix) == 0 || base::ncol(heatmap_matrix) == 0) {
-    stop("Empty combined matrix")
+    stop("Empty combined matrix — check mfi_clean for valid data.")
   }
   
   cat("Matrix dimensions:", base::nrow(heatmap_matrix), "x",
       base::ncol(heatmap_matrix), "\n")
   
+  # -------------------------------------------------------------------------
+  # Column annotation metadata
+  # -------------------------------------------------------------------------
   col_data <- base::data.frame(
     tissue_congenic = base::colnames(heatmap_matrix),
     stringsAsFactors = FALSE
@@ -7124,31 +7388,65 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
     ) %>%
     tibble::column_to_rownames("tissue_congenic")
   
-  if (base::length(unique_tissues) <= 11) {
-    tissue_colors <- RColorBrewer::brewer.pal(
-      base::max(3, base::length(unique_tissues)), "Set3"
-    )[1:base::length(unique_tissues)]
-  } else {
-    tissue_colors <- grDevices::rainbow(base::length(unique_tissues))
-  }
-  base::names(tissue_colors) <- unique_tissues
+  # -------------------------------------------------------------------------
+  # Tissue annotation colours — canonical palette with fallback
+  # -------------------------------------------------------------------------
+  raw_tissue_palette <- get_tissue_colors(unique_tissues)
   
-  congenic_colors <- base::c("CD45.1"   = "lightblue",
-                             "CD45.2"   = "lightcoral",
-                             "CD45.1.2" = "lightgreen")
-  congenic_colors <- congenic_colors[base::names(congenic_colors) %in% unique_congenics]
-  if (base::length(unique_congenics) > base::length(congenic_colors)) {
-    additional_colors <- grDevices::rainbow(
-      base::length(unique_congenics) - base::length(congenic_colors)
+  # Identify any tissues not in the canonical set and assign fallback colours
+  unrecognised <- unique_tissues[
+    base::is.na(resolve_tissue_canonical(unique_tissues))
+  ]
+  
+  if (base::length(unrecognised) > 0) {
+    n_fill   <- base::length(unrecognised)
+    fallback <- if (n_fill <= 9) {
+      RColorBrewer::brewer.pal(base::max(3L, n_fill), "Set1")[
+        base::seq_len(n_fill)
+      ]
+    } else {
+      grDevices::rainbow(n_fill)
+    }
+    raw_tissue_palette[unrecognised] <- fallback
+    cat(
+      "Unrecognised tissue label(s) assigned fallback colours:",
+      base::paste(unrecognised, collapse = ", "), "\n"
     )
-    base::names(additional_colors) <- base::setdiff(unique_congenics,
-                                                    base::names(congenic_colors))
+  } else {
+    cat("All tissues matched to canonical colour palette.\n")
+  }
+  
+  tissue_colors <- raw_tissue_palette   # names = original tissue labels
+  
+  # -------------------------------------------------------------------------
+  # Congenic annotation colours
+  # -------------------------------------------------------------------------
+  congenic_colors <- base::c(
+    "CD45.1"   = "lightblue",
+    "CD45.2"   = "lightcoral",
+    "CD45.1.2" = "lightgreen"
+  )
+  congenic_colors <- congenic_colors[
+    base::names(congenic_colors) %in% unique_congenics
+  ]
+  
+  # Extend palette for any congenics not covered by the defaults
+  extra_congenics <- base::setdiff(unique_congenics, base::names(congenic_colors))
+  if (base::length(extra_congenics) > 0) {
+    additional_colors <- grDevices::rainbow(base::length(extra_congenics))
+    base::names(additional_colors) <- extra_congenics
     congenic_colors <- base::c(congenic_colors, additional_colors)
   }
   
+  # -------------------------------------------------------------------------
+  # column_split vector (drives per-tissue section dividers)
+  # -------------------------------------------------------------------------
   tissue_splits        <- base::rep(unique_tissues, each = base::length(unique_congenics))
   base::names(tissue_splits) <- base::colnames(heatmap_matrix)
   
+  # -------------------------------------------------------------------------
+  # Top column annotation
+  # -------------------------------------------------------------------------
   ha_col <- ComplexHeatmap::HeatmapAnnotation(
     Tissue   = col_data$tissue,
     Congenic = col_data$congenic,
@@ -7161,29 +7459,39 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
     which                = "column"
   )
   
-  scaled_result <- apply_scaling_method(heatmap_matrix, scale_method, legend_suffix,
-                                        log_base, percentile_range)
+  # -------------------------------------------------------------------------
+  # Scale / transform the matrix
+  # -------------------------------------------------------------------------
+  scaled_result <- apply_scaling_method(
+    heatmap_matrix, scale_method, legend_suffix,
+    log_base, percentile_range
+  )
   
-  # --- cell_fun: numeric values only when show_cell_values = TRUE ---
-  # Significance is rendered post-draw via overlay_mfi_pvalues_combined().
+  # -------------------------------------------------------------------------
+  # Optional cell-value overlay (numeric labels; stats overlay is post-draw)
+  # -------------------------------------------------------------------------
   cell_function <- NULL
   if (show_cell_values) {
     cell_function <- function(j, i, x, y, width, height, fill) {
       if (!base::is.na(scaled_result$matrix[i, j])) {
         grid::grid.text(
           base::sprintf("%.2f", scaled_result$matrix[i, j]),
-          x, y, gp = grid::gpar(fontsize = 7)
+          x, y,
+          gp = grid::gpar(fontsize = 7)
         )
       }
     }
   }
   
+  # -------------------------------------------------------------------------
+  # Build the ComplexHeatmap object
+  # -------------------------------------------------------------------------
   ht <- ComplexHeatmap::Heatmap(
     scaled_result$matrix,
     name              = scaled_result$legend_title,
     col               = scaled_result$color_function,
     cluster_rows      = cluster_rows,
-    cluster_columns   = FALSE,
+    cluster_columns   = FALSE,        # columns ordered by tissue × congenic
     column_split      = tissue_splits,
     column_gap        = grid::unit(1, "mm"),
     show_row_names    = show_row_names,
@@ -7206,12 +7514,15 @@ create_combined_heatmap_with_stats <- function(mfi_clean, scale_method,
     base::nrow(heatmap_matrix), base::ncol(heatmap_matrix)
   ))
   
-  # Return full list; tissue_order drives column_slice iteration in
-  # overlay_mfi_pvalues_combined() — order must match column_split ordering.
+  # -------------------------------------------------------------------------
+  # Return the full list consumed by draw_mfi_heatmap() and
+  # overlay_mfi_pvalues_combined().
+  # tissue_order must match the column_split ordering.
+  # -------------------------------------------------------------------------
   return(base::list("Combined" = base::list(
-    heatmap      = ht,
-    heatmap_name = scaled_result$legend_title,
-    tissue_order = unique_tissues,
+    heatmap       = ht,
+    heatmap_name  = scaled_result$legend_title,
+    tissue_order  = unique_tissues,   # same order as column_split
     stats_results = stats_results,
     stats_config  = stats_config,
     matrix        = scaled_result$matrix,
@@ -7549,7 +7860,7 @@ create_engraftment_plot <- function(data,
                                     ko_marker = "CD45.1.2",
                                     wt_marker = "CD45.1",
                                     spleen_group = "Spleen",
-                                    fill_colors = c("Spleen" = "white", "SG" = "black", "IEL" = "grey60"),
+                                    fill_colors = NULL,
                                     plot_title = "Engraftment Ratio by Tissue",
                                     x_label = "Tissue",
                                     y_label = "Log2(ratio KO:WT in tissues/spleen)",
@@ -8078,9 +8389,22 @@ create_engraftment_plot <- function(data,
     ) +
     ggplot2::geom_hline(yintercept = 0, linetype = "dashed", color = "black", alpha = 0.5)
   
-  # Add fill colors if provided
-  if(!is.null(fill_colors)) {
-    p <- p + ggplot2::scale_fill_manual(values = fill_colors)
+  resolved_fill_colors <- fill_colors
+  
+  if (base::is.null(resolved_fill_colors)) {
+    auto_colors <- tissue_colors_from_column(
+      congenic_engraftment,
+      group_col
+    )
+    
+    if (!base::is.null(auto_colors)) {
+      resolved_fill_colors <- auto_colors
+      cat("Auto-applied tissue colour palette to engraftment plot.\n")
+    }
+  }
+  
+  if (!base::is.null(resolved_fill_colors)) {
+    p <- p + ggplot2::scale_fill_manual(values = resolved_fill_colors)
   }
   
   # Add statistical annotations if available
@@ -9391,222 +9715,247 @@ extract_single_cell_data <- function(gs, nodes, selected_markers,
 # ENHANCED UMAP COMPUTATION (ROBUST ERROR HANDLING)
 # ============================================================================
 
-compute_umap_embedding <- function(single_cell_data, 
-                                   n_neighbors = 15, 
-                                   min_dist = 0.1, 
-                                   n_components = 2,
-                                   transform_data = "asinh",
-                                   markers_for_umap = NULL) {
+apply_flow_transformation <- function(data_matrix, method, cofactor = NULL) {
   
-  cat("Computing UMAP embedding using uwot package...\n")
-  
-  if (!requireNamespace("uwot", quietly = TRUE)) {
-    stop("uwot package required. Install with: install.packages('uwot')")
-  }
-  
-  metadata_cols <- c("Sample", "CellID")
-  if(!is.null(single_cell_data$sample_metadata)) {
-    metadata_cols <- c(metadata_cols, names(single_cell_data$sample_metadata))
-  }
-  
-  all_cols <- names(single_cell_data$data)
-  numeric_cols <- all_cols[purrr::map_lgl(all_cols, ~is.numeric(single_cell_data$data[[.x]]))]
-  all_marker_cols <- setdiff(numeric_cols, metadata_cols)
-  
-  # Determine which markers to use for UMAP computation
-  if (is.null(markers_for_umap)) {
-    markers_for_umap <- all_marker_cols
-  }
-  
-  cat("Total markers in dataset:", length(all_marker_cols), "\n")
-  cat("Markers used for UMAP calculation:", length(markers_for_umap), "\n")
-  cat("UMAP markers:", paste(markers_for_umap, collapse = ", "), "\n")
-  
-  if (length(setdiff(all_marker_cols, markers_for_umap)) > 0) {
-    unused_markers <- setdiff(all_marker_cols, markers_for_umap)
-    cat("Markers retained but NOT used for UMAP:", length(unused_markers), "\n")
-    cat("Unused markers:", paste(head(unused_markers, 10), collapse = ", "))
-    if (length(unused_markers) > 10) cat(", ...")
-    cat("\n")
-  }
-  
-  # Extract matrix for UMAP computation (only selected markers)
-  umap_matrix <- single_cell_data$data %>%
-    dplyr::select(all_of(markers_for_umap)) %>%
-    as.matrix()
-  
-  cat("Data range before transformation: [", min(umap_matrix, na.rm = TRUE), ", ", 
-      max(umap_matrix, na.rm = TRUE), "]\n")
-  
-  if(any(is.na(umap_matrix))) {
-    n_na <- sum(is.na(umap_matrix))
-    cat("Warning:", n_na, "NA values found in data. These will be handled.\n")
-  }
-  
-  # Apply transformation
-  if(transform_data == "asinh") {
-    umap_matrix <- asinh(umap_matrix / 5)
-    cat("Applied asinh transformation (cofactor = 5)\n")
+  if (method == "asinh") {
     
-  } else if(transform_data == "log10") {
-    min_val <- min(umap_matrix, na.rm = TRUE)
+    data_range <- base::range(data_matrix, na.rm = TRUE)
+    cat(base::sprintf(
+      "Data range before transformation: [ %.5g ,  %.5g ]\n",
+      data_range[1], data_range[2]
+    ))
     
-    if(min_val <= 0) {
-      shift_amount <- abs(min_val) + 1
-      cat("Shifting data by", shift_amount, "to handle negative/zero values\n")
-      umap_matrix <- umap_matrix + shift_amount
-    } else {
-      umap_matrix <- umap_matrix + 1
+    if (base::is.null(cofactor)) {
+      
+      # Suggest cofactor based on data magnitude
+      suggested <- dplyr::case_when(
+        data_range[2] > 10000 ~ 500,
+        data_range[2] > 1000  ~ 150,
+        data_range[2] > 100   ~ 50,
+        TRUE                  ~ 5
+      )
+      
+      cat("\nasinh cofactor selection:\n")
+      cat("  Suggested based on data range:", suggested, "\n")
+      cat("  Guidance:\n")
+      cat("    5   — CyTOF (ion counts, range ~0-1000)\n")
+      cat("    50  — Flow, pre-scaled/normalised data\n")
+      cat("    150 — Flow, compensated MFI (RECOMMENDED for this data)\n")
+      cat("    500 — Flow, large dynamic range (e.g., high-expression markers)\n")
+      cat(base::sprintf("Enter cofactor (default %d): ", suggested))
+      
+      user_input <- base::readline()
+      cofactor <- if (base::trimws(user_input) == "") {
+        suggested
+      } else {
+        base::suppressWarnings(base::as.numeric(user_input))
+      }
+      
+      if (base::is.na(cofactor) || cofactor <= 0) {
+        base::message("Invalid cofactor entered, using suggested: ", suggested)
+        cofactor <- suggested
+      }
     }
     
-    umap_matrix <- log10(umap_matrix)
-    cat("Applied log10 transformation\n")
+    transformed <- base::asinh(data_matrix / cofactor)
+    cat("Applied asinh transformation (cofactor =", cofactor, ")\n")
     
-  } else if(transform_data == "sqrt") {
-    if(any(umap_matrix < 0, na.rm = TRUE)) {
-      min_val <- min(umap_matrix, na.rm = TRUE)
-      shift_amount <- abs(min_val)
-      cat("Shifting data by", shift_amount, "to handle negative values for sqrt\n")
-      umap_matrix <- umap_matrix + shift_amount
-    }
+  } else if (method == "log10") {
+    # log10 is not safe for negative spectral values; use asinh instead
+    # and fall through to the same cofactor prompt used by method == "asinh"
+    base::warning(
+      "log10 is not appropriate for spectral flow data with negative values.\n",
+      "Switching to asinh transformation automatically."
+    )
+    method      <- "asinh"  # redirect to the asinh branch
+    cofactor    <- NULL     # triggers interactive cofactor prompt
+    transformed <- base::asinh(data_matrix / cofactor)
     
-    umap_matrix <- sqrt(umap_matrix)
-    cat("Applied square root transformation\n")
+  } else if (method == "sqrt") {
+    
+    data_range <- base::range(data_matrix, na.rm = TRUE)
+    cat(base::sprintf(
+      "Data range before transformation: [ %.5g ,  %.5g ]\n",
+      data_range[1], data_range[2]
+    ))
+    shift       <- if (data_range[1] < 0) base::abs(data_range[1]) else 0
+    transformed <- base::sqrt(data_matrix + shift)
+    cat("Applied sqrt transformation (shift =", shift, ")\n")
+    cofactor    <- NULL
     
   } else {
-    cat("No transformation applied\n")
+    transformed <- data_matrix
+    cat("No transformation applied.\n")
+    cofactor    <- NULL
   }
   
-  # Check for NaN/Inf values after transformation
-  if(any(is.nan(umap_matrix)) || any(is.infinite(umap_matrix))) {
-    n_nan <- sum(is.nan(umap_matrix))
-    n_inf <- sum(is.infinite(umap_matrix))
-    
-    if(n_nan > 0) cat("Error: Found", n_nan, "NaN values after transformation\n")
-    if(n_inf > 0) cat("Error: Found", n_inf, "infinite values after transformation\n")
-    
-    # Replace NaN and Inf with median values
-    for(i in 1:ncol(umap_matrix)) {
-      col_data <- umap_matrix[, i]
-      if(any(is.nan(col_data) | is.infinite(col_data))) {
-        median_val <- median(col_data[is.finite(col_data)], na.rm = TRUE)
-        if(is.na(median_val)) median_val <- 0
-        
-        umap_matrix[is.nan(col_data) | is.infinite(col_data), i] <- median_val
-        cat("Replaced problematic values in", markers_for_umap[i], "with median:", median_val, "\n")
-      }
-    }
+  post_range <- base::range(transformed, na.rm = TRUE)
+  cat(base::sprintf(
+    "Data range after transformation: [ %.5g ,  %.5g ]\n",
+    post_range[1], post_range[2]
+  ))
+  
+  base::list(
+    matrix   = transformed,
+    method   = method,
+    cofactor = cofactor
+  )
+}
+
+# --- HELPER: get_transform_cofactor() ---
+# Use in clustering MFI functions to pull the stored cofactor.
+# Falls back to 150 (flow MFI default), NOT 5 (CyTOF default).
+
+get_transform_cofactor <- function(umap_result) {
+  umap_result$transformation_params$cofactor %||% 150L
+}
+
+compute_umap_embedding <- function(single_cell_data,
+                                   n_neighbors      = 15,
+                                   min_dist         = 0.1,
+                                   n_components     = 2,
+                                   transform_data   = "asinh",
+                                   markers_for_umap = NULL,
+                                   seed             = 7777777) {
+  
+  # -------------------------------------------------------------------------
+  # Input validation
+  # -------------------------------------------------------------------------
+  if (base::is.null(single_cell_data) ||
+      !base::is.list(single_cell_data) ||
+      !"data" %in% base::names(single_cell_data)) {
+    stop("single_cell_data must be a list with a $data element.")
   }
   
-  # Final check for remaining NA values
-  if(any(is.na(umap_matrix))) {
-    for(i in 1:ncol(umap_matrix)) {
-      col_data <- umap_matrix[, i]
-      if(any(is.na(col_data))) {
-        median_val <- median(col_data, na.rm = TRUE)
-        if(is.na(median_val)) median_val <- 0
-        
-        umap_matrix[is.na(col_data), i] <- median_val
-        cat("Replaced NA values in", markers_for_umap[i], "with median:", median_val, "\n")
-      }
-    }
+  full_data    <- single_cell_data$data
+  all_markers  <- single_cell_data$marker_names
+  
+  # -------------------------------------------------------------------------
+  # Resolve which markers to use for UMAP calculation
+  # markers_for_umap may be a character vector OR a lookup tibble
+  # -------------------------------------------------------------------------
+  if (base::is.null(markers_for_umap)) {
+    markers_for_umap <- all_markers
   }
   
-  cat("Data range after transformation: [", min(umap_matrix), ", ", max(umap_matrix), "]\n")
+  if (base::is.data.frame(markers_for_umap) &&
+      "marker" %in% base::names(markers_for_umap)) {
+    markers_for_umap <- markers_for_umap$marker
+  }
   
-  # Run UMAP using uwot
+  # Intersect with columns actually present in data
+  available_markers <- base::intersect(markers_for_umap, base::colnames(full_data))
+  
+  if (base::length(available_markers) == 0) {
+    stop("No valid marker columns found in data matching markers_for_umap.")
+  }
+  
+  missing_markers <- base::setdiff(markers_for_umap, available_markers)
+  if (base::length(missing_markers) > 0) {
+    base::warning(
+      base::length(missing_markers),
+      " marker(s) specified for UMAP not found in data and will be skipped: ",
+      base::paste(missing_markers, collapse = ", ")
+    )
+  }
+  
+  cat("Computing UMAP embedding using uwot package...\n")
+  cat("Total markers in dataset:", base::length(all_markers), "\n")
+  cat("Markers used for UMAP calculation:", base::length(available_markers), "\n")
+  cat("UMAP markers:", base::paste(available_markers, collapse = ", "), "\n")
+  
+  # -------------------------------------------------------------------------
+  # Extract numeric matrix for UMAP
+  # -------------------------------------------------------------------------
+  umap_matrix <- full_data |>
+    dplyr::select(dplyr::all_of(available_markers)) |>
+    base::as.matrix()
+  
+  # -------------------------------------------------------------------------
+  # Transformation — interactive cofactor selection for asinh
+  # -------------------------------------------------------------------------
+  transform_result <- apply_flow_transformation(
+    data_matrix = umap_matrix,
+    method      = transform_data,
+    cofactor    = NULL    # NULL triggers interactive prompt for asinh
+  )
+  
+  umap_matrix_transformed <- transform_result$matrix
+  used_cofactor            <- transform_result$cofactor
+  used_method              <- transform_result$method
+  
+  # -------------------------------------------------------------------------
+  # Compute UMAP via uwot
+  # -------------------------------------------------------------------------
   cat("Running UMAP with uwot package:\n")
   cat("  n_neighbors =", n_neighbors, "\n")
   cat("  min_dist =", min_dist, "\n")
   cat("  n_components =", n_components, "\n")
-  cat("  seed = 7777777\n")
+  cat("  seed =", seed, "\n")
   
-  # Set seed for reproducibility
-  set.seed(7777777)
-  
-  tryCatch({
-    umap_result <- uwot::umap(
-      X = umap_matrix,
-      n_neighbors = n_neighbors,
-      min_dist = min_dist,
-      n_components = n_components,
-      metric = "euclidean",
-      ret_model = FALSE,
-      verbose = TRUE
-    )
-  }, error = function(e) {
-    cat("UMAP failed with error:", e$message, "\n")
-    cat("Trying with scaled data...\n")
-    
-    # Try with scaled data as fallback
-    umap_matrix_scaled <- scale(umap_matrix)
-    
-    # Replace any NaN values from scaling
-    if(any(is.nan(umap_matrix_scaled))) {
-      umap_matrix_scaled[is.nan(umap_matrix_scaled)] <- 0
-    }
-    
-    # Set seed again for fallback
-    set.seed(7777777)
-    
-    umap_result <- uwot::umap(
-      X = umap_matrix_scaled,
-      n_neighbors = n_neighbors,
-      min_dist = min_dist,
-      n_components = n_components,
-      metric = "euclidean",
-      ret_model = FALSE,
-      verbose = TRUE
-    )
-    cat("UMAP successful with scaled data\n")
-    return(umap_result)
-  }) -> umap_result
-  
-  # Add UMAP coordinates to original data (keeping ALL markers)
-  umap_data <- single_cell_data$data %>%
-    dplyr::mutate(
-      UMAP1 = umap_result[, 1],
-      UMAP2 = umap_result[, 2]
-    )
-  
-  if(n_components > 2) {
-    for(i in 3:n_components) {
-      umap_data[[paste0("UMAP", i)]] <- umap_result[, i]
-    }
-  }
+  base::set.seed(seed)
+  umap_coords <- uwot::umap(
+    X           = umap_matrix_transformed,
+    n_neighbors = n_neighbors,
+    min_dist    = min_dist,
+    n_components = n_components,
+    metric      = "euclidean",
+    n_threads   = base::max(1L, parallel::detectCores() - 1L),
+    verbose     = TRUE
+  )
   
   cat("UMAP computation complete!\n")
-  cat("Final dataset contains:\n")
-  cat("  - UMAP coordinates:", n_components, "dimensions\n")
-  cat("  - Markers used for UMAP:", length(markers_for_umap), "\n")
-  cat("  - Total markers retained:", length(all_marker_cols), "\n")
   
-  # return(list(
-  #   data = umap_data,
-  #   embedding = umap_result,
-  #   marker_names = all_marker_cols,  # ALL markers
-  #   markers_used_for_umap = markers_for_umap,  # Only markers used for UMAP
-  #   markers_not_used = setdiff(all_marker_cols, markers_for_umap),
-  #   config = list(
-  #     n_neighbors = n_neighbors,
-  #     min_dist = min_dist,
-  #     n_components = n_components
-  #   ),
-  #   transformation = transform_data
-  return(base::list(
-    data                 = umap_data,
-    embedding            = umap_result,
-    marker_names         = markers_for_umap,   # only the selected/clean markers
-    markers_used_for_umap = markers_for_umap,
-    markers_not_used     = base::setdiff(all_marker_cols, markers_for_umap),
-    config               = base::list(
+  # -------------------------------------------------------------------------
+  # Assemble output tibble
+  # Retains ALL columns from full_data (including non-UMAP markers retained
+  # by user) plus UMAP_1 / UMAP_2 coordinates.
+  # -------------------------------------------------------------------------
+  umap_df <- full_data |>
+    tibble::add_column(
+      UMAP1 = umap_coords[, 1],
+      UMAP2 = umap_coords[, 2]
+    )
+  
+  # -------------------------------------------------------------------------
+  # Identify metadata columns (non-marker columns)
+  # -------------------------------------------------------------------------
+  non_marker_cols <- base::setdiff(
+    base::colnames(umap_df),
+    c(all_markers, "UMAP1", "UMAP2")
+  )
+  
+  cat("Final dataset contains:\n")
+  cat("  - UMAP coordinates: 2 dimensions\n")
+  cat("  - Markers used for UMAP:", base::length(available_markers), "\n")
+  cat("  - Total markers retained:", base::length(all_markers), "\n")
+  
+  # -------------------------------------------------------------------------
+  # Return
+  # transformation_params is stored here so that downstream functions
+  # (clustering MFI heatmaps, violin plots) can apply the IDENTICAL
+  # transformation rather than using a hardcoded cofactor.
+  # -------------------------------------------------------------------------
+  base::list(
+    data                  = umap_df,
+    umap_coords           = umap_coords,
+    markers_used          = available_markers,
+    marker_names          = all_markers,
+    metadata_cols         = non_marker_cols,
+    params                = base::list(
       n_neighbors  = n_neighbors,
       min_dist     = min_dist,
-      n_components = n_components
+      n_components = n_components,
+      seed         = seed
     ),
-    transformation = transform_data
-  ))
+    transformation_params = base::list(
+      method   = used_method,
+      cofactor = used_cofactor    # NULL if method != "asinh"
+    )
+  )
 }
+
+
 
 # ============================================================================
 # GLOBAL SESSION ENVIRONMENT
@@ -9808,108 +10157,208 @@ select_visualization_variable <- function(marker_names, metadata_cols,
 }
 
 # Create and save UMAP plot function
-create_and_save_umap_plot <- function(color_by = NULL, facet_by = NULL, 
-                                      title = NULL, filename = NULL, 
+create_and_save_umap_plot <- function(color_by = NULL, facet_by = NULL,
+                                      title = NULL, filename = NULL,
                                       plot_type = "scatter") {
   
   umap_data <- .umap_session_plots$umap_data
   
-  if (is.null(title)) {
+  # -------------------------------------------------------------------------
+  # Auto-generate title from coloring / faceting choices
+  # -------------------------------------------------------------------------
+  if (base::is.null(title)) {
     title_parts <- c("UMAP")
-    if (!is.null(color_by)) title_parts <- c(title_parts, paste("colored by", color_by))
-    if (!is.null(facet_by)) title_parts <- c(title_parts, paste("faceted by", facet_by))
-    title <- paste(title_parts, collapse = " ")
+    if (!base::is.null(color_by)) {
+      title_parts <- c(title_parts, base::paste("colored by", color_by))
+    }
+    if (!base::is.null(facet_by)) {
+      title_parts <- c(title_parts, base::paste("faceted by", facet_by))
+    }
+    title <- base::paste(title_parts, collapse = " ")
   }
   
-  p <- ggplot(umap_data, aes(x = UMAP1, y = UMAP2))
+  # -------------------------------------------------------------------------
+  # Base ggplot canvas
+  # -------------------------------------------------------------------------
+  p <- ggplot2::ggplot(umap_data, ggplot2::aes(x = UMAP1, y = UMAP2))
   
+  # -------------------------------------------------------------------------
+  # DENSITY plot branch (unchanged)
+  # -------------------------------------------------------------------------
   if (plot_type == "density") {
-    p <- p + 
-      stat_density_2d_filled(alpha = 0.7) +
-      scale_fill_viridis_d(option = "plasma") +
-      theme_void() +
-      theme(legend.position = "none")
+    p <- p +
+      ggplot2::stat_density_2d_filled(alpha = 0.7) +
+      ggplot2::scale_fill_viridis_d(option = "plasma") +
+      ggplot2::theme_void() +
+      ggplot2::theme(legend.position = "none")
     
+    # -------------------------------------------------------------------------
+    # SCATTER plot branch
+    # -------------------------------------------------------------------------
   } else {
-    # Regular scatter plot
-    if (is.null(color_by)) {
-      p <- p + geom_point(color = "steelblue", alpha = 0.6, size = 0.3)
+    
+    if (base::is.null(color_by)) {
+      # ── No colour variable: plain steelblue ──────────────────────────────
+      p <- p +
+        ggplot2::geom_point(color = "steelblue", alpha = 0.6, size = 0.3)
+      
     } else {
-      if (color_by %in% .umap_session_plots$marker_names) {
-        # Marker expression - continuous scale
-        p <- p + 
-          geom_point(aes_string(color = color_by), alpha = 0.6, size = 0.3) +
-          scale_color_viridis_c(option = "plasma") +
-          guides(color = guide_colorbar())
+      
+      is_marker <- color_by %in% .umap_session_plots$marker_names
+      is_tissue <- .is_tissue_column(color_by)
+      
+      if (is_marker) {
+        # ── Continuous marker expression: viridis plasma ──────────────────
+        p <- p +
+          ggplot2::geom_point(
+            ggplot2::aes(color = .data[[color_by]]),
+            alpha = 0.6,
+            size  = 0.3
+          ) +
+          ggplot2::scale_color_viridis_c(option = "plasma") +
+          ggplot2::guides(color = ggplot2::guide_colorbar())
+        
+      } else if (is_tissue) {
+        # ── Tissue metadata column: canonical tissue palette ─────────────
+        tissue_pal <- tissue_colors_from_column(umap_data, color_by)
+        
+        if (!base::is.null(tissue_pal)) {
+          p <- p +
+            ggplot2::geom_point(
+              ggplot2::aes(color = .data[[color_by]]),
+              alpha = 0.6,
+              size  = 0.3
+            ) +
+            ggplot2::scale_color_manual(values = tissue_pal) +
+            ggplot2::guides(
+              color = ggplot2::guide_legend(
+                override.aes = base::list(size = 2, alpha = 1)
+              )
+            )
+          cat("Applied tissue colour palette for column:", color_by, "\n")
+          
+        } else {
+          # Tissue-named column but labels not recognised — default discrete
+          cat(
+            "Column '", color_by,
+            "' looks like a tissue column but no labels were matched.",
+            "Falling back to default ggplot2 discrete palette.\n",
+            sep = ""
+          )
+          p <- p +
+            ggplot2::geom_point(
+              ggplot2::aes(color = .data[[color_by]]),
+              alpha = 0.6,
+              size  = 0.3
+            ) +
+            ggplot2::guides(
+              color = ggplot2::guide_legend(
+                override.aes = base::list(size = 2, alpha = 1)
+              )
+            )
+        }
+        
       } else {
-        # Metadata - discrete scale
-        p <- p + 
-          geom_point(aes_string(color = color_by), alpha = 0.6, size = 0.3) +
-          guides(color = guide_legend(override.aes = list(size = 2, alpha = 1)))
+        # ── Generic discrete metadata column: default ggplot2 palette ────
+        p <- p +
+          ggplot2::geom_point(
+            ggplot2::aes(color = .data[[color_by]]),
+            alpha = 0.6,
+            size  = 0.3
+          ) +
+          ggplot2::guides(
+            color = ggplot2::guide_legend(
+              override.aes = base::list(size = 2, alpha = 1)
+            )
+          )
       }
     }
   }
   
-  # Add faceting if specified
-  if (!is.null(facet_by)) {
-    # For marker faceting, create discrete bins
+  # -------------------------------------------------------------------------
+  # Faceting (unchanged logic; tissue column auto-colours its strip labels
+  # via the colour scale already applied above)
+  # -------------------------------------------------------------------------
+  if (!base::is.null(facet_by)) {
+    
     if (facet_by %in% .umap_session_plots$marker_names) {
+      # Bin continuous marker values into Low / Medium / High facets
       marker_values <- umap_data[[facet_by]]
-      breaks <- quantile(marker_values, probs = c(0, 0.33, 0.67, 1), na.rm = TRUE)
-      umap_data[[paste0(facet_by, "_level")]] <- cut(marker_values, 
-                                                     breaks = breaks,
-                                                     labels = c("Low", "Medium", "High"),
-                                                     include.lowest = TRUE)
-      p <- p + facet_wrap(as.formula(paste("~", paste0(facet_by, "_level"))), scales = "free")
+      breaks <- stats::quantile(
+        marker_values,
+        probs = base::c(0, 0.33, 0.67, 1),
+        na.rm = TRUE
+      )
+      umap_data[[base::paste0(facet_by, "_level")]] <- base::cut(
+        marker_values,
+        breaks         = breaks,
+        labels         = base::c("Low", "Medium", "High"),
+        include.lowest = TRUE
+      )
+      p <- p + ggplot2::facet_wrap(
+        stats::as.formula(base::paste("~", base::paste0(facet_by, "_level"))),
+        scales = "free"
+      )
+      
     } else {
-      p <- p + facet_wrap(as.formula(paste("~", facet_by)), scales = "free")
+      p <- p + ggplot2::facet_wrap(
+        stats::as.formula(base::paste("~", facet_by)),
+        scales = "free"
+      )
     }
   }
   
-  # Apply theme
+  # -------------------------------------------------------------------------
+  # Shared theme
+  # -------------------------------------------------------------------------
   p <- p +
-    labs(title = title) +
-    theme_minimal() +
-    theme(
-      legend.position = "right",
-      panel.grid = element_blank(),
-      axis.text = element_blank(),
-      axis.ticks = element_blank(),
-      plot.title = element_text(hjust = 0.5)
+    ggplot2::labs(title = title) +
+    ggplot2::theme_minimal() +
+    ggplot2::theme(
+      legend.position  = "right",
+      panel.grid       = ggplot2::element_blank(),
+      axis.text        = ggplot2::element_blank(),
+      axis.ticks       = ggplot2::element_blank(),
+      plot.title       = ggplot2::element_text(hjust = 0.5)
     )
   
-  if (!is.null(facet_by)) {
-    p <- p + theme(
-      strip.background = element_rect(fill = "lightgray", color = "black"),
-      strip.text = element_text(face = "bold")
+  if (!base::is.null(facet_by)) {
+    p <- p + ggplot2::theme(
+      strip.background = ggplot2::element_rect(fill = "lightgray", color = "black"),
+      strip.text       = ggplot2::element_text(face = "bold")
     )
   }
   
   print(p)
   
-  # Store plot
-  .umap_session_plots$plot_counter <<- .umap_session_plots$plot_counter + 1
-  plot_id <- paste0("plot_", .umap_session_plots$plot_counter)
+  # -------------------------------------------------------------------------
+  # Store plot in session environment
+  # -------------------------------------------------------------------------
+  .umap_session_plots$plot_counter <<-
+    .umap_session_plots$plot_counter + 1L
   
-  plot_info <- list(
-    plot = p,
-    color_by = color_by,
-    facet_by = facet_by,
+  plot_id <- base::paste0("plot_", .umap_session_plots$plot_counter)
+  
+  plot_info <- base::list(
+    plot      = p,
+    color_by  = color_by,
+    facet_by  = facet_by,
     plot_type = plot_type,
-    title = title,
-    timestamp = Sys.time()
+    title     = title,
+    timestamp = base::Sys.time()
   )
   
   .umap_session_plots$plots[[plot_id]] <<- plot_info
   
-  # Save if filename provided
-  if (!is.null(filename) && filename != "") {
-    if (!str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
-      filename <- paste0(filename, ".png")
+  # -------------------------------------------------------------------------
+  # Optional file save
+  # -------------------------------------------------------------------------
+  if (!base::is.null(filename) && filename != "") {
+    if (!stringr::str_detect(filename, "\\.(png|pdf|jpg|jpeg|tiff|svg)$")) {
+      filename <- base::paste0(filename, ".png")
     }
-    
-    tryCatch({
-      ggsave(filename, plot = p, width = 10, height = 8, dpi = 300)
+    base::tryCatch({
+      ggplot2::ggsave(filename, plot = p, width = 10, height = 8, dpi = 300)
       cat("Plot saved as:", filename, "\n")
     }, error = function(e) {
       cat("Error saving plot:", e$message, "\n")
